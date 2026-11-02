@@ -101,4 +101,6 @@ jobs:
           $notes = (Get-Content -Raw CHANGELOG.md) -split '(?m)^## ' | Where-Object { $_ -like "$v*" } | Select-Object -First 1
           if (-not $notes) { $notes = "Sleuth $v" } else { $notes = ($notes -split "`n", 2)[1].Trim() }
           ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/v$v/$n" -Notes $notes -Out out/latest.json
-          gh release create "v$v" --repo $repo --title "Sleuth $v" --notes $notes "out/$n" out/latest.json
+          # A copy under a fixed name, so ".../releases/latest/download/Sleuth_x64-setup.exe" always works.
+          Copy-Item "out/$n" out/Sleuth_x64-setup.exe
+          gh release create "v$v" --repo $repo --title "Sleuth $v" --notes $notes "out/$n" out/Sleuth_x64-setup.exe out/latest.json

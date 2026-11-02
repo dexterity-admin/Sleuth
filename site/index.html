@@ -7,7 +7,7 @@
 <meta name="description" content="Sleuth reads scanned isometrics, P&IDs and plotted PDFs on every office drive, and opens the sheet with the tag you typed ringed in red.">
 <meta property="og:title" content="Sleuth — drawing search">
 <meta property="og:description" content="Type a line number. Sleuth opens the scanned sheet with the tag ringed in red.">
-<meta property="og:image" content="https://dexterity-admin.github.io/Sleuth/assets/og.png">
+<meta property="og:image" content="https://dexterity-admin.github.io/Sleuth/assets/og.jpg">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="assets/icon.png">
@@ -35,8 +35,8 @@
 * { box-sizing: border-box; }
 html { background: var(--paper); }
 body { margin: 0; color: var(--ink); font: 17px/1.6 var(--sans); background: var(--paper); overflow-x: hidden; }
-body::before { /* paper grain */
-  content: ""; position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: .5; mix-blend-mode: multiply;
+body::before { /* paper grain: a static layer with no blending, so scrolling stays cheap */
+  content: ""; position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: .45; will-change: transform;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .45  0 0 0 0 .42  0 0 0 0 .36  0 0 0 .09 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
 }
 a { color: inherit; }
@@ -57,7 +57,8 @@ img { max-width: 100%; display: block; }
 .zones.left, .zones.right { top: calc(var(--frame) + 6px); bottom: calc(var(--frame) + 6px); width: 14px; flex-direction: column; align-items: center; }
 .zones.left { left: 0; } .zones.right { right: 0; }
 .zone-now { position: absolute; right: calc(var(--frame) + 14px); bottom: calc(var(--frame) + 12px); font: 700 11px var(--mono); background: var(--sheet); border: 1px solid var(--ink); padding: 4px 8px; letter-spacing: .08em; }
-@media (max-width: 700px) { :root { --frame: 6px; } .zones, .zone-now { display: none; } }
+@media (max-width: 700px) { :root { --frame: 6px; } .zones { display: none; } }
+@media (max-width: 1360px) { .zone-now { display: none; } }
 
 /* ---- nav as a strip of the title block ---- */
 nav { position: fixed; z-index: 55; top: calc(var(--frame) + 8px); left: calc(var(--frame) + 8px); right: calc(var(--frame) + 8px); }
@@ -74,7 +75,10 @@ nav .get:hover { background: var(--red); color: #fff; }
 /* ---- shared parts ---- */
 section { position: relative; padding: 120px 0; scroll-margin-top: 80px; }
 .label { font: 700 12px var(--mono); letter-spacing: .14em; color: var(--ink-3); text-transform: uppercase; display: flex; gap: 12px; align-items: center; }
-.label b { color: var(--red); }
+.label { flex-wrap: wrap; row-gap: 2px; }
+.label b { color: var(--red); white-space: nowrap; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.hero .facts, .hero .label { color: var(--ink-2); }
 h1, h2 { font-family: var(--draft); font-weight: 700; text-transform: uppercase; letter-spacing: .02em; line-height: .95; margin: 14px 0 18px; text-wrap: balance; }
 h2 { font-size: clamp(40px, 5.4vw, 76px); }
 .lead { font-size: clamp(18px, 1.6vw, 21px); color: var(--ink-2); max-width: 60ch; margin: 0; }
@@ -105,7 +109,11 @@ table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); bo
 .hero .cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 26px; }
 .stage { position: absolute; inset: 0; perspective: 2200px; perspective-origin: 70% 30%; }
 .sheet { position: absolute; left: 45%; top: 14%; width: min(1000px, 52vw); aspect-ratio: var(--ar, 1.415); transform-origin: 50% 50%; transform: rotateX(48deg) rotateZ(-9deg) translateZ(-60px); box-shadow: 0 50px 60px -30px rgba(40, 34, 20, .45), 0 2px 0 rgba(0, 0, 0, .05); background: var(--sheet); will-change: transform; }
-.sheet img { width: 100%; height: 100%; object-fit: cover; filter: sepia(.18) contrast(1.05); }
+.paper { position: absolute; inset: 0; background: var(--sheet); }
+.paper img { width: 100%; height: 100%; object-fit: cover; filter: sepia(.18) contrast(1.05); }
+.pile { position: absolute; inset: 0; background: var(--sheet); border: 1px solid var(--rule); }
+.pile.p1 { transform: translate(14px, 12px) rotate(1.6deg); }
+.pile.p2 { transform: translate(-12px, 22px) rotate(-2.2deg); background: #f4f1e7; }
 .sheet::after { content: ""; position: absolute; inset: 0; background: linear-gradient(105deg, rgba(255, 255, 255, .35), transparent 35%, rgba(0, 0, 0, .06)); pointer-events: none; }
 .sheet svg, .pg svg, .ba svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .ocrbox { fill: rgba(57, 70, 143, .07); stroke: var(--violet); stroke-width: 1.3; vector-effect: non-scaling-stroke; opacity: 0; }
@@ -116,16 +124,21 @@ table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); bo
 .titleblock .row:last-child { border-bottom: 0; }
 .titleblock .k { padding: 8px 10px; border-right: 1px solid var(--rule-2); font: 700 10px var(--mono); letter-spacing: .12em; color: var(--ink-3); text-transform: uppercase; }
 .titleblock .v { padding: 8px 12px; }
-.titleblock .q { font: 700 19px var(--mono); min-height: 28px; display: flex; align-items: center; }
-.titleblock .q::after { content: ""; width: 2px; height: 20px; background: var(--red); margin-left: 3px; animation: caret 1s steps(1) infinite; }
+.titleblock .q { width: 100%; border: 0; outline: 0; background: transparent; font: 700 19px var(--mono); color: var(--ink); padding: 0; caret-color: var(--red); }
+.titleblock .q::placeholder { color: var(--rule-2); }
+.titleblock .row:first-child:focus-within { box-shadow: inset 0 0 0 2px var(--red); }
+.titleblock .hint button { font: 12px var(--mono); border: 1px dashed var(--rule-2); background: none; padding: 2px 6px; margin: 0 4px 2px 0; cursor: pointer; color: var(--ink); }
+.titleblock .hint button:hover { border: 1px solid var(--red); color: var(--red); }
 .titleblock .res { font: 13px var(--mono); color: var(--ink-2); }
 .titleblock .res b { color: var(--red); }
 @keyframes caret { 50% { opacity: 0; } }
 .note-pen { position: absolute; z-index: 4; font: 600 27px var(--pen); color: var(--red); transform: rotate(-4deg); white-space: nowrap; opacity: 0; }
 @media (max-width: 900px) {
-  .hero { height: auto; max-height: none; min-height: 0; padding: 112px 0 40px; }
-  .hero .copy { position: relative; left: 0; top: 0; width: auto; padding: 0 28px; }
-  .stage { position: relative; height: 64vw; margin-top: 26px; perspective-origin: 50% 0; }
+  .hero { height: auto; max-height: none; min-height: 0; padding: 104px 0 40px; display: flex; flex-direction: column; }
+  .hero .copy { display: contents; }
+  .hero .copy > * { margin-left: 28px; margin-right: 28px; }
+  .hero .label { order: 1; } .hero h1 { order: 2; font-size: clamp(34px, 9vw, 48px); } .stage { order: 3; } .hero .lead { order: 4; margin-top: 18px; } .hero .cta { order: 5; } .hero .facts { order: 6; } .titleblock { order: 7; }
+  .stage { position: relative; height: 62vw; margin-top: 8px; perspective-origin: 50% 0; }
   .sheet { left: 5%; top: 6%; width: 90%; transform: rotateX(30deg) rotateZ(-4deg); }
   .titleblock { position: relative; right: auto; bottom: auto; width: auto; margin: 10px 28px 0; }
   .note-pen { display: none; }
@@ -172,7 +185,17 @@ table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); bo
 /* ---- before / after ---- */
 .ba { position: relative; margin-top: 40px; border: 1.5px solid var(--ink); background: #fff; user-select: none; touch-action: pan-y; cursor: ew-resize; }
 .ba .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--cut, 50%)); }
-.ba .before img { filter: contrast(.55) brightness(1.18) blur(.4px) sepia(.25); }
+.ocrbox.low { stroke: var(--amber); fill: rgba(138, 90, 0, .1); }
+.reading { margin-top: 18px; max-height: 330px; overflow: auto; border: 1.5px solid var(--ink); }
+.reading table { border: 0; }
+.reading td { font-size: 14px; padding: 6px 12px; }
+.reading td:first-child { font-family: var(--mono); }
+.reading td.c { width: 170px; font: 12px var(--mono); white-space: nowrap; }
+.reading .cb { display: inline-block; width: 70px; height: 6px; background: var(--rule); margin-right: 8px; vertical-align: middle; }
+.reading .cb i { display: block; height: 100%; background: var(--ink); }
+.reading tr.low td { background: rgba(138, 90, 0, .08); }
+.reading tr.low .cb i { background: var(--amber); }
+.reading tr.on td { background: var(--red-soft); }
 .ba .handle { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); border-left: 2px solid var(--red); }
 .ba .handle button { position: absolute; top: 50%; left: -26px; width: 52px; height: 52px; border-radius: 50%; border: 2px solid var(--red); background: var(--sheet); font: 700 16px var(--mono); color: var(--red); cursor: ew-resize; transform: translateY(-50%); }
 .ba .cap { position: absolute; top: 12px; font: 700 11px var(--mono); letter-spacing: .12em; background: var(--sheet); border: 1px solid var(--ink); padding: 4px 8px; }
@@ -198,6 +221,7 @@ table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); bo
 .win .tb .caps { display: flex; height: 100%; }
 .win .tb .caps span { width: 46px; display: grid; place-items: center; font-size: 13px; color: #444; }
 .pin { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; border: 2px solid var(--red); background: var(--sheet); color: var(--red); font: 700 13px var(--mono); cursor: pointer; display: grid; place-items: center; }
+.pin::before { content: ""; position: absolute; inset: -8px; border-radius: 50%; }
 .pin:hover, .pin[aria-expanded="true"] { background: var(--red); color: #fff; }
 .callouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); padding: 0; margin: 26px 0 0; border: 1.5px solid var(--ink); background: var(--sheet); }
 .callouts li { list-style: none; padding: 14px 16px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); font-size: 15px; color: var(--ink-2); transition: background .2s; }
@@ -261,7 +285,6 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 .still .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
 @media (prefers-reduced-motion: reduce) {
   .reveal, .js .reveal:not(.in) { opacity: 1; transform: none; transition: none; }
-  .titleblock .q::after { animation: none; }
   .viewer .pg, .drive .bar i { transition: none; }
 }
 </style>
@@ -288,7 +311,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <a class="cell hide-s" href="#compare">Compare</a>
     <a class="cell hide-s" href="#rfi">Questions</a>
     <a class="cell" href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">Guide</a>
-    <a class="cell get dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest">Download</a>
+    <a class="cell get dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download</a>
   </div>
 </nav>
 
@@ -296,26 +319,30 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 <section class="hero" id="top" aria-labelledby="h1" data-zone="A1">
   <div class="copy">
     <div class="label"><b>SLH-001</b> Drawing search · Dexterity Design Services</div>
-    <h1 id="h1"><span class="tag">6"-P-1001-A1B</span><span id="heroWhere">Found on ISO‑1001‑01, zone B3.</span></h1>
+    <h1 id="h1"><span class="sr-only">Sleuth finds any tag in scanned drawings. For example: </span><span class="tag" id="heroTag">6"-P-1001-A1B</span><span id="heroWhere">Found on ISO‑1001‑01, zone B3.</span></h1>
     <p class="lead">Sleuth reads the scans nobody indexed: isometrics, P&amp;IDs, plotted PDFs on every office drive. Type a line number and it opens the sheet with the tag ringed in red.</p>
     <div class="cta">
-      <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest">Download for Windows</a>
+      <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
     <div class="facts">v0.1.1 · 43 MB · Windows 10/11, 64-bit · no admin rights · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.2 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
-      <img src="assets/demo/iso-1001-01.jpg" alt="" width="1820" height="1286" fetchpriority="high">
-      <svg id="heroSvg" preserveAspectRatio="none"></svg>
-      <div class="scan" id="heroScan"></div>
+      <div class="pile p2"></div><div class="pile p1"></div>
+      <div class="paper" id="heroPaper">
+        <img id="heroImg" src="assets/demo/iso-1001-01.jpg" alt="" width="1820" height="1286" fetchpriority="high">
+        <svg id="heroSvg" preserveAspectRatio="none"></svg>
+        <div class="scan" id="heroScan"></div>
+      </div>
     </div>
     <div class="note-pen" id="heroNote"></div>
   </div>
-  <div class="titleblock" role="img" aria-label="A search for 6&quot;-P-1001-A1B finding the isometric ISO-1001-01">
-    <div class="row"><div class="k">Search</div><div class="v q" id="heroQ"></div></div>
+  <div class="titleblock">
+    <div class="row"><label class="k" for="heroQ">Search</label><div class="v"><input class="q" id="heroQ" type="search" spellcheck="false" autocomplete="off" aria-describedby="heroRes" placeholder="type a tag"></div></div>
     <div class="row"><div class="k">Result</div><div class="v res" id="heroRes">—</div></div>
     <div class="row"><div class="k">Read from</div><div class="v res" id="heroSrc">—</div></div>
+    <div class="row hint"><div class="k">Try</div><div class="v res" id="heroTry"></div></div>
   </div>
 </section>
 
@@ -368,14 +395,15 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 <section id="faint" data-zone="C5" style="background: var(--paper-2)">
   <div class="wrap">
     <div class="label reveal"><b>03</b> Scans</div>
-    <h2 class="reveal">A site scan you can hardly read. Sleuth reads it.</h2>
-    <p class="lead reveal">A low-contrast scan of an isometric. Drag the line: on the left, the scan as it sits on the drive; on the right, what Sleuth read from it, every line boxed and the tag ringed. Each sheet is read at 300 dpi in overlapping tiles, so 2.5 mm text keeps its full resolution. Lines the OCR is unsure of are read a second time by Windows' own OCR.</p>
+    <h2 class="reveal">A site scan you can hardly read. Sleuth reads it, mistakes and all.</h2>
+    <p class="lead reveal">A faded, streaked scan of an isometric, read by the real Sleuth reader. Sleuth doesn't clean up the image; it reads it. Drag the line: the right side shows every line it found, boxed, with its real confidence. Below is the full reading, including where it went wrong. Anything under 80% is marked Verify and is never reported as exact.</p>
     <div class="ba reveal" id="ba" style="--cut: 52%">
       <div class="before"><img src="assets/demo/scan_0042.jpg" alt="A faint scanned isometric" loading="lazy" width="1820" height="1286"></div>
       <div class="after"><img src="assets/demo/scan_0042.jpg" alt="" loading="lazy" width="1820" height="1286"><svg id="baSvg" preserveAspectRatio="none"></svg></div>
       <span class="cap" style="left:12px">AS SCANNED</span><span class="cap" style="right:12px">AS READ BY SLEUTH</span>
-      <div class="handle"><button type="button" id="baHandle" role="slider" aria-label="Compare the scan with what Sleuth read" aria-valuemin="0" aria-valuemax="100" aria-valuenow="52">⇔</button></div>
+      <div class="handle"><button type="button" id="baHandle" role="slider" aria-label="Compare the scan with what Sleuth read" aria-valuemin="0" aria-valuemax="100" aria-valuenow="52" aria-valuetext="48% shows Sleuth's reading">⇔</button></div>
     </div>
+    <div class="reading reveal"><table class="reg"><thead><tr><th>What Sleuth read, top to bottom</th><th>Confidence</th><th>Status</th></tr></thead><tbody id="readingRows"></tbody></table></div>
   </div>
 </section>
 
@@ -404,21 +432,21 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
         <div class="tb"><span>Sleuth</span><span class="caps"><span>—</span><span>☐</span><span>✕</span></span></div>
         <div style="position:relative">
           <picture><source type="image/webp" srcset="assets/screens/search-1400.webp 1400w, assets/screens/search-2400.webp 2400w" sizes="(max-width: 1240px) 100vw, 1150px"><img src="assets/screens/search-1400.webp" alt="Sleuth showing five sheets that contain 6&quot;-P-1001-A1B, with the isometric open and the line ringed" width="1400" height="735" loading="lazy"></picture>
-          <button class="pin" style="left:22%;top:4.5%" data-c="1" aria-label="Note 1, search box">1</button>
-          <button class="pin" style="left:61%;top:40%" data-c="2" aria-label="Note 2, how it matched">2</button>
-          <button class="pin" style="left:5%;top:36%" data-c="3" aria-label="Note 3, which drives">3</button>
-          <button class="pin" style="left:85%;top:47%" data-c="4" aria-label="Note 4, the proof">4</button>
-          <button class="pin" style="left:78%;top:86%" data-c="5" aria-label="Note 5, where it was read">5</button>
-          <button class="pin" style="left:90%;top:4.5%" data-c="6" aria-label="Note 6, deep search">6</button>
+          <button class="pin" style="left:22%;top:4.5%" data-c="1" aria-controls="c1" aria-label="Note 1, search box">1</button>
+          <button class="pin" style="left:61%;top:40%" data-c="2" aria-controls="c2" aria-label="Note 2, how it matched">2</button>
+          <button class="pin" style="left:5%;top:36%" data-c="3" aria-controls="c3" aria-label="Note 3, which drives">3</button>
+          <button class="pin" style="left:85%;top:47%" data-c="4" aria-controls="c4" aria-label="Note 4, the proof">4</button>
+          <button class="pin" style="left:78%;top:86%" data-c="5" aria-controls="c5" aria-label="Note 5, where it was read">5</button>
+          <button class="pin" style="left:90%;top:4.5%" data-c="6" aria-controls="c6" aria-label="Note 6, deep search">6</button>
         </div>
       </div>
       <ul class="callouts" id="callouts">
-        <li data-c="1"><b>1</b><strong>Search box.</strong> Results update as you type. Ctrl+F from anywhere.</li>
-        <li data-c="2"><b>2</b><strong>How it matched.</strong> Exact, Separators ignored, or Verify.</li>
-        <li data-c="3"><b>3</b><strong>Which drives.</strong> Tick the drives to search, and the folders Sleuth reads.</li>
-        <li data-c="4"><b>4</b><strong>The proof.</strong> The page, with the tag ringed in red. Step mark to mark.</li>
-        <li data-c="5"><b>5</b><strong>Where it was read.</strong> OCR or PDF text, with the reader's confidence.</li>
-        <li data-c="6"><b>6</b><strong>Deep search.</strong> Walks every drive live when you don't know where to look.</li>
+        <li id="c1" data-c="1"><b>1</b><strong>Search box.</strong> Results update as you type. Ctrl+F from anywhere.</li>
+        <li id="c2" data-c="2"><b>2</b><strong>How it matched.</strong> Exact, Separators ignored, or Verify.</li>
+        <li id="c3" data-c="3"><b>3</b><strong>Which drives.</strong> Tick the drives to search, and the folders Sleuth reads.</li>
+        <li id="c4" data-c="4"><b>4</b><strong>The proof.</strong> The page, with the tag ringed in red. Step mark to mark.</li>
+        <li id="c5" data-c="5"><b>5</b><strong>Where it was read.</strong> OCR or PDF text, with the reader's confidence.</li>
+        <li id="c6" data-c="6"><b>6</b><strong>Deep search.</strong> Walks every drive live when you don't know where to look.</li>
       </ul>
     </div>
     <div class="thumbs reveal" id="thumbs">
@@ -516,7 +544,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       </ol>
     </div>
     <div class="issue reveal">
-      <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest">
+      <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
         <span class="t2">REV 0.1.1 · 43 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
@@ -665,50 +693,91 @@ fetch("assets/demo/sheets.json").then((r) => r.json()).then((data) => {
   hero(); demo(); faint();
 }).catch(() => { $("#results").innerHTML = '<div class="empty">The sample sheets could not be loaded.</div>'; });
 
-// ---------- hero: the sheet is read and the tag is ringed ----------
+// ---------- hero: a pile of sheets you can search ----------
 function hero() {
-  const sheet = SHEETS.find((s) => s.name === "ISO-1001-01.pdf");
-  const tag = '6"-P-1001-A1B';
-  const target = sheet.lines.find((L) => L[0].includes(tag));
-  const { ocr, rings } = drawSheet($("#heroSvg"), sheet, [target], true);
-  const zone = zoneOf(target);
-  $("#heroWhere").textContent = `Found on ISO‑1001‑01, zone ${zone}.`;
-  $("#heroSheet").style.setProperty("--ar", sheet.w / sheet.h);
-  const q = $("#heroQ"), res = $("#heroRes"), src = $("#heroSrc"), note = $("#heroNote");
-  const done = () => {
-    q.textContent = tag;
-    res.innerHTML = `<b>ISO-1001-01.pdf</b> · page 1 · zone ${zone}`;
-    src.textContent = `OCR · confidence ${Math.round(target[1] * 100)}% · ${sheet.lines.length} lines read`;
-  };
-  note.textContent = "↑ found it, zone " + zone;
+  const q = $("#heroQ"), res = $("#heroRes"), src = $("#heroSrc"), note = $("#heroNote"), paper = $("#heroPaper"), img = $("#heroImg");
+  let shown = SHEETS.find((s) => s.name === "ISO-1001-01.pdf"), rings = [], busy = null;
+  $("#heroSheet").style.setProperty("--ar", shown.w / shown.h);
+  const nb = (t) => t.replace(/-/g, "‑");
   const placeNote = () => {
+    if (!rings[0]) { note.style.opacity = 0; return; }
     const r = rings[0].getBoundingClientRect(), st = $(".stage").getBoundingClientRect();
-    note.style.left = r.left - st.left + 6 + "px"; note.style.top = r.bottom - st.top + 2 + "px";
+    note.style.left = r.left - st.left + "px"; note.style.top = r.top - st.top - 42 + "px";
   };
-  if (reduce || !hasGsap) {
-    done(); rings[0].style.strokeDashoffset = 0;
-    $("#heroSheet").style.transform = "rotateX(18deg) rotateZ(-4deg)";
-    requestAnimationFrame(() => { placeNote(); note.style.opacity = 1; });
-    return;
-  }
-  const typed = { n: 0 };
-  const others = ocr.filter((r, i) => sheet.lines[i] !== target);
-  const tl = gsap.timeline({ delay: 0.5 });
-  tl.to(typed, { n: tag.length, duration: 1.1, ease: "none", onUpdate: () => { q.textContent = tag.slice(0, Math.round(typed.n)); } })
-    .to("#heroSheet", { rotateX: 18, rotateZ: -4, z: 0, duration: 1.6, ease: "power3.inOut" }, "-=0.4")
-    .add(() => { res.textContent = `reading ${sheet.lines.length} lines…`; }, "<")
-    .fromTo("#heroScan", { top: "-60px", opacity: 1 }, { top: "100%", duration: 1.5, ease: "none" }, "-=0.6")
-    .to(ocr, { opacity: 1, duration: 0.12, stagger: 1.3 / ocr.length }, "<")
-    .to("#heroScan", { opacity: 0, duration: 0.3 })
-    .to(others, { opacity: 0.1, duration: 0.6 }, "+=0.1")
-    .to(rings[0], { strokeDashoffset: 0, duration: 0.9, ease: "power2.inOut" }, "<")
-    .add(done)
-    .call(placeNote)
-    .fromTo(note, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.4 });
   addEventListener("resize", placeNote);
+  function describe(sheet, L, tag) {
+    const zone = zoneOf(L);
+    $("#heroTag").textContent = tag;
+    $("#heroWhere").textContent = `Found on ${nb(sheet.name.replace(/\.pdf$/i, ""))}, zone ${zone}.`;
+    res.innerHTML = `<b>${esc(sheet.name)}</b> · page 1 · zone ${zone}`;
+    src.textContent = L[2] === "ocr" ? `OCR · confidence ${Math.round(L[1] * 100)}% · ${sheet.lines.length} lines read` : `PDF text · ${sheet.lines.length} lines`;
+    note.textContent = "↓ found it, zone " + zone;
+  }
+  // Read the sheet on screen: scanline, every OCR box, then ring the matches.
+  function read(sheet, boxes, fast) {
+    const { ocr, rings: rs } = drawSheet($("#heroSvg"), sheet, boxes, true);
+    rings = rs;
+    const others = ocr.filter((r, i) => !boxes.includes(sheet.lines[i]));
+    if (reduce || !hasGsap) { ocr.forEach((r) => (r.style.opacity = 0.1)); boxes.forEach((L) => (ocr[sheet.lines.indexOf(L)].style.opacity = 1)); rs.forEach((p) => (p.style.strokeDashoffset = 0)); placeNote(); note.style.opacity = rs.length ? 1 : 0; return null; }
+    const tl = gsap.timeline();
+    tl.set(note, { opacity: 0 })
+      .fromTo("#heroScan", { top: "-60px", opacity: 1 }, { top: "100%", duration: fast ? 0.7 : 1.5, ease: "none" })
+      .to(ocr, { opacity: 1, duration: 0.1, stagger: (fast ? 0.6 : 1.3) / Math.max(1, ocr.length) }, "<")
+      .to("#heroScan", { opacity: 0, duration: 0.2 })
+      .to(others, { opacity: 0.1, duration: 0.4 })
+      .to(rs, { strokeDashoffset: 0, duration: 0.8, ease: "power2.inOut", stagger: 0.2 }, "<");
+    if (rs.length) tl.call(placeNote).fromTo(note, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.35 });
+    return tl;
+  }
+  // Swap the top sheet of the pile for another one.
+  function swapTo(sheet, then) {
+    if (sheet === shown) return then();
+    shown = sheet;
+    if (reduce || !hasGsap) { img.src = sheet.img; return then(); }
+    gsap.timeline()
+      .to(paper, { x: -70, y: -30, rotate: -7, opacity: 0, duration: 0.3, ease: "power2.in" })
+      .add(() => { img.src = sheet.img; $("#heroSvg").replaceChildren(); })
+      .fromTo(paper, { x: 90, y: 50, rotate: 6, opacity: 0 }, { x: 0, y: 0, rotate: 0, opacity: 1, duration: 0.45, ease: "power3.out" })
+      .add(then);
+  }
+  function search(v) {
+    busy?.kill?.();
+    const hits = searchSheets(v);
+    if (!v.trim()) return;
+    if (!hits.length) {
+      rings = []; drawSheet($("#heroSvg"), shown, [], false); note.style.opacity = 0;
+      $("#heroTag").textContent = v.trim(); $("#heroWhere").textContent = "Not on these sample sheets.";
+      res.innerHTML = "Not on these seven sample sheets"; src.textContent = "Try another spelling, or a tag below";
+      return;
+    }
+    const pref = (h) => (/ISO|PID|Scan/.test(h.s.name) ? 1 : 0);
+    const hit = hits.sort((a, b) => a.cls - b.cls || pref(b) - pref(a))[0];
+    swapTo(hit.s, () => { describe(hit.s, hit.boxes[0], v.trim()); busy = read(hit.s, hit.boxes, true); });
+  }
+  let deb;
+  q.addEventListener("input", () => { intro?.kill(); clearTimeout(deb); deb = setTimeout(() => search(q.value), 160); });
+  for (const t of ["PSV1203", "FV 2201", "HV-4410", "DOC-1001-17"]) {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = t;
+    b.onclick = () => { intro?.kill(); q.value = t; search(t); };
+    $("#heroTry").append(b);
+  }
+  // Opening: type the tag, the sheet lifts off the desk, it is read, the tag is ringed.
+  const tag = '6"-P-1001-A1B';
+  const target = shown.lines.find((L) => L[0].includes(tag));
+  describe(shown, target, tag);
+  res.textContent = "—"; src.textContent = "—";
+  let intro = null;
+  if (reduce || !hasGsap) { q.value = tag; describe(shown, target, tag); read(shown, [target]); $("#heroSheet").style.transform = "rotateX(18deg) rotateZ(-4deg)"; return; }
+  drawSheet($("#heroSvg"), shown, [target], true);
+  const typed = { n: 0 };
+  intro = gsap.timeline({ delay: 0.5 })
+    .to(typed, { n: tag.length, duration: 1.1, ease: "none", onUpdate: () => { q.value = tag.slice(0, Math.round(typed.n)); } })
+    .to("#heroSheet", { rotateX: 18, rotateZ: -4, z: 0, duration: 1.6, ease: "power3.inOut" }, "-=0.4")
+    .add(() => { res.textContent = `reading ${shown.lines.length} lines…`; }, "<")
+    .add(() => { const t = read(shown, [target], false); if (t) t.add(() => describe(shown, target, tag)); }, "-=0.6");
   // scrolling lifts the sheet off the desk and pushes in
   gsap.to("#heroSheet", { scrollTrigger: { trigger: ".hero", start: "top top", end: "bottom top", scrub: true, onUpdate: placeNote }, rotateX: 0, rotateZ: 0, scale: 1.2, yPercent: -10, ease: "none" });
-  gsap.to(".hero .copy, .titleblock", { scrollTrigger: { trigger: ".hero", start: "top top", end: "bottom top", scrub: true }, y: -70, opacity: 0.15, ease: "none" });
+  gsap.to(".hero .copy > *, .titleblock", { scrollTrigger: { trigger: ".hero", start: "top top", end: "bottom top", scrub: true }, y: -70, opacity: 0.15, ease: "none" });
 }
 
 // ---------- live demo ----------
@@ -731,6 +800,7 @@ function demo() {
   function show(hit) {
     current = hit;
     $$(".hit", list).forEach((b) => b.setAttribute("aria-current", String(b._hit === hit)));
+    pg.style.transition = "none"; pg.style.transform = "none"; void pg.offsetWidth; pg.style.transition = "";
     img.src = hit.s.img; img.alt = `${hit.s.name}, with the matches ringed`;
     const { rings } = drawSheet(svg, hit.s, hit.boxes, false);
     rings.forEach((p, i) => {
@@ -754,6 +824,8 @@ function demo() {
       e.innerHTML = input.value.trim() ? `<b class="mono">${esc(input.value)}</b> isn't on these seven sample sheets. Try one of the tags above, or type it another way.` : "Type a tag, a line number or any word printed on a drawing.";
       list.append(e); svg.replaceChildren(); img.removeAttribute("src"); meta.textContent = ""; current = null; pg.style.transform = "none"; return;
     }
+    const pref = (h) => (/ISO|PID|Scan/.test(h.s.name) ? 1 : 0);
+    hits.sort((a, b) => a.cls - b.cls || pref(b) - pref(a));
     for (const h of hits) {
       const b = document.createElement("button"); b.type = "button"; b.className = "hit"; b._hit = h;
       const [k, label] = CLASS[h.cls];
@@ -761,27 +833,46 @@ function demo() {
       b.onclick = () => show(h);
       list.append(b);
     }
-    show(hits.find((h) => /ISO|PID|Scan/.test(h.s.name)) || hits[0]);
+    show(hits[0]);
   }
-  let deb; input.addEventListener("input", () => { clearTimeout(deb); deb = setTimeout(go, 120); });
+  input.addEventListener("input", go);
   $("#demoForm").addEventListener("submit", (e) => { e.preventDefault(); go(); });
   go();
 }
 
-// ---------- faint scan, before and after ----------
+// ---------- faint scan: the real reading, before and after ----------
 function faint() {
   const sheet = SHEETS.find((s) => s.name === "Scan_0042.pdf");
   const target = sheet.lines.find((L) => L[0].includes("HV-4410"));
   const { rings, ocr } = drawSheet($("#baSvg"), sheet, [target], true);
-  ocr.forEach((r) => r.style.opacity = r === ocr[sheet.lines.indexOf(target)] ? 0 : 0.9);
+  ocr.forEach((r, i) => { r.style.opacity = sheet.lines[i] === target ? 0 : 1; if (sheet.lines[i][1] < 0.8) r.classList.add("low"); });
+  // the full reading, top to bottom, with real confidences
+  const rows = $("#readingRows");
+  const order = sheet.lines.map((L, i) => [L, i]).sort((a, b) => a[0][4] - b[0][4] || a[0][3] - b[0][3]);
+  for (const [L, i] of order) {
+    const tr = document.createElement("tr"), low = L[1] < 0.8, pct = Math.round(L[1] * 100);
+    if (low) tr.className = "low";
+    tr.innerHTML = `<td>${esc(L[0])}</td><td class="c"><span class="cb"><i style="width:${pct}%"></i></span>${pct}%</td><td>${low ? '<span class="pill verify">Verify</span>' : '<span class="pill exact">Read</span>'}</td>`;
+    tr.addEventListener("mouseenter", () => { $$("tr.on", rows).forEach((x) => x.classList.remove("on")); tr.classList.add("on"); ocr.forEach((r) => (r.style.strokeWidth = "")); ocr[i].style.strokeWidth = 4; });
+    rows.append(tr);
+  }
   const ba = $("#ba"), handle = $("#baHandle");
-  const set = (p) => { p = Math.max(0, Math.min(100, p)); ba.style.setProperty("--cut", p + "%"); handle.setAttribute("aria-valuenow", Math.round(p)); };
+  const set = (p) => {
+    p = Math.max(0, Math.min(100, p));
+    ba.style.setProperty("--cut", p + "%");
+    handle.setAttribute("aria-valuenow", Math.round(p));
+    handle.setAttribute("aria-valuetext", `${Math.round(100 - p)}% shows Sleuth's reading`);
+  };
   const fromX = (x) => { const r = ba.getBoundingClientRect(); set(((x - r.left) / r.width) * 100); };
   let drag = false;
-  ba.addEventListener("pointerdown", (e) => { drag = true; ba.setPointerCapture(e.pointerId); fromX(e.clientX); });
+  ba.addEventListener("pointerdown", (e) => { if (e.target.closest(".cap")) return; drag = true; ba.setPointerCapture(e.pointerId); fromX(e.clientX); });
   ba.addEventListener("pointermove", (e) => drag && fromX(e.clientX));
-  ba.addEventListener("pointerup", () => (drag = false));
-  handle.addEventListener("keydown", (e) => { const v = +handle.getAttribute("aria-valuenow"); if (e.key === "ArrowLeft") set(v - 5); if (e.key === "ArrowRight") set(v + 5); });
+  for (const ev of ["pointerup", "pointercancel", "lostpointercapture"]) ba.addEventListener(ev, () => (drag = false));
+  handle.addEventListener("keydown", (e) => {
+    const v = +handle.getAttribute("aria-valuenow"), k = e.key;
+    const to = { ArrowLeft: v - 5, ArrowDown: v - 5, ArrowRight: v + 5, ArrowUp: v + 5, PageDown: v - 20, PageUp: v + 20, Home: 0, End: 100 }[k];
+    if (to !== undefined) { e.preventDefault(); set(to); }
+  });
   const draw = () => { rings[0].style.transition = "stroke-dashoffset 1s cubic-bezier(.6,0,.3,1)"; rings[0].style.strokeDashoffset = 0; };
   if (reduce || !hasGsap) { draw(); return; }
   ScrollTrigger.create({ trigger: ba, start: "top 70%", once: true, onEnter: () => gsap.fromTo(ba, { "--cut": "94%" }, { "--cut": "46%", duration: 1.8, ease: "power2.inOut", onComplete: draw }) });
@@ -812,6 +903,7 @@ $$(".pin").forEach((p) => {
     $$("#callouts li").forEach((li) => li.classList.toggle("on", li.dataset.c === p.dataset.c));
   });
 });
+$$(".pin").forEach((p) => p.addEventListener("focus", () => p.click()));
 $$("#callouts li").forEach((li) => li.addEventListener("mouseenter", () => {
   $$(".pin").forEach((x) => x.setAttribute("aria-expanded", String(x.dataset.c === li.dataset.c)));
   $$("#callouts li").forEach((y) => y.classList.toggle("on", y === li));
