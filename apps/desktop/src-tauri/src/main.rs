@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -26,6 +26,9 @@ struct Worker {
     tx: Mutex<Option<mpsc::UnboundedSender<String>>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
     next: AtomicU64,
+    /// Set while an update is being installed, so the worker that was just
+    /// stopped is not started again under the installer's feet.
+    updating: AtomicBool,
 }
 
 impl Worker {
@@ -62,7 +65,7 @@ async fn connection_loop(app: AppHandle) {
         let client = match ClientOptions::new().open(pipe_name()) {
             Ok(c) => c,
             Err(_) => {
-                if !started_worker {
+                if !started_worker && !app.state::<Worker>().updating.load(Ordering::SeqCst) {
                     start_worker();
                     started_worker = true;
                 }
@@ -198,10 +201,14 @@ async fn install_update(app: AppHandle, worker: State<'_, Worker>, channel: Stri
     .map_err(|e| e.to_string())??;
     let Some(file) = file else { return Ok(()) };
     // Let the worker finish its current write and release its files.
+    worker.updating.store(true, Ordering::SeqCst);
     let id = worker.next_id();
     let _ = worker.send(id, json!({"req": "shutdown"}));
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    update::run_installer(&file)?;
+    if let Err(e) = update::run_installer(&file) {
+        worker.updating.store(false, Ordering::SeqCst);
+        return Err(e);
+    }
     app.exit(0);
     Ok(())
 }
