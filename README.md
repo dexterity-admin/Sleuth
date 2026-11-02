@@ -15,6 +15,8 @@ Internal tool of Dexterity Design Services Pvt. Ltd. Finds any tag number or tex
    - **Verify, OCR unsure**: the reading was uncertain, or a letter could be a digit (O/0, l/1, S/5, B/8). Check it on the preview.
 5. If you don't know where a file is, press **Deep search**. It walks every ticked drive, and reads any PDFs it finds that were not read yet.
 
+IT can install silently, optionally into a chosen folder: `Sleuth_x.y.z_x64-setup.exe /S` or `Sleuth_x.y.z_x64-setup.exe /S /D=C:\Tools\Sleuth` (the folder must come last).
+
 Settings live in `%APPDATA%\Sleuth\settings.json`. The index, OCR models and logs are in `%LOCALAPPDATA%\Sleuth\`. Updates never touch either folder.
 
 ## For developers
