@@ -624,6 +624,8 @@ async function autoCheckUpdate() {
   $("q").focus();
   if (!(await waitForWorker())) return;
   await Promise.all([loadDrives(), loadSettings(), loadStatus()]).catch((e) => toast(String(e)));
+  // Apply "keep reading in the background" from the first start, not only after a save.
+  if (state.settings) invoke("set_autostart", { enabled: !!state.settings.keep_indexing_when_closed }).catch(() => {});
   renderEmpty();
   setInterval(loadStatus, 4000);
   setTimeout(autoCheckUpdate, 15000);

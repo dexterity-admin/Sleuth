@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sleuth: find any tag, in any drawing, on any drive</title>
+<meta name="description" content="Sleuth reads scanned engineering drawings on every drive in the office and finds any tag, line number or note in milliseconds. Internal tool of Dexterity Design Services.">
+<meta property="og:title" content="Sleuth">
+<meta property="og:description" content="Find any tag, in any drawing, on any drive.">
+<meta property="og:image" content="assets/screens/search.png">
+<link rel="icon" href="assets/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Blueprint night: drafting-blue grid, white linework, red-line mark-ups */
+:root {
+  --night: #070d18; --deep: #0b1526; --panel: #101d33; --line: #1d3354; --grid: rgba(124, 196, 255, .07);
+  --ink: #eef4fb; --ink-2: #a9bbd1; --ink-3: #6f86a3;
+  --blue: #7cc4ff; --blue-2: #3d8bff; --red: #ff4d57; --amber: #ffb547; --green: #43d17a;
+  --display: "Archivo", "Segoe UI", sans-serif; --sans: "IBM Plex Sans", "Segoe UI", sans-serif; --mono: "IBM Plex Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--night); color: var(--ink); font: 17px/1.6 var(--sans); overflow-x: hidden; }
+a { color: inherit; }
+img { max-width: 100%; display: block; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-left: max(20px, env(safe-area-inset-left)); padding-right: max(20px, env(safe-area-inset-right)); }
+.mono { font-family: var(--mono); }
+
+/* nav */
+nav { position: fixed; inset: 0 0 auto; z-index: 20; padding-top: env(safe-area-inset-top); background: linear-gradient(var(--night), transparent); }
+nav .wrap { display: flex; align-items: center; gap: 22px; height: 64px; }
+nav .logo { display: flex; align-items: center; gap: 10px; font: 800 20px var(--display); letter-spacing: .01em; text-decoration: none; }
+nav .logo img { width: 28px; height: 28px; border-radius: 7px; }
+nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 15px; color: var(--ink-2); }
+nav .links a { text-decoration: none; }
+nav .links a:hover { color: var(--ink); }
+@media (max-width: 720px) { nav .links a:not(.btn) { display: none; } }
+
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 22px; border-radius: 10px; font: 600 16px var(--sans); text-decoration: none; border: 1px solid var(--line); background: rgba(16, 29, 51, .7); color: var(--ink); transition: transform .2s, background .2s, border-color .2s; }
+.btn:hover { transform: translateY(-2px); border-color: var(--blue); }
+.btn.primary { background: var(--blue-2); border-color: var(--blue-2); color: #fff; box-shadow: 0 10px 40px -10px rgba(61, 139, 255, .8); }
+.btn.small { padding: 8px 14px; font-size: 14px; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+
+/* hero */
+.hero { position: relative; height: 100vh; min-height: 640px; max-height: 1100px; overflow: hidden; }
+#scene { position: absolute; inset: 0; width: 100%; height: 100%; }
+#labels { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+.tag { position: absolute; transform: translate(-50%, -50%); font: 500 13px var(--mono); color: var(--ink-2); padding: 3px 8px; border: 1.5px solid transparent; border-radius: 4px; white-space: nowrap; transition: color .35s, border-color .35s, box-shadow .35s, background .35s; }
+.tag.found { color: #fff; border-color: var(--red); background: rgba(255, 77, 87, .12); box-shadow: 0 0 22px rgba(255, 77, 87, .55); }
+.hero-copy { position: absolute; z-index: 2; left: 0; right: 0; bottom: 12vh; text-align: left; }
+.eyebrow { font: 500 13px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--blue); }
+h1 { font: 900 clamp(64px, 12vw, 168px)/.86 var(--display); letter-spacing: -.035em; margin: 10px 0 18px; text-wrap: balance; }
+h1 .dot { color: var(--red); }
+.lede { font-size: clamp(19px, 2.2vw, 26px); color: var(--ink-2); max-width: 32ch; margin: 0 0 30px; }
+.lede b { color: var(--ink); font-weight: 600; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; }
+.scroll-cue { position: absolute; z-index: 2; bottom: 28px; right: max(20px, env(safe-area-inset-right)); font: 12px var(--mono); color: var(--ink-3); letter-spacing: .12em; writing-mode: vertical-rl; }
+.hero::after { content: ""; position: absolute; inset: auto 0 0; height: 30vh; background: linear-gradient(transparent, var(--night)); pointer-events: none; }
+.hero::before { content: ""; position: absolute; inset: 0; z-index: 1; background: linear-gradient(90deg, rgba(7, 13, 24, .88) 0, rgba(7, 13, 24, .55) 38%, transparent 62%); pointer-events: none; }
+@media (max-width: 760px) { .hero::before { background: linear-gradient(transparent 20%, rgba(7, 13, 24, .9) 60%); } }
+
+/* sections */
+section { position: relative; padding: 120px 0; }
+h2 { font: 800 clamp(36px, 5vw, 64px)/1.02 var(--display); letter-spacing: -.02em; margin: 10px 0 18px; text-wrap: balance; }
+.sub { color: var(--ink-2); font-size: 19px; max-width: 60ch; margin: 0; }
+.reveal { opacity: 0; transform: translateY(40px); transition: opacity .9s ease, transform .9s cubic-bezier(.2, .7, .2, 1); }
+.reveal.in { opacity: 1; transform: none; }
+
+/* product shot on a tilting stage */
+.stage { perspective: 1800px; margin-top: 56px; }
+.frame { border-radius: 14px; overflow: hidden; border: 1px solid #2a4570; background: #0d1729; box-shadow: 0 60px 120px -30px rgba(0, 0, 0, .8), 0 0 0 1px rgba(124, 196, 255, .06), 0 0 120px -20px rgba(61, 139, 255, .35); transform-origin: 50% 0; transform: rotateX(var(--tilt, 22deg)) scale(var(--sc, .92)); transition: transform .1s linear; }
+.frame .bar { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 14px; background: #121f36; border-bottom: 1px solid #22385a; font: 12px var(--sans); color: var(--ink-3); }
+.frame .bar i { width: 11px; height: 11px; border-radius: 50%; background: #2a3f60; }
+.frame .bar span { margin-left: 8px; }
+.callouts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; margin-top: 34px; }
+.callout { border-left: 2px solid var(--blue-2); padding: 2px 0 2px 16px; color: var(--ink-2); font-size: 15.5px; }
+.callout b { display: block; color: var(--ink); font: 600 16px var(--sans); margin-bottom: 2px; }
+
+/* match demo */
+.match { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 50px; align-items: center; }
+@media (max-width: 900px) { .match { grid-template-columns: 1fr; } }
+.query { font: 500 clamp(22px, 3vw, 34px) var(--mono); padding: 18px 22px; border: 1.5px solid var(--blue-2); border-radius: 12px; background: var(--deep); }
+.query .caret { display: inline-block; width: 2px; height: 1em; background: var(--blue); vertical-align: -3px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.variants { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 10px; }
+.variants li { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-radius: 10px; background: var(--deep); border: 1px solid var(--line); font: 15px var(--mono); }
+.variants li .src { color: var(--ink-3); font: 13px var(--sans); margin-left: auto; white-space: nowrap; }
+.pill { font: 600 12px var(--sans); padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.pill.exact { background: rgba(67, 209, 122, .14); color: var(--green); }
+.pill.sep { background: rgba(124, 196, 255, .14); color: var(--blue); }
+.pill.verify { background: rgba(255, 181, 71, .14); color: var(--amber); }
+
+/* features */
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; margin-top: 50px; }
+.feature { background: linear-gradient(180deg, var(--panel), var(--deep)); border: 1px solid var(--line); border-radius: 16px; padding: 26px; transition: transform .3s, border-color .3s; }
+.feature:hover { transform: translateY(-4px); border-color: #31588e; }
+.feature .k { font: 500 12px var(--mono); color: var(--blue); letter-spacing: .1em; text-transform: uppercase; }
+.feature h3 { font: 700 22px var(--display); margin: 8px 0 8px; }
+.feature p { color: var(--ink-2); margin: 0; font-size: 16px; }
+
+/* drives */
+.drives { margin-top: 44px; display: grid; gap: 12px; }
+.drv { display: grid; grid-template-columns: 70px minmax(0, 1fr) 150px; gap: 16px; align-items: center; font: 15px var(--mono); }
+.drv .trk { height: 8px; background: #13223a; border-radius: 4px; overflow: hidden; }
+.drv .fill { height: 100%; width: 0; background: var(--blue-2); border-radius: 4px; transition: width 2.4s cubic-bezier(.3, .7, .2, 1); }
+.drv .fill.ok { background: var(--green); }
+.drv .st { color: var(--ink-2); font: 14px var(--sans); }
+.drv.off .st { color: var(--red); }
+
+/* gallery */
+.gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 22px; margin-top: 50px; }
+.shot { margin: 0; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: var(--deep); }
+.shot img { aspect-ratio: 16 / 10; object-fit: cover; object-position: top left; transition: transform .6s; }
+.shot:hover img { transform: scale(1.03); }
+.shot figcaption { padding: 12px 16px; font-size: 15px; color: var(--ink-2); }
+.shot figcaption b { color: var(--ink); }
+
+/* steps */
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px; margin-top: 44px; counter-reset: s; }
+.step { padding: 24px; border: 1px dashed #2c4a77; border-radius: 14px; }
+.step::before { counter-increment: s; content: counter(s, decimal-leading-zero); font: 600 14px var(--mono); color: var(--red); }
+.step h3 { font: 700 20px var(--display); margin: 6px 0; }
+.step p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+.note { margin-top: 26px; font-size: 15px; color: var(--ink-3); }
+
+.final { text-align: center; padding: 140px 0 120px; }
+.final h2 { margin-inline: auto; max-width: 18ch; }
+.final .cta { justify-content: center; margin-top: 30px; }
+footer { border-top: 1px solid var(--line); padding: 30px 0 calc(30px + env(safe-area-inset-bottom)); color: var(--ink-3); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; }
+.grid-bg { position: absolute; inset: 0; background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 48px 48px; mask-image: linear-gradient(transparent, #000 15%, #000 85%, transparent); pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } .frame { transform: none; } .query .caret { animation: none; } html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="logo" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
+  <div class="links">
+    <a href="#how">How it works</a><a href="#features">Features</a><a href="#tour">Tour</a><a href="#install">Install</a>
+    <a class="btn small" href="Sleuth-User-Guide.pdf">User guide</a>
+  </div>
+</div></nav>
+
+<header class="hero" id="top">
+  <canvas id="scene" aria-hidden="true"></canvas>
+  <div id="labels" aria-hidden="true"></div>
+  <div class="hero-copy"><div class="wrap">
+    <div class="eyebrow">Dexterity Design Services · internal tool</div>
+    <h1>Sleuth<span class="dot">.</span></h1>
+    <p class="lede">Find <b>any tag</b>, in <b>any drawing</b>, on <b>any drive</b>. Even when the PDF is a scan.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/dexterity-admin/Sleuth/releases/latest">Download for Windows</a>
+      <a class="btn" href="Sleuth-User-Guide.pdf">Read the user guide</a>
+    </div>
+  </div></div>
+  <div class="scroll-cue">SCROLL</div>
+</header>
+
+<section id="how">
+  <div class="grid-bg"></div>
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">One search box</div>
+      <h2>Type the tag. See the sheet, with the tag circled.</h2>
+      <p class="sub">Sleuth reads every page of your drawings once, including scans and plotted PDFs with no text, then answers in milliseconds. Every hit opens on the page where it was found, marked in red, so you check the evidence instead of trusting a list.</p>
+    </div>
+    <div class="stage reveal">
+      <div class="frame" id="frame">
+        <div class="bar"><i></i><i></i><i></i><span>Sleuth</span></div>
+        <img src="assets/screens/search.png" alt="Sleuth showing five drawings that contain line 6&quot;-P-1001-A1B, with the line circled on the isometric." width="2160" height="1350">
+      </div>
+    </div>
+    <div class="callouts reveal">
+      <div class="callout"><b>Reads scans</b>PP-OCRv6 reads each sheet at 300 dpi, tile by tile, so 2.5 mm text keeps its full resolution.</div>
+      <div class="callout"><b>Shows its working</b>Every result shows where it was read from and how sure the reader was.</div>
+      <div class="callout"><b>Opens the file</b>Open, open folder, or copy the network path in one click.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap match">
+    <div class="reveal">
+      <div class="eyebrow">Tag-aware matching</div>
+      <h2>Written five ways. Found every time.</h2>
+      <p class="sub">Drawings write the same tag with quotes, dashes, spaces, or not at all, and scanners confuse O with 0. Sleuth compares letters and digits, folds look-alikes, and labels every result honestly.</p>
+    </div>
+    <div class="reveal">
+      <div class="query" aria-label="Search box"><span id="typed"></span><span class="caret"></span></div>
+      <ul class="variants">
+        <li>6"-P-1001-A1B <span class="pill exact">Exact</span><span class="src">Isometric, OCR</span></li>
+        <li>6-P-1001-A1B <span class="pill sep">Separators ignored</span><span class="src">Line list, PDF text</span></li>
+        <li>6P1001A1B <span class="pill sep">Separators ignored</span><span class="src">File name</span></li>
+        <li>6"-P-1OO1-A1B <span class="pill verify">Verify, OCR unsure</span><span class="src">Faint scan, O read for 0</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="grid-bg"></div>
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Built for engineering offices</div>
+      <h2>Accurate first. Light on every PC.</h2>
+    </div>
+    <div class="features">
+      <div class="feature reveal"><div class="k">OCR</div><h3>Reads what Everything can't</h3><p>File-name search can't see inside a scanned isometric. Sleuth reads the text layer where there is one, and OCRs pages without one, including vertical text. Unsure lines get a second reading from Windows' own OCR.</p></div>
+      <div class="feature reveal"><div class="k">Office-wide</div><h3>Each drawing read once</h3><p>A shared reading cache on the network means a sheet read on one PC is never read again on another. Sleuth makes sure every PC is connected to it.</p></div>
+      <div class="feature reveal"><div class="k">Network drives</div><h3>Every drive, nothing hangs</h3><p>Deep search walks every ticked drive, a few folders at a time per file server. Offline shares are skipped in seconds, and slow folders are listed, never silently dropped.</p></div>
+      <div class="feature reveal"><div class="k">Courtesy</div><h3>Stays out of your way</h3><p>Reading runs in the background at low priority. It pauses while you work hard or run on battery, and speeds up when the PC is idle.</p></div>
+      <div class="feature reveal"><div class="k">Honesty</div><h3>Never a false "found"</h3><p>Uncertain OCR is labelled Verify and never counted as exact. Files that can't be read are listed with the reason.</p></div>
+      <div class="feature reveal"><div class="k">Updates</div><h3>Updates itself, keeps your setup</h3><p>New versions install from inside the app after a checksum check. Your settings and index are never touched.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Deep search</div>
+      <h2>Don't know where it is? Search everywhere.</h2>
+      <p class="sub">Each file server gets its own small team of searchers, so a slow share never holds up the others. PDFs found on the way that haven't been read yet are read straight away, and their results join the list as they come in.</p>
+    </div>
+    <div class="drives reveal" id="drives">
+      <div class="drv"><span>W:</span><div class="trk"><div class="fill ok" data-w="100"></div></div><span class="st">Done · 3 found</span></div>
+      <div class="drv"><span>P:</span><div class="trk"><div class="fill ok" data-w="100"></div></div><span class="st">Done · 2 found</span></div>
+      <div class="drv"><span>M:</span><div class="trk"><div class="fill" data-w="64"></div></div><span class="st">4,022 folders</span></div>
+      <div class="drv"><span>U:</span><div class="trk"><div class="fill" data-w="41"></div></div><span class="st">2,876 folders</span></div>
+      <div class="drv off"><span>Q:</span><div class="trk"><div class="fill" data-w="0"></div></div><span class="st">Offline, skipped</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="tour">
+  <div class="grid-bg"></div>
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Tour</div>
+      <h2>The real app, on sample drawings.</h2>
+      <p class="sub">These screenshots show Sleuth's own interface with results read from sample drawings. Folder and server names are examples.</p>
+    </div>
+    <div class="gallery">
+      <figure class="shot reveal"><img src="assets/screens/separators.png" alt="PSV1203 typed without a dash finds PSV-1203 on a P&amp;ID" loading="lazy"><figcaption><b>Separators ignored.</b> PSV1203 finds PSV-1203 on the P&amp;ID.</figcaption></figure>
+      <figure class="shot reveal"><img src="assets/screens/space.png" alt="FV 2201 typed with a space finds the instrument bubble" loading="lazy"><figcaption><b>Typed with a space.</b> "FV 2201" still finds the bubble.</figcaption></figure>
+      <figure class="shot reveal"><img src="assets/screens/scan.png" alt="A faint scanned isometric with HV-4410 circled" loading="lazy"><figcaption><b>Faint scans.</b> HV-4410 read off a low-contrast site scan.</figcaption></figure>
+      <figure class="shot reveal"><img src="assets/screens/deep.png" alt="Deep search progress across six drives, one offline" loading="lazy"><figcaption><b>Deep search.</b> Live progress per drive, offline shares skipped.</figcaption></figure>
+      <figure class="shot reveal"><img src="assets/screens/menu.png" alt="Right-click menu on a result" loading="lazy"><figcaption><b>One-click actions.</b> Open, open folder, copy paths or the text found.</figcaption></figure>
+      <figure class="shot reveal"><img src="assets/screens/status.png" alt="Index status with counts and unreadable files" loading="lazy"><figcaption><b>Nothing hidden.</b> What's read, what's waiting, and what couldn't be read, with the reason.</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="reveal">
+      <div class="eyebrow">Install</div>
+      <h2>Two minutes to your first search.</h2>
+    </div>
+    <div class="steps">
+      <div class="step reveal"><h3>Download</h3><p>Get the latest <span class="mono">Sleuth_x.y.z_x64-setup.exe</span> from the releases page. It installs for your account only; no admin rights needed.</p></div>
+      <div class="step reveal"><h3>Allow it once</h3><p>Windows may say it protected your PC. Click <b>More info</b>, then <b>Run anyway</b>. Updates later won't ask.</p></div>
+      <div class="step reveal"><h3>Check the cache</h3><p>Sleuth connects to the office reading cache at <span class="mono">U:\Sleuth-cache</span>. If it can't, it shows you exactly where to fix it.</p></div>
+      <div class="step reveal"><h3>Add your folders</h3><p>Add your project folders under <b>Folders being read</b>. Sleuth reads them in the background. Start searching straight away.</p></div>
+    </div>
+    <p class="note reveal">Requires Windows 10 or 11, 64-bit. While reading drawings Sleuth uses about 1.6 GB of memory; it frees that when idle.</p>
+  </div>
+</section>
+
+<section class="final">
+  <div class="grid-bg"></div>
+  <div class="wrap reveal">
+    <h2>Stop hunting for drawings.</h2>
+    <p class="sub" style="margin: 0 auto">Download Sleuth, read the guide, and find your first tag today.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/dexterity-admin/Sleuth/releases/latest">Download for Windows</a>
+      <a class="btn" href="Sleuth-User-Guide.pdf">User guide (PDF)</a>
+      <a class="btn" href="https://github.com/dexterity-admin/Sleuth">Source on GitHub</a>
+    </div>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <span>Sleuth · internal tool of Dexterity Design Services Pvt. Ltd.</span>
+  <span>Built with Rust, Tauri, PDFium and PP-OCRv6</span>
+</div></footer>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+
+const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// ---------- scroll reveals, tilting product shot, drive bars, typing ----------
+const io = new IntersectionObserver((es) => es.forEach((e) => {
+  if (!e.isIntersecting) return;
+  e.target.classList.add("in");
+  if (e.target.id === "drives") e.target.querySelectorAll(".fill").forEach((f) => (f.style.width = f.dataset.w + "%"));
+  io.unobserve(e.target);
+}), { threshold: 0.18 });
+document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+
+const frame = document.getElementById("frame");
+function tilt() {
+  const r = frame.getBoundingClientRect();
+  const p = Math.min(1, Math.max(0, 1 - (r.top - innerHeight * 0.15) / (innerHeight * 0.75)));
+  frame.style.setProperty("--tilt", (22 * (1 - p)).toFixed(2) + "deg");
+  frame.style.setProperty("--sc", (0.92 + 0.08 * p).toFixed(3));
+}
+if (!reduce) { addEventListener("scroll", tilt, { passive: true }); tilt(); }
+
+const typed = document.getElementById("typed");
+const word = '6"-P-1001-A1B';
+let ti = 0;
+function typeStep() {
+  typed.textContent = word.slice(0, ti);
+  ti = ti > word.length + 12 ? 0 : ti + 1;
+  setTimeout(typeStep, ti === 0 ? 400 : ti > word.length ? 160 : 110);
+}
+reduce ? (typed.textContent = word) : typeStep();
+
+// ---------- hero: a 3D piping isometric on a blueprint grid ----------
+const canvas = document.getElementById("scene");
+const labelsEl = document.getElementById("labels");
+let renderer;
+try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true }); }
+catch { canvas.style.display = "none"; }
+if (renderer) {
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.FogExp2(0x070d18, 0.028);
+  const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 200);
+
+  const grid = new THREE.GridHelper(120, 120, 0x1d3a63, 0x12233d);
+  grid.position.y = -4;
+  scene.add(grid);
+
+  const pipeMat = new THREE.MeshStandardMaterial({ color: 0xa9d2ff, metalness: 0.25, roughness: 0.3, emissive: 0x1f5ea8, emissiveIntensity: 0.85 });
+  const glowMat = new THREE.MeshBasicMaterial({ color: 0x7cc4ff, transparent: true, opacity: 0.16 });
+  scene.add(new THREE.HemisphereLight(0xbfe0ff, 0x0b1526, 1.1));
+  const key = new THREE.DirectionalLight(0xffffff, 1.4); key.position.set(8, 14, 6); scene.add(key);
+
+  // Pipe routes as orthogonal polylines (like an isometric), with elbows.
+  const routes = [
+    [[-14, 0, -6], [-4, 0, -6], [-4, 0, 2], [-4, -3, 2], [8, -3, 2], [8, -3, 9]],
+    [[-10, 3, 8], [-10, 3, -1], [2, 3, -1], [2, 6, -1], [2, 6, -10], [12, 6, -10]],
+    [[14, -1, -8], [6, -1, -8], [6, 1.5, -8], [6, 1.5, 4], [-6, 1.5, 4], [-6, 1.5, 12]],
+    [[-16, 5, 2], [-8, 5, 2], [-8, 8, 2], [4, 8, 2], [4, 8, 8]],
+  ];
+  const r = 0.32;
+  const segs = [];
+  for (const route of routes) {
+    for (let i = 0; i < route.length - 1; i++) {
+      const a = new THREE.Vector3(...route[i]), b = new THREE.Vector3(...route[i + 1]);
+      const len = a.distanceTo(b);
+      const g = new THREE.CylinderGeometry(r, r, len, 20, 1, true);
+      const m = new THREE.Mesh(g, pipeMat);
+      m.position.copy(a).add(b).multiplyScalar(0.5);
+      m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+      scene.add(m);
+      const halo = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.4, r * 2.4, len, 12, 1, true), glowMat);
+      halo.position.copy(m.position); halo.quaternion.copy(m.quaternion); scene.add(halo);
+      segs.push([a, b]);
+      if (i > 0) {
+        const j = new THREE.Mesh(new THREE.SphereGeometry(r * 1.25, 20, 16), pipeMat);
+        j.position.copy(a); scene.add(j);
+      }
+    }
+    // flanges at both ends
+    for (const end of [route[0], route[route.length - 1]]) {
+      const f = new THREE.Mesh(new THREE.CylinderGeometry(r * 2, r * 2, 0.18, 24), pipeMat);
+      f.position.set(...end); scene.add(f);
+    }
+  }
+
+  // Valves and instruments as small blocks along the lines
+  const valveMat = new THREE.MeshStandardMaterial({ color: 0xff4d57, emissive: 0x5a0d12, metalness: 0.2, roughness: 0.4 });
+  for (const p of [[-4, -1.5, 2], [2, 4.5, -1], [6, 1.5, -2], [-8, 6.5, 2]]) {
+    const v = new THREE.Mesh(new THREE.OctahedronGeometry(0.55), valveMat);
+    v.position.set(...p); scene.add(v);
+  }
+
+  // Tags floating near the pipes; the lens marks them as it passes.
+  const tagDefs = [
+    ['6"-P-1001-A1B', [-9, 0.9, -6]], ["PSV-1203", [-4, -1.2, 3]], ['4"-P-1002-A1B', [3, -2.2, 2]],
+    ["FV-2201", [2, 4.6, 0.4]], ['6"-CW-2014-B2A', [8, 6.9, -10]], ["HV-4410", [6, 2.4, -2]],
+    ['3"-P-1004-A1B', [-6, 2.4, 9]], ["TT-3105", [-8, 8.9, 2]], ["XV-1101", [10, -0.1, -8]], ["EL +104250", [-4, -3.9, 6]],
+  ];
+  const tags = tagDefs.map(([text, p]) => {
+    const el = document.createElement("div");
+    el.className = "tag"; el.textContent = text; labelsEl.append(el);
+    return { el, pos: new THREE.Vector3(...p), found: -10 };
+  });
+
+  // The lens: a glowing ring with a light, sweeping over the network
+  const lens = new THREE.Group();
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.09, 12, 80), new THREE.MeshBasicMaterial({ color: 0x7cc4ff }));
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(2.2, 64), new THREE.MeshBasicMaterial({ color: 0x7cc4ff, transparent: true, opacity: 0.08, side: THREE.DoubleSide }));
+  const handle = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 2.6, 12), new THREE.MeshBasicMaterial({ color: 0x7cc4ff }));
+  handle.position.set(2.4, -2.4, 0); handle.rotation.z = Math.PI / 4;
+  lens.add(ring, disc, handle);
+  const lensLight = new THREE.PointLight(0x7cc4ff, 30, 12);
+  lens.add(lensLight);
+  scene.add(lens);
+
+  // Dust motes for depth
+  const dustGeo = new THREE.BufferGeometry();
+  const N = 900, pts = new Float32Array(N * 3);
+  for (let i = 0; i < N * 3; i++) pts[i] = (Math.random() - 0.5) * (i % 3 === 1 ? 30 : 60);
+  dustGeo.setAttribute("position", new THREE.BufferAttribute(pts, 3));
+  const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({ color: 0x7cc4ff, size: 0.06, transparent: true, opacity: 0.5 }));
+  scene.add(dust);
+
+  let mx = 0, my = 0;
+  addEventListener("pointermove", (e) => { mx = e.clientX / innerWidth - 0.5; my = e.clientY / innerHeight - 0.5; });
+
+  function resize() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.fov = w < 700 ? 52 : 38;
+    // Push the network to the right on wide screens so the headline stays clear.
+    if (w > 760) camera.setViewOffset(w, h, -w * 0.2, 0, w, h); else camera.clearViewOffset();
+    camera.updateProjectionMatrix();
+  }
+  addEventListener("resize", resize);
+  resize();
+
+  let visible = true;
+  new IntersectionObserver(([e]) => (visible = e.isIntersecting)).observe(canvas);
+
+  const clock = new THREE.Clock();
+  const v = new THREE.Vector3();
+  function frameLoop() {
+    requestAnimationFrame(frameLoop);
+    if (!visible) return;
+    const t = reduce ? 6 : clock.getElapsedTime();
+    const scrollK = Math.min(1, scrollY / innerHeight);
+    // Slow cinematic orbit, pulled in as the page scrolls
+    const ang = t * 0.06 + 0.7;
+    const dist = 34 - scrollK * 10;
+    camera.position.set(Math.cos(ang) * dist + mx * 4, 15 + my * -3 - scrollK * 6, Math.sin(ang) * dist);
+    camera.lookAt(0, 1.5 - scrollK * 2, 0);
+    // Lens follows a figure-eight over the network
+    lens.position.set(Math.sin(t * 0.35) * 11, 4.5 + Math.sin(t * 0.7) * 2.5, Math.sin(t * 0.7) * 7);
+    lens.quaternion.copy(camera.quaternion);
+    dust.rotation.y = t * 0.01;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    for (const tg of tags) {
+      v.copy(tg.pos).project(camera);
+      const behind = v.z > 1;
+      tg.el.style.left = ((v.x + 1) / 2) * w + "px";
+      tg.el.style.top = ((1 - v.y) / 2) * h + "px";
+      const d = tg.pos.distanceTo(lens.position);
+      if (d < 4.6) tg.found = t;
+      const lit = t - tg.found < 2.4;
+      tg.el.classList.toggle("found", lit);
+      tg.el.style.opacity = behind ? 0 : Math.max(0.15, 1 - camera.position.distanceTo(tg.pos) / 60);
+    }
+    renderer.render(scene, camera);
+  }
+  frameLoop();
+}
+</script>
+</body>
+</html>

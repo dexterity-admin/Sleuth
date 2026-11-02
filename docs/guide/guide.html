@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sleuth User Guide</title>
+<style>
+/* Printed A4 manual. Body in Segoe UI for screen-like familiarity; tags and paths in Consolas. */
+@page { size: A4; margin: 18mm 17mm 20mm; @bottom-left { content: "Sleuth User Guide · version 0.1"; font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } @bottom-right { content: counter(page); font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } }
+@page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
+:root { --ink: #16202c; --ink-2: #4c5a6b; --ink-3: #7a8796; --blue: #1f5fbf; --blue-soft: #e8f0fc; --red: #d7262b; --line: #d5dbe3; --ok: #1d7a4a; --ok-soft: #e1f2e8; --warn: #8a5700; --warn-soft: #fbefd6; }
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; color: var(--ink); font: 10.5pt/1.55 "Segoe UI", system-ui, sans-serif; }
+h1, h2, h3 { font-family: "Segoe UI", sans-serif; color: var(--ink); text-wrap: balance; }
+h2 { font-size: 20pt; font-weight: 700; margin: 0 0 4pt; break-before: page; letter-spacing: -.01em; }
+h2 .n { color: var(--red); font-weight: 600; margin-right: 6pt; }
+h2 + .intro { color: var(--ink-2); font-size: 11.5pt; margin: 0 0 14pt; }
+h3 { font-size: 12.5pt; margin: 16pt 0 4pt; break-after: avoid; }
+p { margin: 0 0 8pt; }
+ul, ol { margin: 0 0 9pt; padding-left: 16pt; }
+li { margin: 2pt 0; }
+code, .mono { font-family: Consolas, "Cascadia Mono", monospace; font-size: 9.6pt; background: #f2f5f9; padding: 0 3pt; border-radius: 3pt; }
+b { font-weight: 600; }
+figure { margin: 8pt auto 10pt; break-inside: avoid; width: 84%; }
+figure.callout-map { width: 100%; }
+figure img { width: 100%; border: 0.6pt solid var(--line); border-radius: 4pt; display: block; }
+figcaption { font-size: 9pt; color: var(--ink-3); margin-top: 4pt; }
+.tip, .warn, .eng { border-radius: 5pt; padding: 8pt 11pt; margin: 9pt 0 11pt; break-inside: avoid; font-size: 10pt; }
+.tip { background: var(--blue-soft); border-left: 3pt solid var(--blue); }
+.warn { background: var(--warn-soft); border-left: 3pt solid var(--warn); }
+.eng { background: #fdeceb; border-left: 3pt solid var(--red); }
+.tip b:first-child, .warn b:first-child, .eng b:first-child { display: block; margin-bottom: 1pt; }
+table { width: 100%; border-collapse: collapse; margin: 6pt 0 12pt; font-size: 9.8pt; break-inside: auto; }
+th { text-align: left; font-weight: 600; background: #f2f5f9; }
+th, td { border-bottom: 0.6pt solid var(--line); padding: 5pt 6pt; vertical-align: top; }
+tr { break-inside: avoid; }
+.pill { font-size: 8.5pt; padding: 1pt 6pt; border-radius: 8pt; white-space: nowrap; font-weight: 600; }
+.pill.exact { background: var(--ok-soft); color: var(--ok); } .pill.sep { background: var(--blue-soft); color: var(--blue); } .pill.verify { background: var(--warn-soft); color: var(--warn); }
+kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-width: 1.5pt; border-radius: 3pt; padding: 0 4pt; background: #fff; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 14pt; }
+
+/* cover */
+.cover { page: cover; height: 297mm; position: relative; background: #070d18; color: #eef4fb; overflow: hidden; }
+.cover .grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(124, 196, 255, .08) 1px, transparent 1px), linear-gradient(90deg, rgba(124, 196, 255, .08) 1px, transparent 1px); background-size: 9mm 9mm; }
+.cover .shot { position: absolute; left: 22mm; right: -40mm; top: 128mm; transform: perspective(900px) rotateX(16deg) rotateZ(-4deg); border-radius: 4mm; overflow: hidden; border: 1px solid #2a4570; box-shadow: 0 30mm 60mm -10mm rgba(0, 0, 0, .7); }
+.cover .shot img { width: 100%; display: block; }
+.cover .text { position: absolute; left: 22mm; top: 34mm; right: 22mm; }
+.cover .logo { width: 18mm; height: 18mm; border-radius: 4mm; }
+.cover .kicker { font: 600 10pt Consolas, monospace; letter-spacing: .16em; color: #7cc4ff; text-transform: uppercase; margin-top: 10mm; }
+.cover h1 { font: 800 64pt/0.95 "Segoe UI", sans-serif; letter-spacing: -.03em; color: #fff; margin: 3mm 0 4mm; }
+.cover h1 span { color: #ff4d57; }
+.cover .sub { font-size: 15pt; color: #a9bbd1; max-width: 120mm; }
+.cover .foot { position: absolute; z-index: 2; left: 0; right: 0; bottom: 0; padding: 7mm 22mm 12mm; font-size: 9.5pt; color: #8fa5c2; background: linear-gradient(transparent, #070d18 35%); }
+
+.toc { break-before: page; }
+.toc h2 { break-before: avoid; }
+.toc ol { list-style: none; padding: 0; columns: 1; font-size: 11pt; }
+.toc li { display: flex; gap: 8pt; padding: 5pt 0; border-bottom: 0.6pt dotted var(--line); }
+.toc li span { color: var(--red); width: 18pt; font-weight: 600; }
+.glance { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 9pt; margin-top: 16pt; }
+.glance div { background: #f5f7fa; border-radius: 5pt; padding: 9pt 10pt; font-size: 9.6pt; color: var(--ink-2); }
+.glance b { display: block; color: var(--ink); font-size: 10.5pt; }
+.callout-map { position: relative; }
+.callout-map .k { position: absolute; width: 16pt; height: 16pt; border-radius: 50%; background: var(--red); color: #fff; font: 700 9pt "Segoe UI"; display: grid; place-items: center; box-shadow: 0 0 0 2pt #fff; }
+</style>
+</head>
+<body>
+
+<section class="cover">
+  <div class="grid"></div>
+  <div class="text">
+    <img class="logo" src="../../site/assets/icon.png" alt="">
+    <div class="kicker">User guide · version 0.1</div>
+    <h1>Sleuth<span>.</span></h1>
+    <div class="sub">Find any tag, in any drawing, on any drive. Even when the PDF is a scan.</div>
+  </div>
+  <div class="shot"><img src="../../site/assets/screens/search.png" alt=""></div>
+  <div class="foot">Dexterity Design Services Pvt. Ltd. · internal tool · github.com/dexterity-admin/Sleuth</div>
+</section>
+
+<section class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><span>1</span>What Sleuth is</li>
+    <li><span>2</span>Installing Sleuth</li>
+    <li><span>3</span>First-time setup</li>
+    <li><span>4</span>A tour of the window</li>
+    <li><span>5</span>Searching</li>
+    <li><span>6</span>How results are labelled, and when to double-check</li>
+    <li><span>7</span>Previewing and opening files</li>
+    <li><span>8</span>Deep search: when you don't know where it is</li>
+    <li><span>9</span>Background reading and the index</li>
+    <li><span>10</span>The shared reading cache</li>
+    <li><span>11</span>Settings reference</li>
+    <li><span>12</span>Updates</li>
+    <li><span>13</span>Troubleshooting and FAQ</li>
+    <li><span>14</span>Your data, privacy and uninstalling</li>
+    <li><span>15</span>Quick reference card</li>
+  </ol>
+  <div class="glance">
+    <div><b>Find by any text</b>Tag numbers, line numbers, document numbers, notes: anything printed on a drawing.</div>
+    <div><b>Even in scans</b>Sleuth reads scanned and plotted PDFs with OCR, so text with no text layer is found too.</div>
+    <div><b>See the proof</b>Each result opens on its page with the text circled in red.</div>
+  </div>
+</section>
+
+<h2><span class="n">1</span>What Sleuth is</h2>
+<p class="intro">Sleuth is our office's search tool for drawings and documents. Type a tag and it shows every file that contains it, which page it's on, and the spot on the page.</p>
+<p>Windows search, and tools like Everything, only look at file names, or at text that a PDF already carries. Most of our drawings are scans or plots with no text inside, so those tools can't find a line number printed on an isometric. Sleuth reads every page once, including scans, and remembers what it read. Searches then take a fraction of a second.</p>
+<h3>What Sleuth does for you</h3>
+<ul>
+  <li><b>Finds text inside drawings</b>, including scanned and plotted PDFs, with OCR that reads small print, rotated and vertical text.</li>
+  <li><b>Understands tags</b>: <code>6"-P-1001-A1B</code>, <code>6-P-1001-A1B</code> and <code>6P1001A1B</code> are the same tag to Sleuth.</li>
+  <li><b>Searches every drive</b>: your own disks and every mapped network drive, without freezing when a share is slow or offline.</li>
+  <li><b>Shows the evidence</b>: every hit opens on its page with the text marked, so you confirm it with your own eyes.</li>
+  <li><b>Shares the work</b>: a drawing read on any PC in the office is not read again on yours.</li>
+</ul>
+<h3>How it works, in one paragraph</h3>
+<p>Sleuth has two parts. The <b>Sleuth window</b> is what you search in. The <b>Sleuth reader</b> is a background program that keeps a list of file names on your drives and reads PDFs in the folders you choose. It pauses when you're busy and speeds up when the PC is idle. Everything it learns is kept in an index on your PC, plus the office's shared reading cache, which is why searches are instant.</p>
+<div class="eng"><b>For engineering use</b>Sleuth helps you find drawings; it does not certify them. When a result is labelled <span class="pill verify">Verify, OCR unsure</span>, or when the tag matters for a deliverable, open the page and read the tag yourself. Sleuth always shows you where to look.</div>
+
+<h2><span class="n">2</span>Installing Sleuth</h2>
+<p class="intro">Sleuth installs for your Windows account only. You don't need administrator rights, and it takes about a minute.</p>
+<ol>
+  <li>Open <b>github.com/dexterity-admin/Sleuth/releases/latest</b> and download <code>Sleuth_0.1.0_x64-setup.exe</code> (about 43 MB), or use the copy IT shared.</li>
+  <li>Run it. Because the installer is not code-signed, Windows may show <b>"Windows protected your PC"</b>. Click <b>More info</b>, then <b>Run anyway</b>. You only see this for the first install; updates install from inside Sleuth.</li>
+  <li>Click through the installer. Sleuth starts when it finishes, and adds a Start-menu entry.</li>
+</ol>
+<div class="tip"><b>For IT</b>Silent install: <code>Sleuth_x.y.z_x64-setup.exe /S</code>. To choose the folder, add <code>/D=C:\Tools\Sleuth</code> as the last argument.</div>
+<h3>What gets installed</h3>
+<table>
+  <tr><th>Item</th><th>Where</th><th>What it is</th></tr>
+  <tr><td>Sleuth</td><td><code>%LOCALAPPDATA%\Programs\Sleuth</code></td><td>The window (<code>sleuth.exe</code>), the reader (<code>sleuth-worker.exe</code>), the PDF engine and the OCR models</td></tr>
+  <tr><td>Your settings</td><td><code>%APPDATA%\Sleuth\settings.json</code></td><td>Folders to read, cache folder and options. Updates never touch this file.</td></tr>
+  <tr><td>Your index</td><td><code>%LOCALAPPDATA%\Sleuth</code></td><td>The file-name list, the text read from PDFs, OCR models and logs</td></tr>
+</table>
+<h3>Requirements</h3>
+<ul>
+  <li>Windows 10 or 11, 64-bit.</li>
+  <li>While it is reading drawings, the reader uses about 1.6 GB of memory and part of the CPU. It frees the memory after 2 minutes with nothing to read, and the window itself uses about 150 MB.</li>
+  <li>About 500 MB of disk for the program and a typical index.</li>
+</ul>
+
+<h2><span class="n">3</span>First-time setup</h2>
+<p class="intro">Two things need to be right: the shared reading cache, and the folders you want Sleuth to read. Both take a minute.</p>
+<h3>Step 1: the shared reading cache</h3>
+<p>Sleuth uses the office folder <code>U:\Sleuth-cache</code> automatically. If your PC has <code>U:</code> mapped, there is nothing to do. If it doesn't, Sleuth shows a yellow message at the top of the window. If you leave it, Sleuth opens Settings and highlights the place to fix it:</p>
+<figure><img src="../../site/assets/screens/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the cache works, it asks every minute. Section 10 explains why.</figcaption></figure>
+<ol>
+  <li>Type the folder IT gave you, or click <b>Browse</b> to pick it. It must be on a network drive everyone can write to.</li>
+  <li>Click <b>Test</b>. "Working" in green means it's right.</li>
+  <li>Click <b>Save</b>. Sleuth refuses to save a folder that doesn't work, and tells you why.</li>
+</ol>
+<h3>Step 2: choose the folders to read</h3>
+<p>Sleuth always knows the <b>names</b> of files on all your drives. To search <b>inside</b> PDFs, it has to read them first, and it only reads the folders you choose. Add the project folders you work in:</p>
+<ol>
+  <li>In the left pane, under <b>Folders being read</b>, click <b>Add folder</b>.</li>
+  <li>Pick the folder, for example <code>P:\Projects\SAMPLE-100</code>. Sleuth starts reading its PDFs in the background.</li>
+  <li>To stop reading a folder, click the <b>×</b> next to it.</li>
+</ol>
+<div class="tip"><b>How long does reading take?</b>PDFs with a text layer are read in seconds. A scanned A1/A3 sheet takes about a minute on an office PC. Pages already read on another PC come from the shared cache instantly. You can search at any time; results improve as reading continues.</div>
+
+<h2><span class="n">4</span>A tour of the window</h2>
+<p class="intro">Sleuth's window has a search bar at the top and three panes below it.</p>
+<figure class="callout-map"><img src="../../site/assets/screens/search.png" alt="The Sleuth window with a search for a line number and its preview">
+  <span class="k" style="left:16%;top:1.2%">1</span><span class="k" style="left:84%;top:1.2%">2</span><span class="k" style="left:6%;top:30%">3</span><span class="k" style="left:40%;top:30%">4</span><span class="k" style="left:84%;top:40%">5</span><span class="k" style="left:88%;top:86%">6</span>
+  <figcaption>A search for line 6"-P-1001-A1B. The numbers match the table below.</figcaption></figure>
+<table>
+  <tr><th>#</th><th>Part</th><th>What it does</th></tr>
+  <tr><td>1</td><td>Search box</td><td>Type a tag or any text. Results appear as you type. <kbd>Ctrl</kbd>+<kbd>F</kbd> jumps here from anywhere.</td></tr>
+  <tr><td>2</td><td>Smart match, Deep search, Settings</td><td><b>Smart match</b> also finds tags written differently; <b>Exact only</b> hides those. <b>Deep search</b> walks the drives live (section 8).</td></tr>
+  <tr><td>3</td><td>Locations and filters</td><td>Tick the drives to search. Show or hide result types. Manage <b>Folders being read</b>.</td></tr>
+  <tr><td>4</td><td>Results</td><td>One row per file: name, folder, the exact text found, page and match type. Click a column heading to sort.</td></tr>
+  <tr><td>5</td><td>Preview</td><td>The page where the text was found, with the text circled in red. Step between marks and pages.</td></tr>
+  <tr><td>6</td><td>Status bar</td><td>Number of results, and what the reader is doing. Click the reader status for details.</td></tr>
+</table>
+
+<h2><span class="n">5</span>Searching</h2>
+<p class="intro">Type what you're looking for. There's no special syntax to learn.</p>
+<h3>What you can search for</h3>
+<table>
+  <tr><th>Looking for</th><th>Type</th><th>Notes</th></tr>
+  <tr><td>A line number</td><td><code>6"-P-1001-A1B</code></td><td>Quotes, dashes and spaces are optional: <code>6P1001A1B</code> works too.</td></tr>
+  <tr><td>An instrument or valve tag</td><td><code>PSV-1203</code>, <code>FV 2201</code></td><td>A tag typed with a space is still found.</td></tr>
+  <tr><td>A document number</td><td><code>DOC-1001-17</code></td><td>Finds the document itself and every drawing that refers to it.</td></tr>
+  <tr><td>A drawing number or file name</td><td><code>ISO-1001-02</code></td><td>File names are searched on every drive, read or not.</td></tr>
+  <tr><td>Several things at once</td><td><code>PSV-1203 flare</code></td><td>Files that contain <b>all</b> the words, anywhere in the file.</td></tr>
+  <tr><td>An exact phrase</td><td><code>"rev c"</code></td><td>Put the phrase in double quotes. An inch mark inside a tag, as in <code>6"-P</code>, is never treated as a quote.</td></tr>
+</table>
+<h3>Narrowing the results</h3>
+<ul>
+  <li><b>Drives</b>: untick a drive in the left pane to leave it out.</li>
+  <li><b>Show</b>: hide <span class="pill exact">Exact</span>, <span class="pill sep">Separators ignored</span> or <span class="pill verify">Verify</span> results, or results found only in file names.</li>
+  <li><b>Exact only</b>: the drop-down next to the search box hides everything except exact matches.</li>
+  <li><b>Sort</b>: click a column heading; click again to reverse.</li>
+</ul>
+<h3>Keyboard</h3>
+<table>
+  <tr><th>Key</th><th>Does</th></tr>
+  <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Go to the search box</td></tr>
+  <tr><td><kbd>Enter</kbd> in the search box</td><td>Search now; <kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs a deep search</td></tr>
+  <tr><td><kbd>Esc</kbd></td><td>Clear the search</td></tr>
+  <tr><td><kbd>↓</kbd> / <kbd>↑</kbd>, <kbd>Page Down</kbd> / <kbd>Page Up</kbd></td><td>Move through results; the preview follows</td></tr>
+  <tr><td><kbd>Enter</kbd> on a result, or double-click</td><td>Open the file</td></tr>
+</table>
+
+<h2><span class="n">6</span>How results are labelled, and when to double-check</h2>
+<p class="intro">Every result says how it matched and where the text came from. This is what lets you trust Sleuth on engineering work.</p>
+<table>
+  <tr><th style="width:30%">Label</th><th>Means</th><th style="width:28%">What to do</th></tr>
+  <tr><td><span class="pill exact">Exact</span></td><td>The text on the page is exactly what you typed.</td><td>Nothing; open it.</td></tr>
+  <tr><td><span class="pill sep">Separators ignored</span></td><td>Same letters and digits, written with different dashes, quotes or spaces. <code>PSV1203</code> found <code>PSV-1203</code>.</td><td>Usually right. Glance at the preview.</td></tr>
+  <tr><td><span class="pill verify">Verify, OCR unsure</span></td><td>Either the OCR wasn't confident, or a character could be a look-alike (O/0, l/1, S/5, B/8, Z/2, G/6).</td><td><b>Check the preview</b> before relying on it.</td></tr>
+  <tr><td><span class="pill" style="background:#eef1f5;color:#566373">Name · …</span></td><td>Found in the file name, not inside the file.</td><td>Useful when the PDF hasn't been read.</td></tr>
+</table>
+<h3>Where the text came from</h3>
+<p>Hover over a result's label to see it; the preview pane shows it too.</p>
+<ul>
+  <li><b>PDF text</b>: the PDF carries real text (exported from CAD or Word). Always exact.</li>
+  <li><b>OCR</b>: Sleuth read the image of the page, with a confidence percentage. When the main reader was unsure, Windows' own OCR read the line again. If the two disagree, both readings are kept and the result is marked <span class="pill verify">Verify</span>.</li>
+  <li><b>File name</b>: matched the name only.</li>
+</ul>
+<figure><img src="../../site/assets/screens/scan.png" alt="A faint scanned isometric with the tag HV-4410 circled"><figcaption>A low-contrast site scan. The tag was read with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
+<div class="eng"><b>Rule of thumb</b>Sleuth never reports an uncertain reading as Exact. If it matters, look at the page: the preview is one click away and always shows the spot.</div>
+
+<h2><span class="n">7</span>Previewing and opening files</h2>
+<p class="intro">Click a result and the page appears on the right, with the text circled.</p>
+<div class="two">
+  <div>
+    <h3>In the preview pane</h3>
+    <ul>
+      <li><b>‹ Mark / Mark ›</b> steps between every place the text appears on the page.</li>
+      <li><b>Zoom to mark / Fit page</b> switches between a close-up and the whole sheet.</li>
+      <li><b>‹ ›</b> under the page moves between pages.</li>
+      <li>The details list the file, its folder, its network path, what was found, how it was read, and its size and date.</li>
+      <li><b>Open</b>, <b>Open folder</b> and <b>Copy path</b> are under the details.</li>
+    </ul>
+  </div>
+  <div>
+    <h3>Right-click a result</h3>
+    <ul>
+      <li><b>Open</b> or <b>Open folder</b> (the file is selected in Explorer).</li>
+      <li><b>Copy path</b>, with your drive letter.</li>
+      <li><b>Copy network path</b>: the <code>\\server\share</code> form, which works on any PC whatever drive letters it uses.</li>
+      <li><b>Copy text found</b>: the exact text read.</li>
+      <li><b>Read this PDF now</b>: moves the file to the front of the reading queue.</li>
+    </ul>
+  </div>
+</div>
+<figure><img src="../../site/assets/screens/menu.png" alt="The right-click menu on a result"><figcaption>Right-click any result for these actions.</figcaption></figure>
+<div class="tip"><b>Sharing a location with a colleague</b>Use <b>Copy network path</b>. Drive letters differ between PCs; the network path doesn't.</div>
+
+<h2><span class="n">8</span>Deep search: when you don't know where it is</h2>
+<p class="intro">A normal search looks in what Sleuth already knows. A deep search also walks the drives live, right now.</p>
+<p>Use it when a file is new, sits outside the folders being read, or may be on a drive Sleuth hasn't listed yet. Type your search and click <b>Deep search</b> (or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>).</p>
+<figure><img src="../../site/assets/screens/deep.png" alt="Deep search progress under the results, one bar per drive"><figcaption>One bar per drive. Finished drives turn green; an unreachable share is skipped in seconds.</figcaption></figure>
+<ul>
+  <li><b>Progress per drive</b> shows under the results: folders searched and hits found. The left pane shows each drive's state.</li>
+  <li><b>Unread PDFs found on the way</b> are read straight away, ahead of everything else. They join the results as soon as they're read, so leave Sleuth open for a minute after the walk finishes.</li>
+  <li><b>Offline drives</b> are skipped after a few seconds instead of hanging the search.</li>
+  <li><b>Slow or locked folders</b> are given up on after the time set in Settings, and listed as "folders not searched". Hover over that line to see which ones and why.</li>
+  <li>Drives on the same file server share a speed limit, so the server isn't overloaded.</li>
+  <li>Click <b>Stop</b> at any time. Results found so far stay.</li>
+</ul>
+<div class="tip"><b>Search fewer drives for speed</b>Untick drives you know aren't relevant in the left pane before starting a deep search.</div>
+
+<h2><span class="n">9</span>Background reading and the index</h2>
+<p class="intro">The Sleuth reader works quietly in the background so searches are instant.</p>
+<h3>What the reader does</h3>
+<ul>
+  <li><b>File names</b>: lists the files on every local and network drive, and refreshes the list every 6 hours.</li>
+  <li><b>Reading PDFs</b>: reads the PDFs in your <b>Folders being read</b>, newest first. Files you ask for (deep search, "Read this PDF now") always go first.</li>
+  <li><b>Changes</b>: a file that changes is read again automatically.</li>
+</ul>
+<h3>Being polite to your PC</h3>
+<ul>
+  <li>Reading pauses while other programs keep the CPU busy (above 60% by default) and while the PC runs on battery.</li>
+  <li>It uses half the CPU cores while you work, and more when nobody has touched the PC for 5 minutes.</li>
+  <li>The OCR engine is unloaded from memory after 2 minutes with nothing to read.</li>
+  <li>With "Keep reading in the background" on (the default), the reader keeps going after you close the window, and starts with Windows.</li>
+</ul>
+<h3>Index status</h3>
+<p>Click the reader status in the bottom-right corner to see how many files are indexed, read and waiting, and which files could not be read and why.</p>
+<figure><img src="../../site/assets/screens/status.png" alt="The index status window"><figcaption>Files that can't be read are listed with the reason, never silently skipped.</figcaption></figure>
+<table>
+  <tr><th>Reason shown</th><th>Meaning</th></tr>
+  <tr><td>password protected</td><td>The PDF is encrypted. Sleuth can still find it by name.</td></tr>
+  <tr><td>damaged or not a PDF</td><td>The file is corrupt, or has a .pdf name but isn't one.</td></tr>
+  <tr><td>could not be opened: …</td><td>The file moved, is locked, or you have no access. Network hiccups are retried automatically: up to 5 times, at growing intervals, before a file is listed here.</td></tr>
+</table>
+
+<h2><span class="n">10</span>The shared reading cache</h2>
+<p class="intro">Reading a scanned sheet takes about a minute. The shared cache means that minute is spent once for the whole office, not once per PC.</p>
+<p>When any PC finishes reading a PDF on a network drive, it saves the result in the shared cache folder (by default <code>U:\Sleuth-cache</code>). Before reading a PDF, every other PC checks the cache first. If the same drawing is there, it is taken from the cache in an instant. Files are matched by their content, so a copied or renamed drawing is recognised too.</p>
+<h3>Why Sleuth insists on it</h3>
+<p>Without the cache, every PC would read every drawing itself: slower for you, and much more load on the network. So the cache is required. If it isn't working, Sleuth:</p>
+<ol>
+  <li>shows a yellow message with <b>Set it up now</b>;</li>
+  <li>after a minute, opens Settings with the cache section highlighted;</li>
+  <li>won't save a cache folder that doesn't work.</li>
+</ol>
+<p>If the cache is only temporarily unreachable (you're off-site, or the server is down), Sleuth shows a quiet notice instead and keeps reading on your PC. It starts using the cache again by itself when it's back.</p>
+<div class="warn"><b>Don't delete files in the cache folder</b>They're the office's shared reading results. Deleting them only makes PCs read those drawings again.</div>
+
+<h2><span class="n">11</span>Settings reference</h2>
+<p class="intro">Open with <b>Settings</b> at the top right.</p>
+<figure><img src="../../site/assets/screens/settings.png" alt="The settings window"><figcaption>The Settings window.</figcaption></figure>
+<table>
+  <tr><th style="width:32%">Setting</th><th>What it does</th><th style="width:18%">Default</th></tr>
+  <tr><td>OCR accuracy</td><td><b>Standard</b> is recommended. <b>High</b> uses a larger model, downloaded once (140 MB); it is about 3× slower and found no extra text in our tests.</td><td>Standard</td></tr>
+  <tr><td>Resolution for OCR</td><td>300 dpi reads 2.5 mm text on A1/A3 sheets reliably. Use 400 dpi only for very small print; it is slower.</td><td>300 dpi</td></tr>
+  <tr><td>Pause reading while other programs use more than …</td><td>Reading waits while your PC is busy with other work.</td><td>60% CPU</td></tr>
+  <tr><td>Keep reading in the background</td><td>The reader keeps working when the window is closed, and starts with Windows.</td><td>On</td></tr>
+  <tr><td>Shared reading cache</td><td>The office folder for shared results. Required; see section 10.</td><td><code>U:\Sleuth-cache</code></td></tr>
+  <tr><td>Folders listed at once per file server</td><td>How hard deep search works each server. Raise for speed, lower if a server struggles.</td><td>4</td></tr>
+  <tr><td>Give up on a folder after</td><td>A folder that doesn't answer in this time is skipped and listed.</td><td>20 s</td></tr>
+  <tr><td>Refresh the file-name index every</td><td>How often the list of file names is rebuilt.</td><td>360 min</td></tr>
+  <tr><td>Never search inside</td><td>Folders Sleuth never walks or reads, one per line.</td><td>Windows and program folders</td></tr>
+  <tr><td>Update channel</td><td><b>Stable</b> for everyone. <b>Development builds</b> only if you're testing new versions.</td><td>Stable</td></tr>
+  <tr><td>Refresh index now</td><td>Rebuilds the file-name list straight away, in the background.</td><td></td></tr>
+</table>
+
+<h2><span class="n">12</span>Updates</h2>
+<p class="intro">Sleuth keeps itself up to date. Your settings and index are always kept.</p>
+<ul>
+  <li>Sleuth checks for a new version when it starts and every 6 hours. When there is one, a blue bar appears at the top: <b>Restart and update</b>.</li>
+  <li>Sleuth downloads the new installer, checks it against the published checksum, stops the reader, installs, and starts again, usually in under a minute.</li>
+  <li>To check yourself: <b>Settings → Check for updates</b>.</li>
+  <li>The Windows "protected your PC" prompt does not appear for in-app updates.</li>
+</ul>
+<div class="tip"><b>Never lose your setup</b>Updates only replace program files. <code>settings.json</code>, your folders being read, and the index stay exactly as they were.</div>
+
+<h2><span class="n">13</span>Troubleshooting and FAQ</h2>
+<table>
+  <tr><th style="width:36%">Problem</th><th>What to do</th></tr>
+  <tr><td>A drawing I know has the tag isn't found</td><td>Is its folder in <b>Folders being read</b>? If not, add it, or right-click the file and choose <b>Read this PDF now</b>. If you don't know where it is, use <b>Deep search</b>. Also try <b>Smart match</b> rather than Exact only.</td></tr>
+  <tr><td>Results say "Verify, OCR unsure"</td><td>Open the preview and read the tag yourself. Faint, skewed or handwritten text is harder to read; the label tells you to look.</td></tr>
+  <tr><td>"The shared reading cache isn't working"</td><td>Map <code>U:</code> or choose the folder IT gave you, in Settings → Shared reading cache → <b>Test</b> → <b>Save</b>.</td></tr>
+  <tr><td>Reading seems slow</td><td>Scans take about a minute per sheet. Reading pauses while you're busy and runs faster when you step away. Check the status bar: "paused: PC busy" is normal.</td></tr>
+  <tr><td>A drive shows "Offline, skipped"</td><td>The share didn't answer. Check it in Explorer; when it's back, search again.</td></tr>
+  <tr><td>"N folders not searched"</td><td>Those folders were locked or too slow. Hover to see them. Raise "Give up on a folder after" if a server is just slow.</td></tr>
+  <tr><td>The window says the reader is restarting</td><td>Wait a few seconds; Sleuth restarts the reader automatically.</td></tr>
+  <tr><td>Windows blocked the installer</td><td>Click <b>More info</b> → <b>Run anyway</b>. This happens only for the first install.</td></tr>
+  <tr><td>I want to start the index from scratch</td><td>Close Sleuth, delete <code>%LOCALAPPDATA%\Sleuth\index.db</code>, and open Sleuth again. Results from the shared cache come back quickly.</td></tr>
+</table>
+<h3>Questions people ask</h3>
+<p><b>Does Sleuth send my drawings anywhere?</b> No. Everything is read on your PC. Results are stored on your PC and in the office's shared cache folder. Nothing goes to the internet; the only internet traffic is checking GitHub for updates.</p>
+<p><b>Does it change my files?</b> Never. Sleuth only reads files.</p>
+<p><b>Can it search DWG or Word files?</b> Version 0.1 searches inside PDFs, and finds any file type by name.</p>
+<p><b>Why does a file appear once even if the tag is on five pages?</b> One row per file keeps the list readable. The preview steps through every mark and page.</p>
+
+<h2><span class="n">14</span>Your data, privacy and uninstalling</h2>
+<ul>
+  <li><b>On your PC</b>: settings in <code>%APPDATA%\Sleuth</code>; the index, models and logs in <code>%LOCALAPPDATA%\Sleuth</code>.</li>
+  <li><b>On the network</b>: read results in the shared cache folder, readable by the office.</li>
+  <li><b>On the internet</b>: nothing, except update checks to GitHub.</li>
+  <li><b>Logs</b>: <code>%LOCALAPPDATA%\Sleuth\logs\worker.log</code> is useful to IT when something goes wrong.</li>
+</ul>
+<h3>Uninstalling</h3>
+<p>Settings → Apps → <b>Sleuth</b> → Uninstall. This removes the program, Start-menu entry and start-up entry. Your settings and index are left in place in case you reinstall; delete the two folders above to remove them too.</p>
+
+<h2><span class="n">15</span>Quick reference card</h2>
+<p class="intro">Print this page and keep it by your desk.</p>
+<table>
+  <tr><th style="width:40%">I want to…</th><th>Do this</th></tr>
+  <tr><td>Find a tag</td><td>Type it. Dashes, quotes and spaces are optional.</td></tr>
+  <tr><td>See where it is on the sheet</td><td>Click the result; the red circle marks it. <b>Mark ›</b> for the next one.</td></tr>
+  <tr><td>Open the drawing</td><td>Double-click, or <kbd>Enter</kbd>.</td></tr>
+  <tr><td>Open its folder</td><td>Right-click → <b>Open folder</b>.</td></tr>
+  <tr><td>Send a colleague the location</td><td>Right-click → <b>Copy network path</b>.</td></tr>
+  <tr><td>Search everywhere, live</td><td><b>Deep search</b>, or <kbd>Ctrl</kbd>+<kbd>Enter</kbd>.</td></tr>
+  <tr><td>Make a folder searchable inside</td><td><b>Folders being read → Add folder</b>.</td></tr>
+  <tr><td>Read one file right now</td><td>Right-click → <b>Read this PDF now</b>.</td></tr>
+  <tr><td>Check what's been read</td><td>Click the status at the bottom right.</td></tr>
+  <tr><td>Fix the shared cache</td><td>Settings → Shared reading cache → <b>Test</b> → <b>Save</b>.</td></tr>
+</table>
+<table>
+  <tr><th>Label</th><th>Trust it?</th></tr>
+  <tr><td><span class="pill exact">Exact</span></td><td>Yes.</td></tr>
+  <tr><td><span class="pill sep">Separators ignored</span></td><td>Usually; glance at the preview.</td></tr>
+  <tr><td><span class="pill verify">Verify, OCR unsure</span></td><td>Check the page yourself before relying on it.</td></tr>
+</table>
+<p style="margin-top:18pt;color:var(--ink-3);font-size:9pt">Sleuth 0.1 · Dexterity Design Services Pvt. Ltd. · Screenshots show Sleuth's own interface with results read from sample drawings; folder and server names are examples. Latest version and this guide: github.com/dexterity-admin/Sleuth</p>
+</body>
+</html>
