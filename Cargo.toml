@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/sleuth-core", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Dexterity Design Services Pvt. Ltd."]
+license = "LicenseRef-Proprietary"
+repository = "https://github.com/dexterity-admin/Sleuth"
+
+[workspace.dependencies]
+sleuth-core = { path = "crates/sleuth-core" }
+sleuth-engine = { path = "crates/sleuth-engine" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_NetworkManagement_WNet",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+  "Win32_System_SystemInformation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Shell",
+  "Win32_System_Power",
+  "Win32_System_WinRT",
+  "Media_Ocr",
+  "Graphics_Imaging",
+  "Storage_Streams",
+  "Globalization",
+  "Foundation",
+  "Foundation_Collections",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

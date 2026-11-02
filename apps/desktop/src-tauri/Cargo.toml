@@ -1,0 +1,25 @@
+[package]
+name = "sleuth"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Sleuth - find any tag, in any drawing, on any drive"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sleuth-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+ureq = "3"
+sha2 = "0.10"
+semver = "1"
+winreg = "0.55"
+windows.workspace = true

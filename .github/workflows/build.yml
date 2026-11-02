@@ -1,0 +1,104 @@
+# Builds and tests Sleuth on every push and pull request, and publishes
+# installers as GitHub releases of this repository. Needs no secrets: the
+# built-in GITHUB_TOKEN is enough to publish releases here.
+#   push to main  -> "dev" pre-release (version X.Y.Z+1-dev.N), used by the Development update channel
+#   tag vX.Y.Z    -> release vX.Y.Z, used by the Stable update channel
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Work out version
+        id: ver
+        shell: pwsh
+        run: |
+          $base = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $ref = '${{ github.ref }}'
+          if ($ref -like 'refs/tags/v*') {
+            $tag = $ref.Substring(11)
+            if ($tag -ne $base) { throw "Tag v$tag does not match Cargo.toml version $base" }
+            $version = $base; $channel = 'stable'
+          } else {
+            $p = $base.Split('.')
+            $version = "$($p[0]).$($p[1]).$([int]$p[2] + 1)-dev.${{ github.run_number }}"
+            $channel = if ($ref -eq 'refs/heads/main' -and '${{ github.event_name }}' -eq 'push') { 'dev' } else { 'none' }
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+
+      - name: Set version
+        if: steps.ver.outputs.channel == 'dev'
+        shell: pwsh
+        run: ./scripts/set-version.ps1 -Version '${{ steps.ver.outputs.version }}'
+
+      - name: Build and test
+        shell: pwsh
+        run: ./scripts/build.ps1
+
+      - name: Collect installer
+        id: art
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force out | Out-Null
+          $name = "Sleuth_${{ steps.ver.outputs.version }}_x64-setup.exe"
+          Copy-Item $exe.FullName "out/$name"
+          "name=$name" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sleuth-${{ steps.ver.outputs.version }}
+          path: out/*
+          retention-days: 14
+
+      - name: Publish development build
+        if: steps.ver.outputs.channel == 'dev'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $repo = '${{ github.repository }}'
+          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/dev/$n" -Notes "Development build ${{ github.sha }}" -Out out/latest.json
+          gh release delete dev --repo $repo --yes --cleanup-tag 2>$null
+          gh release create dev --repo $repo --prerelease --target ${{ github.sha }} --title "Development build $v" --notes "Built from ${{ github.sha }}. For testing only." "out/$n" out/latest.json
+
+      - name: Publish release
+        if: steps.ver.outputs.channel == 'stable'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $repo = '${{ github.repository }}'
+          $notes = (Get-Content -Raw CHANGELOG.md) -split '(?m)^## ' | Where-Object { $_ -like "$v*" } | Select-Object -First 1
+          if (-not $notes) { $notes = "Sleuth $v" } else { $notes = ($notes -split "`n", 2)[1].Trim() }
+          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/v$v/$n" -Notes $notes -Out out/latest.json
+          gh release create "v$v" --repo $repo --title "Sleuth $v" --notes $notes "out/$n" out/latest.json

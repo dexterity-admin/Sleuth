@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sleuth</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header class="toolbar">
+    <div class="brand"><img src="icon.png" alt="" width="22" height="22"><span>Sleuth</span></div>
+    <div class="searchbox">
+      <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder='Tag, text or file name, e.g. 10"-P-1001-A1B' aria-label="Search">
+      <button id="clearQ" class="icon" title="Clear (Esc)" aria-label="Clear search">&times;</button>
+    </div>
+    <select id="mode" aria-label="Match mode" title="Smart match also finds tags written without separators and possible OCR misreads">
+      <option value="smart">Smart match</option>
+      <option value="exact">Exact only</option>
+    </select>
+    <button id="deep" class="primary" title="Also walk the selected drives live and read any PDFs not read yet">Deep search</button>
+    <button id="settingsBtn" title="Settings">Settings</button>
+  </header>
+
+  <div id="cacheBanner" class="banner warn" hidden role="alert">
+    <span id="cacheBannerText"></span>
+    <span class="banner-actions"><button id="cacheBannerAction" class="primary">Set it up now</button><button id="cacheBannerClose" class="icon" aria-label="Dismiss" hidden>&times;</button></span>
+  </div>
+
+  <div id="banner" class="banner" hidden>
+    <span id="bannerText"></span>
+    <span class="banner-actions"><button id="bannerAction" class="primary"></button><button id="bannerClose" class="icon" aria-label="Dismiss">&times;</button></span>
+  </div>
+
+  <main class="panes">
+    <aside class="side" aria-label="Locations and filters">
+      <h3>This PC</h3>
+      <div id="localDrives" class="drives"></div>
+      <h3>Network</h3>
+      <div id="netDrives" class="drives"></div>
+      <h3>Show</h3>
+      <label><input type="checkbox" id="f-exact" checked> <span class="pill exact">Exact</span></label>
+      <label><input type="checkbox" id="f-sep" checked> <span class="pill sep">Separators ignored</span></label>
+      <label><input type="checkbox" id="f-unc" checked> <span class="pill verify">Verify</span></label>
+      <label><input type="checkbox" id="f-content" checked> Text inside files</label>
+      <label><input type="checkbox" id="f-names" checked> File names</label>
+      <h3>Folders being read</h3>
+      <div id="scopes" class="scopes"></div>
+      <button id="addScope" class="small">Add folder</button>
+    </aside>
+
+    <section class="results" aria-label="Results">
+      <div class="thead" role="row">
+        <button data-k="name">Name</button>
+        <button data-k="folder">Folder</button>
+        <button data-k="found">Text found</button>
+        <button data-k="page" class="num">Pg</button>
+        <button data-k="class">Match</button>
+        <button data-k="modified">Modified</button>
+      </div>
+      <div id="rows" class="tbody" tabindex="0" role="grid" aria-label="Search results">
+        <div id="spacer"></div>
+      </div>
+      <div id="empty" class="empty"></div>
+      <div id="deepbar" class="deepbar" hidden></div>
+    </section>
+
+    <aside id="preview" class="preview" aria-label="Preview">
+      <div class="pv-empty" id="pvEmpty">Select a result to see the page with the text marked.</div>
+      <div id="pvBody" hidden>
+        <div class="pv-tools">
+          <button id="pvPrevHit" class="small" title="Previous mark">&lsaquo; Mark</button>
+          <span id="pvHitInfo"></span>
+          <button id="pvNextHit" class="small" title="Next mark">Mark &rsaquo;</button>
+          <span class="grow"></span>
+          <button id="pvZoom" class="small" title="Zoom to the mark / fit page">Zoom</button>
+        </div>
+        <div id="pvStage" class="pv-stage"><div id="pvCanvas" class="pv-canvas"><img id="pvImg" alt=""></div></div>
+        <div class="pv-pages">
+          <button id="pvPrevPage" class="small" aria-label="Previous page">&lsaquo;</button>
+          <span id="pvPageInfo"></span>
+          <button id="pvNextPage" class="small" aria-label="Next page">&rsaquo;</button>
+        </div>
+        <dl class="kv" id="pvMeta"></dl>
+        <div class="pv-actions">
+          <button id="pvOpen" class="primary">Open</button>
+          <button id="pvReveal">Open folder</button>
+          <button id="pvCopy">Copy path</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="sbCount">Ready</span>
+    <span id="sbSearch"></span>
+    <button id="sbReader" class="linkish" title="Index status"></button>
+  </footer>
+</div>
+
+<div id="ctx" class="menu" hidden role="menu">
+  <button data-act="open" role="menuitem">Open</button>
+  <button data-act="reveal" role="menuitem">Open folder</button>
+  <button data-act="copy" role="menuitem">Copy path</button>
+  <button data-act="copyunc" role="menuitem">Copy network path</button>
+  <button data-act="copytext" role="menuitem">Copy text found</button>
+  <button data-act="read" role="menuitem">Read this PDF now</button>
+</div>
+
+<dialog id="settingsDlg">
+  <form method="dialog" id="settingsForm">
+    <h2>Settings</h2>
+    <section>
+      <h3>Reading PDFs</h3>
+      <label class="row">OCR accuracy
+        <select id="s-quality">
+          <option value="auto">Standard (recommended)</option>
+          <option value="high">High (about 3x slower, downloads 140 MB once)</option>
+        </select>
+      </label>
+      <label class="row">Resolution for OCR
+        <select id="s-dpi"><option value="300">300 dpi (recommended)</option><option value="400">400 dpi (very small print, slower)</option></select>
+      </label>
+      <label class="row">Pause reading while other programs use more than
+        <span><input id="s-busy" type="number" min="10" max="100" step="5"> % CPU</span>
+      </label>
+      <label class="check"><input type="checkbox" id="s-keep"> Keep reading in the background when Sleuth is closed (starts with Windows)</label>
+    </section>
+    <section id="cacheSection">
+      <h3>Shared reading cache (required)</h3>
+      <p class="hint">Drawings already read on another PC are not read again here, so everyone shares the work. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
+      <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button></div>
+      <p id="s-cacheState" class="hint"></p>
+    </section>
+    <section>
+      <h3>Deep search</h3>
+      <label class="row">Folders listed at once per file server <input id="s-per" type="number" min="1" max="16"></label>
+      <label class="row">Give up on a folder after <span><input id="s-timeout" type="number" min="5" max="120"> seconds</span></label>
+      <label class="row">Refresh the file-name index every <span><input id="s-rescan" type="number" min="15" max="10080"> minutes</span></label>
+      <label class="row">Never search inside (one per line)
+        <textarea id="s-excluded" rows="4" spellcheck="false"></textarea>
+      </label>
+    </section>
+    <section>
+      <h3>Updates</h3>
+      <label class="row">Update channel
+        <select id="s-channel"><option value="stable">Stable</option><option value="dev">Development builds</option></select>
+      </label>
+      <div class="row-inline"><span id="s-version"></span><button type="button" id="s-checkUpdate" class="small">Check for updates</button><span id="s-updateMsg" class="hint"></span></div>
+    </section>
+    <p id="s-error" class="error" hidden></p>
+    <div class="dlg-actions">
+      <button type="button" id="s-rescanNow">Refresh index now</button>
+      <span class="grow"></span>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button type="button" id="s-save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="statusDlg">
+  <h2>Index status</h2>
+  <div id="stGrid" class="stats"></div>
+  <h3>Could not be read</h3>
+  <div id="stFailed" class="failed"></div>
+  <div class="dlg-actions"><span class="grow"></span><button id="stClose">Close</button></div>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>
