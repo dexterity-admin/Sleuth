@@ -11,7 +11,7 @@ use sleuth_server::config::{Config, Role, UserCfg, hash_key};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const DEMO: &str = r"D:\Internal Tool for search\.devdata\demo-drawings\Line list rev 3.pdf";
+const DEMO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/line-list.pdf");
 
 fn fresh(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir);
