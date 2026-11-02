@@ -74,7 +74,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
     <h1>Sleuth<span>.</span></h1>
     <div class="sub">Find any tag, in any drawing, on any drive. Even when the PDF is a scan.</div>
   </div>
-  <div class="shot"><img src="../../site/assets/screens/search.png" alt=""></div>
+  <div class="shot"><img src="../images/search.png" alt=""></div>
   <div class="foot">Dexterity Design Services Pvt. Ltd. · internal tool · github.com/dexterity-admin/Sleuth</div>
 </section>
 
@@ -145,7 +145,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <p class="intro">Two things need to be right: the shared reading cache, and the folders you want Sleuth to read. Both take a minute.</p>
 <h3>Step 1: the shared reading cache</h3>
 <p>Sleuth uses the office folder <code>U:\Sleuth-cache</code> automatically. If your PC has <code>U:</code> mapped, there is nothing to do. If it doesn't, Sleuth shows a yellow message at the top of the window. If you leave it, Sleuth opens Settings and highlights the place to fix it:</p>
-<figure><img src="../../site/assets/screens/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the cache works, it asks every minute. Section 10 explains why.</figcaption></figure>
+<figure><img src="../images/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the cache works, it asks every minute. Section 10 explains why.</figcaption></figure>
 <ol>
   <li>Type the folder IT gave you, or click <b>Browse</b> to pick it. It must be on a network drive everyone can write to.</li>
   <li>Click <b>Test</b>. "Working" in green means it's right.</li>
@@ -162,7 +162,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">4</span>A tour of the window</h2>
 <p class="intro">Sleuth's window has a search bar at the top and three panes below it.</p>
-<figure class="callout-map"><img src="../../site/assets/screens/search.png" alt="The Sleuth window with a search for a line number and its preview">
+<figure class="callout-map"><img src="../images/search.png" alt="The Sleuth window with a search for a line number and its preview">
   <span class="k" style="left:16%;top:1.2%">1</span><span class="k" style="left:84%;top:1.2%">2</span><span class="k" style="left:6%;top:30%">3</span><span class="k" style="left:40%;top:30%">4</span><span class="k" style="left:84%;top:40%">5</span><span class="k" style="left:88%;top:86%">6</span>
   <figcaption>A search for line 6"-P-1001-A1B. The numbers match the table below.</figcaption></figure>
 <table>
@@ -220,7 +220,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <li><b>OCR</b>: Sleuth read the image of the page, with a confidence percentage. When the main reader was unsure, Windows' own OCR read the line again. If the two disagree, both readings are kept and the result is marked <span class="pill verify">Verify</span>.</li>
   <li><b>File name</b>: matched the name only.</li>
 </ul>
-<figure><img src="../../site/assets/screens/scan.png" alt="A faint scanned isometric with the tag HV-4410 circled"><figcaption>A low-contrast site scan. The tag was read with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
+<figure><img src="../images/scan.png" alt="A faint scanned isometric with the tag HV-4410 circled"><figcaption>A low-contrast site scan. The tag was read with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
 <div class="eng"><b>Rule of thumb</b>Sleuth never reports an uncertain reading as Exact. If it matters, look at the page: the preview is one click away and always shows the spot.</div>
 
 <h2><span class="n">7</span>Previewing and opening files</h2>
@@ -247,13 +247,13 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
     </ul>
   </div>
 </div>
-<figure><img src="../../site/assets/screens/menu.png" alt="The right-click menu on a result"><figcaption>Right-click any result for these actions.</figcaption></figure>
+<figure><img src="../images/menu.png" alt="The right-click menu on a result"><figcaption>Right-click any result for these actions.</figcaption></figure>
 <div class="tip"><b>Sharing a location with a colleague</b>Use <b>Copy network path</b>. Drive letters differ between PCs; the network path doesn't.</div>
 
 <h2><span class="n">8</span>Deep search: when you don't know where it is</h2>
 <p class="intro">A normal search looks in what Sleuth already knows. A deep search also walks the drives live, right now.</p>
 <p>Use it when a file is new, sits outside the folders being read, or may be on a drive Sleuth hasn't listed yet. Type your search and click <b>Deep search</b> (or press <kbd>Ctrl</kbd>+<kbd>Enter</kbd>).</p>
-<figure><img src="../../site/assets/screens/deep.png" alt="Deep search progress under the results, one bar per drive"><figcaption>One bar per drive. Finished drives turn green; an unreachable share is skipped in seconds.</figcaption></figure>
+<figure><img src="../images/deep.png" alt="Deep search progress under the results, one bar per drive"><figcaption>One bar per drive. Finished drives turn green; an unreachable share is skipped in seconds.</figcaption></figure>
 <ul>
   <li><b>Progress per drive</b> shows under the results: folders searched and hits found. The left pane shows each drive's state.</li>
   <li><b>Unread PDFs found on the way</b> are read straight away, ahead of everything else. They join the results as soon as they're read, so leave Sleuth open for a minute after the walk finishes.</li>
@@ -281,7 +281,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 </ul>
 <h3>Index status</h3>
 <p>Click the reader status in the bottom-right corner to see how many files are indexed, read and waiting, and which files could not be read and why.</p>
-<figure><img src="../../site/assets/screens/status.png" alt="The index status window"><figcaption>Files that can't be read are listed with the reason, never silently skipped.</figcaption></figure>
+<figure><img src="../images/status.png" alt="The index status window"><figcaption>Files that can't be read are listed with the reason, never silently skipped.</figcaption></figure>
 <table>
   <tr><th>Reason shown</th><th>Meaning</th></tr>
   <tr><td>password protected</td><td>The PDF is encrypted. Sleuth can still find it by name.</td></tr>
@@ -304,7 +304,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">11</span>Settings reference</h2>
 <p class="intro">Open with <b>Settings</b> at the top right.</p>
-<figure><img src="../../site/assets/screens/settings.png" alt="The settings window"><figcaption>The Settings window.</figcaption></figure>
+<figure><img src="../images/settings.png" alt="The settings window"><figcaption>The Settings window.</figcaption></figure>
 <table>
   <tr><th style="width:32%">Setting</th><th>What it does</th><th style="width:18%">Default</th></tr>
   <tr><td>OCR accuracy</td><td><b>Standard</b> is recommended. <b>High</b> uses a larger model, downloaded once (140 MB); it is about 3× slower and found no extra text in our tests.</td><td>Standard</td></tr>
