@@ -1,0 +1,55 @@
+{
+ "unchanged": 4,
+ "old": {
+  "drawing_no": "ISO-2001-01",
+  "revision": "A"
+ },
+ "new": {
+  "drawing_no": "ISO-2001-01",
+  "revision": "B"
+ },
+ "changes": [
+  {
+   "kind": "changed",
+   "category": "instrument",
+   "old": "FV-2301",
+   "new": "FV-2302",
+   "old_box": {
+    "x": 0.44592962,
+    "y": 0.47747433,
+    "w": 0.032984745,
+    "h": 0.0095511135
+   },
+   "new_box": {
+    "x": 0.44592962,
+    "y": 0.47747433,
+    "w": 0.03418586,
+    "h": 0.0095511135
+   },
+   "old_conf": 1.0,
+   "new_conf": 1.0,
+   "reason": "a different tag of the same kind in the same place"
+  },
+  {
+   "kind": "changed",
+   "category": "instrument",
+   "old": "PT-5501",
+   "new": "LT-6601",
+   "old_box": {
+    "x": 0.6978676,
+    "y": 0.62001085,
+    "w": 0.033030935,
+    "h": 0.009538065
+   },
+   "new_box": {
+    "x": 0.6978306,
+    "y": 0.62001085,
+    "w": 0.032042313,
+    "h": 0.009538065
+   },
+   "old_conf": 1.0,
+   "new_conf": 1.0,
+   "reason": "a different tag of the same kind in the same place"
+  }
+ ]
+}

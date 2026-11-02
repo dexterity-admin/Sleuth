@@ -1,18 +1,29 @@
 //! Content hashing and the optional office-wide shared cache of read results.
 //!
-//! The shared cache is a plain folder on a network drive. Each read PDF is
-//! stored as `<dir>\<first two hex>\<blake3>.dhx` (gzipped JSON). Files are
-//! written under a temporary name and renamed, so a reader on another PC never
-//! sees half a file; damaged or older-format entries are ignored.
+//! The shared cache is a plain folder on a network drive. A read PDF is stored
+//! under a key made from its content hash *and* the pipeline fingerprint
+//! (reader version, OCR model hash, OCR settings, resolution), so a changed
+//! model or setting never reuses old readings:
+//! `<dir>\v2\<first two hex>\<key>.dhx` (gzipped JSON with a checksum).
+//!
+//! - Files are written under a temporary name and renamed, so a reader on
+//!   another PC never sees half a file.
+//! - A damaged, older-format or mismatched entry is ignored (and re-read).
+//! - Before reading a PDF itself, a PC takes a *claim*: `<key>.claim`,
+//!   created exclusively, with an expiry it renews while reading. Another PC
+//!   seeing a live claim waits for the result instead of reading the same file
+//!   at the same time. An expired claim (crashed or switched-off PC) is taken
+//!   over.
 
-use crate::text::{FileText, READER_VERSION};
+use crate::text::FileText;
 use anyhow::Result;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use std::io::{Read, Write};
+use serde::{Deserialize, Serialize};
 use sleuth_core::paths::DriveMap;
 use sleuth_core::protocol::CacheCheck;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -30,8 +41,82 @@ pub fn hash_file(path: &Path) -> Result<String> {
     Ok(h.finalize().to_hex().to_string())
 }
 
+const FORMAT: u32 = 2;
+/// A claim is renewed after every page; this long without renewal and it
+/// is considered abandoned.
+pub const CLAIM_LEASE: Duration = Duration::from_secs(20 * 60);
+
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+fn me() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_else(|_| "this PC".into())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Record {
+    format: u32,
+    content_hash: String,
+    pipeline: String,
+    page_count: u32,
+    created: i64,
+    created_by: String,
+    status: String,
+    /// BLAKE3 of the JSON of `text`.
+    checksum: String,
+    text: FileText,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ClaimFile {
+    host: String,
+    #[serde(default)]
+    user: String,
+    pid: u32,
+    until: i64,
+}
+
+fn user() -> String {
+    std::env::var("USERNAME").unwrap_or_default()
+}
+
+/// A claim this PC holds; released when dropped.
+pub struct Claim {
+    path: PathBuf,
+}
+
+impl Claim {
+    /// Push the expiry out again (call between pages).
+    pub fn renew(&self) {
+        let c = ClaimFile { host: me(), user: user(), pid: std::process::id(), until: now() + CLAIM_LEASE.as_secs() as i64 };
+        if let Ok(b) = serde_json::to_vec(&c) {
+            let _ = std::fs::write(&self.path, b);
+        }
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub enum ClaimResult {
+    Mine(Claim),
+    /// Another PC is reading this file; its claim runs until `until`.
+    HeldBy { host: String, until: i64 },
+    /// The folder could not be written; read without a claim.
+    Unavailable,
+}
+
 pub struct SharedCache {
     dir: PathBuf,
+}
+
+/// The cache key: content and pipeline together.
+pub fn cache_key(content_hash: &str, pipeline: &str) -> String {
+    blake3::hash(format!("{content_hash}:{pipeline}").as_bytes()).to_hex().to_string()
 }
 
 impl SharedCache {
@@ -39,30 +124,45 @@ impl SharedCache {
         SharedCache { dir: dir.into() }
     }
 
-    fn entry(&self, hash: &str) -> PathBuf {
-        self.dir.join(&hash[..2.min(hash.len())]).join(format!("{hash}.dhx"))
+    fn entry(&self, key: &str, ext: &str) -> PathBuf {
+        self.dir.join("v2").join(&key[..2.min(key.len())]).join(format!("{key}.{ext}"))
     }
 
-    pub fn get(&self, hash: &str) -> Option<FileText> {
-        let f = std::fs::File::open(self.entry(hash)).ok()?;
+    pub fn get(&self, content_hash: &str, pipeline: &str) -> Option<FileText> {
+        let f = std::fs::File::open(self.entry(&cache_key(content_hash, pipeline), "dhx")).ok()?;
         let mut s = String::new();
         GzDecoder::new(f).read_to_string(&mut s).ok()?;
-        let ft: FileText = serde_json::from_str(&s).ok()?;
-        (ft.reader_version >= READER_VERSION).then_some(ft)
+        let r: Record = serde_json::from_str(&s).ok()?;
+        if r.format != FORMAT || r.content_hash != content_hash || r.pipeline != pipeline || r.status != "complete" {
+            return None;
+        }
+        let sum = blake3::hash(&serde_json::to_vec(&r.text).ok()?).to_hex().to_string();
+        (sum == r.checksum).then_some(r.text)
     }
 
-    pub fn put(&self, hash: &str, text: &FileText) -> Result<()> {
-        let dest = self.entry(hash);
+    pub fn put(&self, content_hash: &str, pipeline: &str, text: &FileText) -> Result<()> {
+        let dest = self.entry(&cache_key(content_hash, pipeline), "dhx");
         if dest.exists() {
             return Ok(());
         }
         std::fs::create_dir_all(dest.parent().unwrap())?;
-        let user = std::env::var("COMPUTERNAME").unwrap_or_default();
-        let tmp = dest.with_extension(format!("{user}.{}.tmp", std::process::id()));
+        let json = serde_json::to_vec(text)?;
+        let rec = Record {
+            format: FORMAT,
+            content_hash: content_hash.into(),
+            pipeline: pipeline.into(),
+            page_count: text.pages.len() as u32,
+            created: now(),
+            created_by: me(),
+            status: "complete".into(),
+            checksum: blake3::hash(&json).to_hex().to_string(),
+            text: text.clone(),
+        };
+        let tmp = dest.with_extension(format!("{}.{}.tmp", me(), std::process::id()));
         {
             let f = std::fs::File::create(&tmp)?;
             let mut gz = GzEncoder::new(f, Compression::default());
-            gz.write_all(&serde_json::to_vec(text)?)?;
+            gz.write_all(&serde_json::to_vec(&rec)?)?;
             gz.finish()?.sync_all()?;
         }
         if std::fs::rename(&tmp, &dest).is_err() {
@@ -71,25 +171,110 @@ impl SharedCache {
         }
         Ok(())
     }
+
+    /// Try to become the PC that reads this file.
+    pub fn claim(&self, content_hash: &str, pipeline: &str) -> ClaimResult {
+        let path = self.entry(&cache_key(content_hash, pipeline), "claim");
+        if std::fs::create_dir_all(path.parent().unwrap()).is_err() {
+            return ClaimResult::Unavailable;
+        }
+        for _ in 0..2 {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut f) => {
+                    let c = ClaimFile { host: me(), user: user(), pid: std::process::id(), until: now() + CLAIM_LEASE.as_secs() as i64 };
+                    let _ = f.write_all(&serde_json::to_vec(&c).unwrap_or_default());
+                    return ClaimResult::Mine(Claim { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let held: Option<ClaimFile> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+                    match held {
+                        // Live, and not a leftover of this user's earlier (crashed)
+                        // worker on this PC: one worker runs per user.
+                        Some(c) if c.until > now() && !(c.host == me() && c.user == user() && c.pid != std::process::id()) => {
+                            return ClaimResult::HeldBy { host: c.host, until: c.until };
+                        }
+                        Some(_) => {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                        // Unreadable: being written this instant, or garbage. Judge by age.
+                        None => {
+                            let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).unwrap_or_default();
+                            if age < CLAIM_LEASE {
+                                return ClaimResult::HeldBy { host: "another PC".into(), until: now() + 120 };
+                            }
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+                Err(_) => return ClaimResult::Unavailable,
+            }
+        }
+        ClaimResult::HeldBy { host: "another PC".into(), until: now() + 120 }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text::READER_VERSION;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sl-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
 
     #[test]
-    fn round_trip_and_version_check() {
-        let dir = std::env::temp_dir().join(format!("dh-cache-{}", std::process::id()));
-        let c = SharedCache::new(&dir);
-        let ft = FileText { reader_version: READER_VERSION, model: "m".into(), pages: vec![] };
-        c.put("abcdef", &ft).unwrap();
-        assert_eq!(c.get("abcdef").unwrap().model, "m");
-        assert!(c.get("ffffff").is_none());
-        let _ = std::fs::remove_dir_all(dir);
+    fn round_trip_and_pipeline_check() {
+        let d = dir("rt");
+        let c = SharedCache::new(&d);
+        let ft = FileText { reader_version: READER_VERSION, model: "m".into(), ..Default::default() };
+        c.put("abcdef", "pipe1", &ft).unwrap();
+        assert_eq!(c.get("abcdef", "pipe1").unwrap().model, "m");
+        assert!(c.get("abcdef", "pipe2").is_none(), "another pipeline never reuses it");
+        assert!(c.get("ffffff", "pipe1").is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn damaged_entry_is_ignored() {
+        let d = dir("bad");
+        let c = SharedCache::new(&d);
+        let p = c.entry(&cache_key("abc", "p"), "dhx");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"not gzip").unwrap();
+        assert!(c.get("abc", "p").is_none());
+        // a checksum that does not fit the content
+        let rec = Record { format: FORMAT, content_hash: "abc".into(), pipeline: "p".into(), page_count: 0, created: 0, created_by: "x".into(), status: "complete".into(), checksum: "0".repeat(64), text: FileText::default() };
+        let mut gz = GzEncoder::new(std::fs::File::create(&p).unwrap(), Compression::default());
+        gz.write_all(&serde_json::to_vec(&rec).unwrap()).unwrap();
+        gz.finish().unwrap();
+        assert!(c.get("abc", "p").is_none());
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn claims_exclude_and_expire() {
+        let d = dir("claim");
+        let c = SharedCache::new(&d);
+        let ClaimResult::Mine(first) = c.claim("h", "p") else { panic!("first claim") };
+        assert!(matches!(c.claim("h", "p"), ClaimResult::HeldBy { .. }), "held while the first lives");
+        drop(first);
+        assert!(matches!(c.claim("h", "p"), ClaimResult::Mine(_)), "released on drop");
+        let path = c.entry(&cache_key("h2", "p"), "claim");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&ClaimFile { host: "OTHER-PC".into(), user: "u".into(), pid: 1, until: now() - 5 }).unwrap()).unwrap();
+        assert!(matches!(c.claim("h2", "p"), ClaimResult::Mine(_)), "expired claim is taken over");
+        std::fs::write(&path, serde_json::to_vec(&ClaimFile { host: "OTHER-PC".into(), user: "u".into(), pid: 1, until: now() + 600 }).unwrap()).unwrap();
+        match c.claim("h2", "p") {
+            ClaimResult::HeldBy { host, .. } => assert_eq!(host, "OTHER-PC"),
+            _ => panic!("live claim must be respected"),
+        }
+        let _ = std::fs::remove_dir_all(d);
     }
 }
 
-/// Check that the shared cache folder can be used from this PC: the drive
+// Check that the shared cache folder can be used from this PC: the drive
 /// letter is mapped, the server answers, and the folder can be created and
 /// written. Each probe that can hang on a network share runs with a timeout.
 pub fn check_cache(dir: Option<&str>, enabled: bool, drives: &DriveMap) -> CacheCheck {

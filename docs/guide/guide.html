@@ -5,7 +5,7 @@
 <title>Sleuth User Guide</title>
 <style>
 /* Printed A4 manual. Body in Segoe UI for screen-like familiarity; tags and paths in Consolas. */
-@page { size: A4; margin: 18mm 17mm 20mm; @bottom-left { content: "Sleuth User Guide · version 0.1"; font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } @bottom-right { content: counter(page); font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } }
+@page { size: A4; margin: 18mm 17mm 20mm; @bottom-left { content: "Sleuth User Guide · version 1.0"; font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } @bottom-right { content: counter(page); font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } }
 @page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
 :root { --ink: #16202c; --ink-2: #4c5a6b; --ink-3: #7a8796; --blue: #1f5fbf; --blue-soft: #e8f0fc; --red: #d7262b; --line: #d5dbe3; --ok: #1d7a4a; --ok-soft: #e1f2e8; --warn: #8a5700; --warn-soft: #fbefd6; }
 * { box-sizing: border-box; }
@@ -70,11 +70,11 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <div class="grid"></div>
   <div class="text">
     <img class="logo" src="../../site/assets/icon.png" alt="">
-    <div class="kicker">User guide · version 0.1</div>
+    <div class="kicker">User guide · version 1.0</div>
     <h1>Sleuth<span>.</span></h1>
     <div class="sub">Find any tag, in any drawing, on any drive. Even when the PDF is a scan.</div>
   </div>
-  <div class="shot"><img src="../images/search.png" alt=""></div>
+  <div class="shot"><img src="../images/v1/search-partial.png" alt=""></div>
   <div class="foot">Dexterity Design Services Pvt. Ltd. · internal tool · github.com/dexterity-admin/Sleuth</div>
 </section>
 
@@ -90,12 +90,18 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
     <li><span>7</span>Previewing and opening files</li>
     <li><span>8</span>Deep search: when you don't know where it is</li>
     <li><span>9</span>Background reading and the index</li>
-    <li><span>10</span>The shared reading cache</li>
-    <li><span>11</span>Settings reference</li>
-    <li><span>12</span>Updates</li>
-    <li><span>13</span>Troubleshooting and FAQ</li>
-    <li><span>14</span>Your data, privacy and uninstalling</li>
-    <li><span>15</span>Quick reference card</li>
+    <li><span>10</span>Tags: every tag and where it appears</li>
+    <li><span>11</span>Revisions: what changed between two issues</li>
+    <li><span>12</span>Details and related drawings</li>
+    <li><span>13</span>Check readings</li>
+    <li><span>14</span>Monitor</li>
+    <li><span>15</span>Projects and the office server</li>
+    <li><span>16</span>The shared reading cache</li>
+    <li><span>17</span>Settings reference</li>
+    <li><span>18</span>Updates</li>
+    <li><span>19</span>Troubleshooting and FAQ</li>
+    <li><span>20</span>Your data, privacy and uninstalling</li>
+    <li><span>21</span>Quick reference card</li>
   </ol>
   <div class="glance">
     <div><b>Find by any text</b>Tag numbers, line numbers, document numbers, notes: anything printed on a drawing.</div>
@@ -122,7 +128,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <h2><span class="n">2</span>Installing Sleuth</h2>
 <p class="intro">Sleuth installs for your Windows account only. You don't need administrator rights, and it takes about a minute.</p>
 <ol>
-  <li>Open <b>github.com/dexterity-admin/Sleuth/releases/latest</b> and download <code>Sleuth_0.1.0_x64-setup.exe</code> (about 43 MB), or use the copy IT shared.</li>
+  <li>Open <b>github.com/dexterity-admin/Sleuth/releases/latest</b> and download <code>Sleuth_1.0.0_x64-setup.exe</code> (about 65 MB), or use the copy IT shared.</li>
   <li>Run it. Because the installer is not code-signed, Windows may show <b>"Windows protected your PC"</b>. Click <b>More info</b>, then <b>Run anyway</b>. You only see this for the first install; updates install from inside Sleuth.</li>
   <li>Click through the installer. Sleuth starts when it finishes, and adds a Start-menu entry.</li>
 </ol>
@@ -145,7 +151,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <p class="intro">Two things need to be right: the shared reading cache, and the folders you want Sleuth to read. Both take a minute.</p>
 <h3>Step 1: the shared reading cache</h3>
 <p>Sleuth uses the office folder <code>U:\Sleuth-cache</code> automatically. If your PC has <code>U:</code> mapped, there is nothing to do. If it doesn't, Sleuth shows a yellow message at the top of the window. If you leave it, Sleuth opens Settings and highlights the place to fix it:</p>
-<figure><img src="../images/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the cache works, it asks every minute. Section 10 explains why.</figcaption></figure>
+<figure><img src="../images/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the cache works, it asks every minute. The section on the shared reading cache explains why.</figcaption></figure>
 <ol>
   <li>Type the folder IT gave you, or click <b>Browse</b> to pick it. It must be on a network drive everyone can write to.</li>
   <li>Click <b>Test</b>. "Working" in green means it's right.</li>
@@ -162,21 +168,22 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">4</span>A tour of the window</h2>
 <p class="intro">Sleuth's window has a search bar at the top and three panes below it.</p>
-<figure class="callout-map"><img src="../images/search.png" alt="The Sleuth window with a search for a line number and its preview">
-  <span class="k" style="left:16%;top:1.2%">1</span><span class="k" style="left:84%;top:1.2%">2</span><span class="k" style="left:6%;top:30%">3</span><span class="k" style="left:40%;top:30%">4</span><span class="k" style="left:84%;top:40%">5</span><span class="k" style="left:88%;top:86%">6</span>
-  <figcaption>A search for line 6"-P-1001-A1B. The numbers match the table below.</figcaption></figure>
+<figure class="callout-map"><img src="../images/v1/search-or.png" alt="The Sleuth window with a search for two tags and its preview">
+  <span class="k" style="left:37%;top:0.6%">1</span><span class="k" style="left:30%;top:5%">2</span><span class="k" style="left:84%;top:5%">3</span><span class="k" style="left:7%;top:33%">4</span><span class="k" style="left:45%;top:40%">5</span><span class="k" style="left:80%;top:30%">6</span><span class="k" style="left:66%;top:93%">7</span>
+  <figcaption>A search for two tags at once. The numbers match the table below.</figcaption></figure>
 <table>
   <tr><th>#</th><th>Part</th><th>What it does</th></tr>
-  <tr><td>1</td><td>Search box</td><td>Type a tag or any text. Results appear as you type. <kbd>Ctrl</kbd>+<kbd>F</kbd> jumps here from anywhere.</td></tr>
-  <tr><td>2</td><td>Smart match, Deep search, Settings</td><td><b>Smart match</b> also finds tags written differently; <b>Exact only</b> hides those. <b>Deep search</b> walks the drives live (section 8).</td></tr>
-  <tr><td>3</td><td>Locations and filters</td><td>Tick the drives to search. Show or hide result types. Manage <b>Folders being read</b>.</td></tr>
-  <tr><td>4</td><td>Results</td><td>One row per file: name, folder, the exact text found, page and match type. Click a column heading to sort.</td></tr>
-  <tr><td>5</td><td>Preview</td><td>The page where the text was found, with the text circled in red. Step between marks and pages.</td></tr>
-  <tr><td>6</td><td>Status bar</td><td>Number of results, and what the reader is doing. Click the reader status for details.</td></tr>
+  <tr><td>1</td><td>Views</td><td><b>Search</b>, <b>Tags</b>, <b>Revisions</b>, <b>Check readings</b> and <b>Monitor</b> (sections 10 to 14).</td></tr>
+  <tr><td>2</td><td>Project and search box</td><td>Pick a project, or <b>All locations</b>. Type a tag or any text; results appear as you type. <kbd>Ctrl</kbd>+<kbd>F</kbd> jumps here. <b>?</b> shows the search syntax; <b>▾</b> shows recent and pinned searches.</td></tr>
+  <tr><td>3</td><td>Smart match, Deep search, Export</td><td><b>Smart match</b> also finds tags written differently; <b>Exact only</b> hides those. <b>Deep search</b> walks the drives live (section 8). <b>Export</b> saves the results to Excel or CSV.</td></tr>
+  <tr><td>4</td><td>Locations and filters</td><td>Tick the drives to search. Show or hide result types. Manage <b>Folders being read</b>.</td></tr>
+  <tr><td>5</td><td>Results</td><td>One row per file: name, folder, the exact text found, page and match type. Hover a row to see why it matched. Click a column heading to sort.</td></tr>
+  <tr><td>6</td><td>Preview</td><td><b>Page</b>: the page with the text circled in red. <b>Details</b>: title block and how the file was read. <b>Related</b>: drawings sharing tags.</td></tr>
+  <tr><td>7</td><td>Status bar</td><td>Number of results, the office server if you use one, and what the reader is doing. Click the reader status for details.</td></tr>
 </table>
 
 <h2><span class="n">5</span>Searching</h2>
-<p class="intro">Type what you're looking for. There's no special syntax to learn.</p>
+<p class="intro">Type what you're looking for. Plain text always works; a few extras narrow things down.</p>
 <h3>What you can search for</h3>
 <table>
   <tr><th>Looking for</th><th>Type</th><th>Notes</th></tr>
@@ -185,11 +192,18 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>A document number</td><td><code>DOC-1001-17</code></td><td>Finds the document itself and every drawing that refers to it.</td></tr>
   <tr><td>A drawing number or file name</td><td><code>ISO-1001-02</code></td><td>File names are searched on every drive, read or not.</td></tr>
   <tr><td>Several things at once</td><td><code>PSV-1203 flare</code></td><td>Files that contain <b>all</b> the words, anywhere in the file.</td></tr>
+  <tr><td>Any of several tags</td><td><code>PSV-1203 OR PSV-1204</code></td><td><code>OR</code> (capitals) or <code>|</code> between alternatives.</td></tr>
+  <tr><td>Drawings by title block</td><td><code>dwg:ISO-1001 rev:C</code></td><td>Drawing number contains, revision. Also <code>disc:piping</code>.</td></tr>
+  <tr><td>Only one kind of tag</td><td><code>type:instrument FV</code></td><td>Kinds: line, instrument, valve, equipment, support, weld, drawing, spec.</td></tr>
+  <tr><td>Words in the file name</td><td><code>name:datasheet</code></td><td><code>ext:pdf</code> limits the file type.</td></tr>
   <tr><td>An exact phrase</td><td><code>"rev c"</code></td><td>Put the phrase in double quotes. An inch mark inside a tag, as in <code>6"-P</code>, is never treated as a quote.</td></tr>
 </table>
 <h3>Narrowing the results</h3>
 <ul>
+  <li><b>Project</b>: pick a project next to the search box to search only its folders (section on projects).</li>
   <li><b>Drives</b>: untick a drive in the left pane to leave it out.</li>
+  <li><b>History</b>: the ▾ in the search box lists recent searches; pin the ones you use often.</li>
+  <li><b>Export</b>: the results to Excel or CSV, with the reason for each match.</li>
   <li><b>Show</b>: hide <span class="pill exact">Exact</span>, <span class="pill sep">Separators ignored</span> or <span class="pill verify">Verify</span> results, or results found only in file names.</li>
   <li><b>Exact only</b>: the drop-down next to the search box hides everything except exact matches.</li>
   <li><b>Sort</b>: click a column heading; click again to reverse.</li>
@@ -211,13 +225,15 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td><span class="pill exact">Exact</span></td><td>The text on the page is exactly what you typed.</td><td>Nothing; open it.</td></tr>
   <tr><td><span class="pill sep">Separators ignored</span></td><td>Same letters and digits, written with different dashes, quotes or spaces. <code>PSV1203</code> found <code>PSV-1203</code>.</td><td>Usually right. Glance at the preview.</td></tr>
   <tr><td><span class="pill verify">Verify, OCR unsure</span></td><td>Either the OCR wasn't confident, or a character could be a look-alike (O/0, l/1, S/5, B/8, Z/2, G/6).</td><td><b>Check the preview</b> before relying on it.</td></tr>
+  <tr><td><span class="pill" style="background:#f2f2f2;color:#566373;border:0.6pt dashed #9aa6b4">Partial, verify</span></td><td>Only part matched: your text is inside a longer tag (<code>PSV-120</code> in <code>PSV-1203</code>), or only part of the tag could be read, for example because a pipe line crosses the size (<code>-P-1002-A1B</code> for <code>4"-P-1002-A1B</code>).</td><td><b>Look at the page.</b> The row's "Why" says which.</td></tr>
   <tr><td><span class="pill" style="background:#eef1f5;color:#566373">Name · …</span></td><td>Found in the file name, not inside the file.</td><td>Useful when the PDF hasn't been read.</td></tr>
 </table>
 <h3>Where the text came from</h3>
-<p>Hover over a result's label to see it; the preview pane shows it too.</p>
+<p>Hover over a result to see why it matched and where the text came from; the preview pane shows both.</p>
 <ul>
   <li><b>PDF text</b>: the PDF carries real text (exported from CAD or Word). Always exact.</li>
   <li><b>OCR</b>: Sleuth read the image of the page, with a confidence percentage. When the main reader was unsure, Windows' own OCR read the line again. If the two disagree, both readings are kept and the result is marked <span class="pill verify">Verify</span>.</li>
+  <li><b>Checked</b>: a person typed this reading in Check readings.</li>
   <li><b>File name</b>: matched the name only.</li>
 </ul>
 <figure><img src="../images/scan.png" alt="A faint scanned isometric with the tag HV-4410 circled"><figcaption>A low-contrast site scan. The tag was read with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
@@ -289,7 +305,87 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>could not be opened: …</td><td>The file moved, is locked, or you have no access. Network hiccups are retried automatically: up to 5 times, at growing intervals, before a file is listed here.</td></tr>
 </table>
 
-<h2><span class="n">10</span>The shared reading cache</h2>
+<h2><span class="n">10</span>Tags: every tag and where it appears</h2>
+<p class="intro">The <b>Tags</b> view lists every engineering tag Sleuth has found in the drawings it has read, with the documents and places it appears in.</p>
+<figure><img src="../images/v1/tags.png" alt="The Tags view: a table of tags with category, documents, places and lowest confidence; on the right the places of DOC-1001-17 and the page with it marked"><figcaption>Click a tag to list every place it appears; click a place to see the page with the tag marked.</figcaption></figure>
+<ul>
+  <li><b>Categories</b>: line numbers, instruments, valves, equipment, supports, welds, drawing numbers and specs. Sleuth finds them with fixed patterns (rules) applied to the text it read; nothing is guessed. A line number like <code>6"-P-1001-A1B</code> is one tag, never also "equipment P-1001".</li>
+  <li><b>Lowest confidence</b>: the weakest reading among the places. Under 80% it is marked <span class="pill verify">verify</span>: check those places on the drawing.</li>
+  <li><b>Filters</b>: category, "tag contains" (separators are ignored, so <code>1203</code> finds <code>PSV-1203</code>), project, and <b>This PC</b> or <b>Office server</b>.</li>
+  <li><b>Export</b>: tags or places to Excel (.xlsx) or CSV, for line lists and checks.</li>
+</ul>
+<div class="tip"><b>For the CAD lead</b>If your project numbers tags differently, the rules can be changed in Settings → Advanced (tag rules). Sleuth parses the drawings already read again with the new rules, without reading them again.</div>
+
+<h2><span class="n">11</span>Revisions: what changed between two issues</h2>
+<p class="intro">The <b>Revisions</b> view groups drawings by drawing number and compares the tags of any two revisions.</p>
+<figure><img src="../images/v1/revisions.png" alt="Revision compare of ISO-2001-01 rev A and rev B: two tags changed, shown side by side with the tag marked on both sheets"><figcaption>Rev A against rev B. Select a change to see both sheets with the tag marked.</figcaption></figure>
+<ol>
+  <li>Find the drawing number (type part of it in the filter).</li>
+  <li>Expand it. Sleuth lists its revisions oldest first and picks the last two; choose others with <b>Old</b> and <b>New</b>.</li>
+  <li>Read the changes:
+    <table>
+      <tr><th>Change</th><th>Means</th></tr>
+      <tr><td>Changed</td><td>A different tag of the same kind in the same place on the sheet.</td></tr>
+      <tr><td>Added / Removed</td><td>A tag only in the new, or only in the old revision.</td></tr>
+      <tr><td><span class="pill verify">Verify</span></td><td>The difference could be an OCR misreading: the two readings differ only by look-alike characters, or one of them was read with low confidence.</td></tr>
+    </table>
+  </li>
+</ol>
+<div class="eng"><b>Not an engineering judgement</b>Sleuth compares what it read. A <b>Verify</b> row is never an engineering change until you have looked at both pages. Revision numbers and drawing numbers come from the title block; Details (next section) shows the text each was read from.</div>
+
+<h2><span class="n">12</span>Details and related drawings</h2>
+<p class="intro">The preview pane has three tabs: <b>Page</b>, <b>Details</b> and <b>Related</b>.</p>
+<figure><img src="../images/v1/details.png" alt="The Details tab: drawing number, title, revision, discipline and sheet with the text each was read from; the page kind and OCR tiles; how the file was read"><figcaption>Every value shows the text it was read from. A value Sleuth did not find says "not found"; it is never guessed.</figcaption></figure>
+<ul>
+  <li><b>Title block</b>: drawing number, title, revision, project, discipline, sheet and status, each with its evidence (for example <code>page 1: "REV. B"</code>, or <code>OCR 98%</code> when it was read from a scan).</li>
+  <li><b>Pages</b>: what kind each page is and how it was read:
+    <table>
+      <tr><th>Kind</th><th>Means</th><th>Read with OCR</th></tr>
+      <tr><td>Text layer</td><td>A plotted or exported PDF with real text</td><td>No (only the title block, if its text has no drawing number)</td></tr>
+      <tr><td>Text + scan</td><td>Real text plus pasted images, stamps or scanned mark-ups</td><td>Only the images</td></tr>
+      <tr><td>Scanned</td><td>A scan, or a picture of the drawing</td><td>The whole page</td></tr>
+      <tr><td>Outlined text</td><td>Text plotted as lines</td><td>The whole page</td></tr>
+      <tr><td>Damaged</td><td>The page cannot be opened</td><td>No; the reason is shown and the other pages are read</td></tr>
+    </table></li>
+  <li><b>How this file was read</b>: on which PC, when, which OCR model (with its fingerprint), CPU or graphics card, and whether it came from the shared cache.</li>
+  <li><b>Related</b>: other drawings that share tags with this one (line numbers, instruments, equipment...), most shared first. Click one to open it on the page where a shared tag appears.</li>
+</ul>
+
+<h2><span class="n">13</span>Check readings</h2>
+<p class="intro">The <b>Check readings</b> view lists the lines OCR was least sure of, worst first, with the image of each beside it.</p>
+<ol>
+  <li>Look at the image and the reading. If the second reader (Windows OCR) read it differently, both readings are shown.</li>
+  <li>If the reading is wrong, type the text exactly as printed and click <b>Save correction</b>.</li>
+  <li>Searches and the Tags view now find your reading as <b>checked</b>. <b>Undo</b> removes it.</li>
+</ol>
+<div class="tip"><b>Nothing is learned</b>The original OCR text is kept beside your correction, and the OCR models never change. A correction applies to that file only, as long as its content is the same; if the drawing is replaced, the correction is kept for the record but no longer applied.</div>
+
+<h2><span class="n">14</span>Monitor</h2>
+<p class="intro">The <b>Monitor</b> view shows how reading is going and why: useful when something seems slow or missing.</p>
+<figure><img src="../images/v1/monitor.png" alt="The Monitor view: files read, OCR time per page, pages by kind, search times, the OCR backend and why"><figcaption>Everything the reader is doing, with the reasons.</figcaption></figure>
+<ul>
+  <li><b>Reading</b>: files read, waiting and failed; pages per hour; OCR time per page.</li>
+  <li><b>OCR runs on</b>: the CPU, or a graphics card through DirectML. Sleuth uses a graphics card only after it has read a check picture exactly like the CPU and was clearly faster; the line below says why it chose what it chose. A card that fails is not used again.</li>
+  <li><b>Cache and searching</b>: drawings taken from the shared cache, files another PC was already reading (Sleuth waits for its result instead of reading the same file), and search times.</li>
+  <li><b>Folders and drives</b>: the last complete pass of each location, and any that were offline or only partly listed.</li>
+  <li><b>Rule errors</b>: tag or title-block rules that could not be used.</li>
+</ul>
+
+<h2><span class="n">15</span>Projects and the office server</h2>
+<p class="intro">Both are optional. Sleuth works fully on its own.</p>
+<figure><img src="../images/v1/settings-server.png" alt="Settings: office server address, access key and certificate; projects with their folders"><figcaption>Settings → Office server and Projects.</figcaption></figure>
+<h3>Projects</h3>
+<p>A project is a name for a set of folders. Add them in Settings → Projects, then pick the project next to the search box to search only its folders. The Tags and Revisions views have the same project filter.</p>
+<h3>The office server</h3>
+<p>If IT runs the Sleuth office server, it reads the shared project folders once for everyone. Your searches then include its results (marked <b>Office</b>), and your PC leaves those folders to the server.</p>
+<ol>
+  <li>Get the server address and your personal access key from IT.</li>
+  <li>Settings → Office server: enter both. The certificate is found automatically in the shared cache folder; IT may give you a file instead.</li>
+  <li>Click <b>Test</b>, then <b>Connect and save</b>. Your key is stored encrypted for your Windows account.</li>
+</ol>
+<p>You only see projects IT has given you. If the server is offline, Sleuth says so above the results and keeps searching your own index. <b>Disconnect</b> returns to working on your own.</p>
+
+<h2><span class="n">16</span>The shared reading cache</h2>
 <p class="intro">Reading a scanned sheet takes about a minute. The shared cache means that minute is spent once for the whole office, not once per PC.</p>
 <p>When any PC finishes reading a PDF on a network drive, it saves the result in the shared cache folder (by default <code>U:\Sleuth-cache</code>). Before reading a PDF, every other PC checks the cache first. If the same drawing is there, it is taken from the cache in an instant. Files are matched by their content, so a copied or renamed drawing is recognised too.</p>
 <h3>Why Sleuth insists on it</h3>
@@ -302,7 +398,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <p>If the cache is only temporarily unreachable (you're off-site, or the server is down), Sleuth shows a quiet notice instead and keeps reading on your PC. It starts using the cache again by itself when it's back.</p>
 <div class="warn"><b>Don't delete files in the cache folder</b>They're the office's shared reading results. Deleting them only makes PCs read those drawings again.</div>
 
-<h2><span class="n">11</span>Settings reference</h2>
+<h2><span class="n">17</span>Settings reference</h2>
 <p class="intro">Open with <b>Settings</b> at the top right.</p>
 <figure><img src="../images/settings.png" alt="The settings window"><figcaption>The Settings window.</figcaption></figure>
 <table>
@@ -311,7 +407,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>Resolution for OCR</td><td>300 dpi reads 2.5 mm text on A1/A3 sheets reliably. Use 400 dpi only for very small print; it is slower.</td><td>300 dpi</td></tr>
   <tr><td>Pause reading while other programs use more than …</td><td>Reading waits while your PC is busy with other work.</td><td>60% CPU</td></tr>
   <tr><td>Keep reading in the background</td><td>The reader keeps working when the window is closed, and starts with Windows.</td><td>On</td></tr>
-  <tr><td>Shared reading cache</td><td>The office folder for shared results. Required; see section 10.</td><td><code>U:\Sleuth-cache</code></td></tr>
+  <tr><td>Shared reading cache</td><td>The office folder for shared results. Required; see section 16.</td><td><code>U:\Sleuth-cache</code></td></tr>
   <tr><td>Folders listed at once per file server</td><td>How hard deep search works each server. Raise for speed, lower if a server struggles.</td><td>4</td></tr>
   <tr><td>Give up on a folder after</td><td>A folder that doesn't answer in this time is skipped and listed.</td><td>20 s</td></tr>
   <tr><td>Refresh the file-name index every</td><td>How often the list of file names is rebuilt.</td><td>360 min</td></tr>
@@ -320,7 +416,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>Refresh index now</td><td>Rebuilds the file-name list straight away, in the background.</td><td></td></tr>
 </table>
 
-<h2><span class="n">12</span>Updates</h2>
+<h2><span class="n">18</span>Updates</h2>
 <p class="intro">Sleuth keeps itself up to date. Your settings and index are always kept.</p>
 <ul>
   <li>Sleuth checks for a new version when it starts and every 6 hours. When there is one, a blue bar appears at the top: <b>Restart and update</b>.</li>
@@ -328,9 +424,11 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <li>To check yourself: <b>Settings → Check for updates</b>.</li>
   <li>The Windows "protected your PC" prompt does not appear for in-app updates.</li>
 </ul>
+<h3>Rolling back</h3>
+<p>If a new version causes trouble, <b>Settings → Updates → Roll back to version X</b> reinstalls the release before it, checked the same way. Settings and the index are kept; an index made by 1.0 can still be opened by 0.1, which simply does not show the 1.0 views.</p>
 <div class="tip"><b>Never lose your setup</b>Updates only replace program files. <code>settings.json</code>, your folders being read, and the index stay exactly as they were.</div>
 
-<h2><span class="n">13</span>Troubleshooting and FAQ</h2>
+<h2><span class="n">19</span>Troubleshooting and FAQ</h2>
 <table>
   <tr><th style="width:36%">Problem</th><th>What to do</th></tr>
   <tr><td>A drawing I know has the tag isn't found</td><td>Is its folder in <b>Folders being read</b>? If not, add it, or right-click the file and choose <b>Read this PDF now</b>. If you don't know where it is, use <b>Deep search</b>. Also try <b>Smart match</b> rather than Exact only.</td></tr>
@@ -349,7 +447,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <p><b>Can it search DWG or Word files?</b> Version 0.1 searches inside PDFs, and finds any file type by name.</p>
 <p><b>Why does a file appear once even if the tag is on five pages?</b> One row per file keeps the list readable. The preview steps through every mark and page.</p>
 
-<h2><span class="n">14</span>Your data, privacy and uninstalling</h2>
+<h2><span class="n">20</span>Your data, privacy and uninstalling</h2>
 <ul>
   <li><b>On your PC</b>: settings in <code>%APPDATA%\Sleuth</code>; the index, models and logs in <code>%LOCALAPPDATA%\Sleuth</code>.</li>
   <li><b>On the network</b>: read results in the shared cache folder, readable by the office.</li>
@@ -359,7 +457,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <h3>Uninstalling</h3>
 <p>Settings → Apps → <b>Sleuth</b> → Uninstall. This removes the program, Start-menu entry and start-up entry. Your settings and index are left in place in case you reinstall; delete the two folders above to remove them too.</p>
 
-<h2><span class="n">15</span>Quick reference card</h2>
+<h2><span class="n">21</span>Quick reference card</h2>
 <p class="intro">Print this page and keep it by your desk.</p>
 <table>
   <tr><th style="width:40%">I want to…</th><th>Do this</th></tr>
@@ -372,6 +470,11 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>Make a folder searchable inside</td><td><b>Folders being read → Add folder</b>.</td></tr>
   <tr><td>Read one file right now</td><td>Right-click → <b>Read this PDF now</b>.</td></tr>
   <tr><td>Check what's been read</td><td>Click the status at the bottom right.</td></tr>
+  <tr><td>Find any of several tags</td><td><code>PSV-1203 OR PSV-1204</code></td></tr>
+  <tr><td>Only this project</td><td>Pick it next to the search box.</td></tr>
+  <tr><td>See every place a tag appears</td><td><b>Tags</b> view → click the tag.</td></tr>
+  <tr><td>Compare two revisions</td><td><b>Revisions</b> view → expand the drawing number.</td></tr>
+  <tr><td>Fix a wrong OCR reading</td><td><b>Check readings</b> → type the text → <b>Save correction</b>.</td></tr>
   <tr><td>Fix the shared cache</td><td>Settings → Shared reading cache → <b>Test</b> → <b>Save</b>.</td></tr>
 </table>
 <table>

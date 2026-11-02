@@ -89,7 +89,7 @@ h2 { font-size: clamp(40px, 5.4vw, 76px); }
 .btn.ink:hover { box-shadow: 4px 4px 0 var(--red); }
 .facts { font: 12px var(--mono); color: var(--ink-3); margin-top: 12px; }
 .pill { font: 700 11px var(--mono); padding: 3px 8px; border: 1.5px solid currentColor; letter-spacing: .06em; white-space: nowrap; text-transform: uppercase; }
-.pill.exact { color: var(--green); } .pill.sep { color: var(--violet); } .pill.verify { color: var(--amber); }
+.pill.exact { color: var(--green); } .pill.sep { color: var(--violet); } .pill.verify { color: var(--amber); } .pill.partial { color: var(--ink-2); border-style: dashed; }
 .reveal { transition: opacity .8s, transform .8s cubic-bezier(.2, .7, .2, 1); }
 .js .reveal:not(.in) { opacity: 0; transform: translateY(26px); }
 table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); border: 1.5px solid var(--ink); font-size: 15px; }
@@ -186,6 +186,17 @@ table.reg { width: 100%; border-collapse: collapse; background: var(--sheet); bo
 .ba { position: relative; margin-top: 40px; border: 1.5px solid var(--ink); background: #fff; user-select: none; touch-action: pan-y; cursor: ew-resize; }
 .ba .after { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--cut, 50%)); }
 .ocrbox.low { stroke: var(--amber); fill: rgba(138, 90, 0, .1); }
+.revcmp { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 30px; }
+.revcmp figure { margin: 0; }
+.revcmp figcaption { font: 12px var(--mono); color: var(--ink-2); margin-bottom: 6px; letter-spacing: .04em; }
+.rsheet { position: relative; border: 1.5px solid var(--ink); background: #fff; }
+.rsheet img { display: block; width: 100%; height: auto; }
+.rsheet svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.revtab { margin-top: 18px; }
+.revtab tbody tr { cursor: pointer; }
+.revtab tbody tr:hover td, .revtab tbody tr:focus td { background: var(--paper-2); outline: none; }
+.revtab tbody tr.on td { background: var(--red-soft); }
+@media (max-width: 760px) { .revcmp { grid-template-columns: 1fr; } }
 .reading { margin-top: 18px; max-height: 330px; overflow: auto; border: 1.5px solid var(--ink); }
 .reading table { border: 0; }
 .reading td { font-size: 14px; padding: 6px 12px; }
@@ -305,9 +316,10 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="bar">
     <a class="cell brand" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
     <span class="cell hide-s">DWG SLH-001</span>
-    <span class="cell hide-s">REV 0.1.1</span>
+    <span class="cell hide-s">REV 1.0.0</span>
     <span class="grow"></span>
     <a class="cell hide-s" href="#try">Try it</a>
+    <a class="cell hide-s" href="#revisions">Revisions</a>
     <a class="cell hide-s" href="#compare">Compare</a>
     <a class="cell hide-s" href="#rfi">Questions</a>
     <a class="cell" href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">Guide</a>
@@ -320,12 +332,12 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="copy">
     <div class="label"><b>SLH-001</b> Drawing search · Dexterity Design Services</div>
     <h1 id="h1"><span class="sr-only">Sleuth finds any tag in scanned drawings. For example: </span><span class="tag" id="heroTag">6"-P-1001-A1B</span><span id="heroWhere">Found on ISO‑1001‑01, zone B3.</span></h1>
-    <p class="lead">Sleuth reads the scans nobody indexed: isometrics, P&amp;IDs, plotted PDFs on every office drive. Type a line number and it opens the sheet with the tag ringed in red.</p>
+    <p class="lead">Sleuth reads the scans nobody indexed: isometrics, P&amp;IDs, plotted PDFs on every office drive. Type a line number and it opens the sheet with the tag ringed in red, and tells you why it matched.</p>
     <div class="cta">
       <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
-    <div class="facts">v0.1.1 · 43 MB · Windows 10/11, 64-bit · no admin rights · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.2 MB)</a></div>
+    <div class="facts">v1.0.0 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
@@ -374,7 +386,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <div>
       <div class="label reveal"><b>02</b> Matching</div>
       <h2 class="reveal">It matches the tag, not the way it was typed.</h2>
-      <p class="lead reveal">Isometrics put an inch mark in the line number, line lists drop it, file names drop everything, and scanners read 0 as O. Sleuth compares letters and digits, folds look-alikes, and says which rule it used. A look-alike is never reported as exact.</p>
+      <p class="lead reveal">Isometrics put an inch mark in the line number, line lists drop it, file names drop everything, and scanners read 0 as O. Sleuth compares letters and digits, folds look-alikes, and says which rule it used. A look-alike is never reported as exact, and a match must stand on its own: <span class="mono">PSV-120</span> inside <span class="mono">PSV-1203</span> is only <em>partial</em>.</p>
       <div class="key reveal" aria-label="Every spelling reduces to the key 6P1001A1B"><span>6<span class="gone">"-</span>P<span class="gone">-</span>1001<span class="gone">-</span>A1B</span><span class="arrow">→</span><span class="k">6P1001A1B</span></div>
     </div>
     <div class="scroller reveal">
@@ -386,6 +398,8 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
           <tr><td>6 P 1001 A1B</td><td>Typed with spaces</td><td><span class="pill sep">Sep. ignored</span></td></tr>
           <tr><td>6P1001A1B.pdf</td><td>File name</td><td><span class="pill sep">Sep. ignored</span></td></tr>
           <tr><td>6"-P-1<span class="oh" title="letter O">O</span><span class="oh" title="letter O">O</span>1-A1B</td><td>Faint scan, letter O for 0</td><td><span class="pill verify">Verify</span></td></tr>
+          <tr><td><span class="oh" title="hidden by a pipe line">··</span>-P-1001-A1B</td><td>A pipe crosses the size; only part read</td><td><span class="pill partial">Partial</span></td></tr>
+          <tr><td>16"-P-1001-A1B</td><td>Another line: 16 inch, not 6</td><td><span class="pill partial">Partial</span></td></tr>
         </tbody>
       </table>
     </div>
@@ -407,9 +421,23 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   </div>
 </section>
 
+<section id="revisions" data-zone="D2">
+  <div class="wrap">
+    <div class="label reveal"><b>04</b> Revisions · new in 1.0</div>
+    <h2 class="reveal">Rev A to rev B: what actually changed.</h2>
+    <p class="lead reveal">Sleuth groups drawings by the drawing number in their title block and compares the tags of two issues. This is the real comparison of two sample revisions. Pick a change to see it on both sheets. A difference that could be an OCR misreading is marked Verify, never reported as an engineering change.</p>
+    <div class="revcmp reveal">
+      <figure><figcaption id="revOldCap">Old</figcaption><div class="rsheet"><img src="assets/demo/rev-a.jpg" alt="Rev A of the sample isometric" loading="lazy" width="1819" height="1287"><svg id="revOldSvg" viewBox="0 0 1000 707" preserveAspectRatio="none"></svg></div></figure>
+      <figure><figcaption id="revNewCap">New</figcaption><div class="rsheet"><img src="assets/demo/rev-b.jpg" alt="Rev B of the sample isometric" loading="lazy" width="1819" height="1287"><svg id="revNewSvg" viewBox="0 0 1000 707" preserveAspectRatio="none"></svg></div></figure>
+    </div>
+    <div class="scroller reveal"><table class="reg revtab"><thead><tr><th>Change</th><th>Kind</th><th>Old reading</th><th>New reading</th><th>Why</th></tr></thead><tbody id="revRows"></tbody></table></div>
+    <p class="samplenote" id="revNote"></p>
+  </div>
+</section>
+
 <section id="drives" data-zone="D4">
   <div class="wrap">
-    <div class="label reveal"><b>04</b> Deep search</div>
+    <div class="label reveal"><b>05</b> Deep search</div>
     <h2 class="reveal">Don't know which drive? Search all of them at once.</h2>
     <p class="lead reveal">Each file server gets a few searchers of its own, so a slow share never holds up the rest. A share that doesn't answer is marked offline within four seconds. A folder that hangs is skipped and listed with the reason. PDFs found on the way that haven't been read yet are read straight away, and their results join the list.</p>
     <div class="drives" id="driveRow">
@@ -424,7 +452,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 
 <section id="app" data-zone="E3" style="background: var(--paper-2)">
   <div class="wrap">
-    <div class="label reveal"><b>05</b> The app</div>
+    <div class="label reveal"><b>06</b> The app</div>
     <h2 class="reveal">Checked like a drawing. Click the numbers.</h2>
     <p class="lead reveal">The real Sleuth window, searching the sample sheets. Each number is a checker's note on that part of the window.</p>
     <div class="app reveal">
@@ -450,6 +478,11 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       </ul>
     </div>
     <div class="thumbs reveal" id="thumbs">
+      <button type="button" data-img="v1-partial" data-cap="New in 1.0: a pipe crosses the 4&quot;, so only -P-1002-A1B was read. Found, marked, and labelled Partial with the reason"><img src="assets/screens/v1-partial-1400.webp" alt="" loading="lazy"><span>Partial, explained</span></button>
+      <button type="button" data-img="v1-tags" data-cap="New in 1.0: every tag, its documents, places and lowest confidence"><img src="assets/screens/v1-tags-1400.webp" alt="" loading="lazy"><span>Tags</span></button>
+      <button type="button" data-img="v1-revisions" data-cap="New in 1.0: rev A against rev B, the changed tag marked on both sheets"><img src="assets/screens/v1-revisions-1400.webp" alt="" loading="lazy"><span>Revisions</span></button>
+      <button type="button" data-img="v1-details" data-cap="New in 1.0: title-block values with the text they came from, and how the file was read"><img src="assets/screens/v1-details-1400.webp" alt="" loading="lazy"><span>Details</span></button>
+      <button type="button" data-img="v1-monitor" data-cap="New in 1.0: the monitor, including why OCR runs on the CPU here"><img src="assets/screens/v1-monitor-1400.webp" alt="" loading="lazy"><span>Monitor</span></button>
       <button type="button" data-img="separators" data-cap="PSV1203, typed without the dash, found on the P&amp;ID"><img src="assets/screens/separators-1400.webp" alt="" loading="lazy"><span>PSV1203 → PSV-1203</span></button>
       <button type="button" data-img="space" data-cap="FV 2201, typed with a space, finds the instrument bubble"><img src="assets/screens/space-1400.webp" alt="" loading="lazy"><span>FV 2201 → bubble</span></button>
       <button type="button" data-img="deep" data-cap="Deep search: one bar per drive, offline shares skipped"><img src="assets/screens/deep-1400.webp" alt="" loading="lazy"><span>Deep search</span></button>
@@ -462,7 +495,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 
 <section id="compare" data-zone="E5">
   <div class="wrap">
-    <div class="label reveal"><b>06</b> Compared</div>
+    <div class="label reveal"><b>07</b> Compared</div>
     <h2 class="reveal">What the other searches can't see.</h2>
     <p class="lead reveal">Windows search and Everything are good at file names. Drawings hide their tags inside the page.</p>
     <div class="scroller reveal" style="margin-top:34px">
@@ -475,6 +508,8 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
           <tr><td>Find text in scanned drawings</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, OCR</td></tr>
           <tr><td>Match 6"-P-1001 to 6P1001</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, and labelled</td></tr>
           <tr><td>Open the page with the tag marked</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes</td></tr>
+          <tr><td>Say why each file matched</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, in words</td></tr>
+          <tr><td>List every tag and compare revisions</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes</td></tr>
         </tbody>
       </table>
     </div>
@@ -484,7 +519,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 <section id="bom" data-zone="F2" style="background: var(--paper-2)">
   <div class="wrap cols">
     <div>
-      <div class="label reveal"><b>07</b> Bill of materials</div>
+      <div class="label reveal"><b>08</b> Bill of materials</div>
       <h2 class="reveal">What's in the box.</h2>
       <div class="scroller reveal">
         <table class="reg bom">
@@ -492,22 +527,26 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
           <tbody>
             <tr><td>1</td><td>Search window</td><td>1</td><td>About 150 MB. Results as you type.</td></tr>
             <tr><td>2</td><td>Background reader</td><td>1</td><td>Low priority. Pauses above 60% CPU and on battery. Frees its memory after 2 idle minutes.</td></tr>
-            <tr><td>3</td><td>OCR engine, PP-OCRv6</td><td>1</td><td>300 dpi, 1600 px tiles, 512 px overlap. About 1.6 GB while reading.</td></tr>
-            <tr><td>4</td><td>Second reader, Windows OCR</td><td>1</td><td>Re-reads lines under 85% confidence. A disagreement is marked Verify.</td></tr>
-            <tr><td>5</td><td>Local index</td><td>1</td><td>SQLite with trigram search. Answers in milliseconds.</td></tr>
-            <tr><td>6</td><td>Shared reading cache</td><td>1</td><td>Each drawing read once for the office. Required on every PC.</td></tr>
-            <tr><td>7</td><td>Updater</td><td>1</td><td>Checks the SHA-256 before installing. Keeps settings and index.</td></tr>
+            <tr><td>3</td><td>Page classifier</td><td>1</td><td>Plotted text, scan, text + scan, outlined text, damaged. OCR only where a page needs it.</td></tr>
+            <tr><td>4</td><td>OCR engine, PP-OCRv6</td><td>1</td><td>300 dpi, 1600 px tiles, 512 px overlap. CPU, or DirectML only if it reads a check picture exactly like the CPU and faster.</td></tr>
+            <tr><td>5</td><td>Second reader, Windows OCR</td><td>1</td><td>Re-reads lines under 85% confidence. A disagreement is marked Verify.</td></tr>
+            <tr><td>6</td><td>Tag and title-block rules</td><td>1 set</td><td>Line numbers, instruments, valves, equipment; drawing number, revision, title. Each value keeps the text it came from.</td></tr>
+            <tr><td>7</td><td>Local index</td><td>1</td><td>SQLite with trigram search. Folder limits applied before result limits.</td></tr>
+            <tr><td>8</td><td>Shared reading cache</td><td>1</td><td>Keyed by content and reading pipeline, checksummed. Each drawing read once for the office.</td></tr>
+            <tr><td>9</td><td>Office server</td><td>Optional</td><td>Same engine over shared folders. HTTPS, access keys, per-project permissions, audit log.</td></tr>
+            <tr><td>10</td><td>Updater</td><td>1</td><td>Checks the SHA-256 before installing. Rolls back to the previous release. Keeps settings and index.</td></tr>
           </tbody>
         </table>
       </div>
     </div>
     <div>
-      <div class="label reveal"><b>08</b> Your drawings</div>
+      <div class="label reveal"><b>09</b> Your drawings</div>
       <h2 class="reveal">Nothing leaves the office.</h2>
       <ul class="notes reveal">
         <li>Drawings are read on your own PC. Sleuth never changes, moves or uploads a file.</li>
         <li>Read results stay on your PC and in the office's shared cache folder, on our own server.</li>
         <li>The only internet traffic is a check on GitHub for a new version.</li>
+        <li>No AI: no language models, no chat, nothing sent to an AI service, nothing learned from your corrections. OCR uses fixed models whose fingerprint is recorded with every reading.</li>
         <li>Files Sleuth can't read are listed with the reason: password protected, damaged or no access. None are skipped silently.</li>
         <li>Uninstalling removes the program. Your settings and index stay until you delete them.</li>
       </ul>
@@ -517,7 +556,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 
 <section id="rfi" data-zone="F5">
   <div class="wrap">
-    <div class="label reveal"><b>09</b> Requests for information</div>
+    <div class="label reveal"><b>10</b> Requests for information</div>
     <h2 class="reveal">Questions, answered.</h2>
     <div class="rfi reveal" style="margin-top:30px">
       <details><summary><span class="no">RFI-001</span><span class="qq">Windows says it "protected your PC". Is that safe?</span><span class="st">CLOSED</span></summary><div class="a">The installer isn't code-signed, so Windows warns on the first install. Click <b>More info</b>, then <b>Run anyway</b>. Updates install from inside Sleuth and don't show this.</div></details>
@@ -525,7 +564,10 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <details><summary><span class="no">RFI-003</span><span class="qq">How long before my project is searchable?</span><span class="st">CLOSED</span></summary><div class="a">File names are searchable straight away. A PDF with a text layer is read in seconds. A scanned A1 or A3 sheet takes about a minute on an office PC, unless a colleague's PC already read it, in which case it comes from the shared cache at once.</div></details>
       <details><summary><span class="no">RFI-004</span><span class="qq">How sure is "found"?</span><span class="st">CLOSED</span></summary><div class="a">Every result shows how it matched and where the text came from. Uncertain OCR is labelled <b>Verify</b> and is never reported as exact. The preview always rings the spot, so you can check it in a second.</div></details>
       <details><summary><span class="no">RFI-005</span><span class="qq">What if a drive is offline or a folder is locked?</span><span class="st">CLOSED</span></summary><div class="a">An offline share is skipped within four seconds. A folder that doesn't answer in 20 seconds is skipped and listed as "not searched", with the reason. A network error while reading is retried up to five times before a file is listed as unreadable.</div></details>
-      <details><summary><span class="no">RFI-006</span><span class="qq">Does it search DWG or Word files?</span><span class="st">CLOSED</span></summary><div class="a">Version 0.1 reads inside PDFs, and finds any file type by name.</div></details>
+      <details><summary><span class="no">RFI-006</span><span class="qq">Does it search DWG or Word files?</span><span class="st">CLOSED</span></summary><div class="a">Version 1.0 reads inside PDFs, and finds any file type by name.</div></details>
+      <details><summary><span class="no">RFI-007</span><span class="qq">Does Sleuth use AI?</span><span class="st">CLOSED</span></summary><div class="a">No. There is no language model, chat or generated summary anywhere. Tags and title-block details are found by fixed, editable rules, and every value shows the text it was read from. The OCR models are fixed; a correction you type is stored as a checked reading and never changes them.</div></details>
+      <details><summary><span class="no">RFI-008</span><span class="qq">Do we need a server?</span><span class="st">CLOSED</span></summary><div class="a">No. Every PC indexes and reads its own drives. IT can add the optional office server, which reads the shared project folders once for everyone; if it is offline, each PC keeps searching on its own and says so.</div></details>
+      <details><summary><span class="no">RFI-009</span><span class="qq">Will it use my graphics card?</span><span class="st">CLOSED</span></summary><div class="a">Only if it proves itself. Sleuth reads a fixed check picture on the CPU and on the card; the card is used only when the readings are identical and it is clearly faster. On our test PC the card failed the check, so Sleuth used the CPU and said why on the Monitor page.</div></details>
     </div>
   </div>
 </section>
@@ -533,23 +575,23 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
 <section id="issue" data-zone="F7" style="background: var(--paper-2)">
   <div class="wrap cols">
     <div>
-      <div class="label reveal"><b>10</b> Installation notes</div>
+      <div class="label reveal"><b>11</b> Installation notes</div>
       <h2 class="reveal">Issued for use.</h2>
       <ol class="notes reveal">
         <li>Download the installer and run it. It installs for your account only; no admin rights are needed.</li>
         <li>On the first install only, click <b>More info → Run anyway</b> if Windows asks.</li>
         <li>Sleuth connects to the shared cache at <span class="mono">U:\Sleuth-cache</span>. If it can't, it shows you what to fix.</li>
-        <li>Add your project folders under <b>Folders being read</b>. Search straight away.</li>
+        <li>Add your project folders under <b>Folders being read</b>. Search straight away. Updating from 0.1 keeps your settings and everything already read.</li>
         <li>Keep the guide by your desk. Its last page is a one-page quick reference.</li>
       </ol>
     </div>
     <div class="issue reveal">
       <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
-        <span class="t2">REV 0.1.1 · 43 MB · WIN 10/11</span>
+        <span class="t2">REV 1.0.0 · 56 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
       </a>
-      <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.2 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a></p>
+      <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.5 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
     </div>
   </div>
 </section>
@@ -561,14 +603,15 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="big"><span class="k">Title</span><span class="v">Sleuth · drawing search</span></div>
       <div><span class="k">Client</span><span class="v">Dexterity Design Services</span></div>
       <div><span class="k">Dwg no.</span><span class="v mono">SLH-001</span></div>
-      <div><span class="k">Rev</span><span class="v mono">0.1.1</span></div>
-      <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · PP-OCRv6</span></div>
+      <div><span class="k">Rev</span><span class="v mono">1.0.0</span></div>
+      <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6</span></div>
       <div><span class="k">Source</span><span class="v"><a href="https://github.com/dexterity-admin/Sleuth">GitHub</a></span></div>
       <div><span class="k">Sheet</span><span class="v mono">1 of 1</span></div>
     </div>
     <table class="reg revs" aria-label="Revisions">
       <thead><tr><th>Rev</th><th>Date</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td>1.0.0</td><td>03 Nov 2026</td><td>Pages classified, OCR only where needed. Every match explained; partial matches never exact. Tags, revision compare, related drawings, reading checks, monitor. Projects, OR and filters, export. Optional office server. Rollback.</td></tr>
         <tr><td>0.1.1</td><td>02 Nov 2026</td><td>Tags typed with a space are found. Empty start-up banners fixed. Background reading starts with Windows from the first launch.</td></tr>
         <tr><td>0.1.0</td><td>02 Nov 2026</td><td>First issue.</td></tr>
       </tbody>
@@ -593,11 +636,41 @@ const FOLD = { o: "0", q: "0", d: "0", i: "1", l: "1", s: "5", b: "8", z: "2", g
 const sepForm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 const foldForm = (s) => [...sepForm(s)].map((c) => FOLD[c] || c).join("");
 function makeTerm(t) { const raw = t.trim().toLowerCase(), sep = sepForm(raw); return sep ? { raw, sep, fold: foldForm(raw) } : null; }
+// 0 exact, 1 separators ignored, 2 verify, 3 partial (inside a longer tag, or
+// only part of the tag read), -1 no match. A match must stand on its own.
+const isAN = (c) => c !== undefined && /[\p{L}\p{N}]/u.test(c);
+function reduced(chars, fold) {
+  const out = [], at = [];
+  chars.forEach((c, i) => { if (isAN(c)) for (const l of c.toLowerCase()) { out.push(fold ? (FOLD[l] || l) : l); at.push(i); } });
+  return [out, at];
+}
+function findAll(hay, needle) {
+  const r = [];
+  for (let i = 0; i + needle.length <= hay.length; i++) { let ok = true; for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) { ok = false; break; } if (ok) r.push(i); }
+  return r;
+}
 function classify(term, text, conf) {
-  const low = conf < 0.8, lower = text.toLowerCase();
-  if (lower.includes(term.raw)) return low ? 2 : 0;
-  if (sepForm(lower).includes(term.sep)) return low ? 2 : 1;
-  if ([...term.sep].length >= 4 && foldForm(lower).includes(term.fold)) return 2;
+  const low = conf < 0.8, chars = [...text.toLowerCase()];
+  const alone = (s, e) => !isAN(chars[s - 1]) && !isAN(chars[e]);
+  let partial = false;
+  const raw = [...term.raw];
+  for (const i of findAll(chars, raw)) { if (alone(i, i + raw.length)) return low ? 2 : 0; partial = true; }
+  const want = [...term.sep];
+  let [sep, at] = reduced(chars, false);
+  for (const i of findAll(sep, want)) { if (alone(at[i], at[i + want.length - 1] + 1)) return low ? 2 : 1; partial = true; }
+  if (want.length >= 4) {
+    [sep, at] = reduced(chars, true);
+    for (const i of findAll(sep, [...term.fold])) { if (alone(at[i], at[i + want.length - 1] + 1)) return 2; partial = true; }
+  }
+  if (partial) return 3;
+  // a reading missing a few characters at one end (a line crossing the text)
+  if (want.length >= 6) {
+    const min = Math.max(5, Math.ceil(want.length * 0.7));
+    for (const w of text.split(/[\s,;]+/)) {
+      const s = sepForm(w);
+      if (s.length >= min && s.length < want.length && /\d/.test(s) && (term.sep.startsWith(s) || term.sep.endsWith(s))) return 3;
+    }
+  }
   return -1;
 }
 function parseQuery(q) {
@@ -612,7 +685,7 @@ function parseQuery(q) {
   }
   return out;
 }
-const CLASS = [["exact", "Exact"], ["sep", "Sep. ignored"], ["verify", "Verify"]];
+const CLASS = [["exact", "Exact"], ["sep", "Sep. ignored"], ["verify", "Verify"], ["partial", "Partial"]];
 
 let SHEETS = [];
 function searchSheets(q) {
@@ -686,6 +759,40 @@ $$(".reveal").forEach((el) => io.observe(el));
 const zoneNow = $("#zoneNow");
 const zio = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) zoneNow.textContent = "SLH-001 · ZONE " + (e.target.dataset.zone || "A1"); }), { rootMargin: "-45% 0px -50% 0px" });
 $$("section").forEach((s) => zio.observe(s));
+
+// ---------- revisions: the real comparison of two sample issues ----------
+fetch("assets/demo/revs.json").then((r) => r.json()).then((d) => {
+  $("#revOldCap").textContent = `Old · ${d.old.drawing_no} rev ${d.old.revision}`;
+  $("#revNewCap").textContent = `New · ${d.new.drawing_no} rev ${d.new.revision}`;
+  $("#revNote").textContent = `${d.changes.length} changes and ${d.unchanged} tags unchanged, exactly as the Sleuth reader reported them.`;
+  const ring = (svg, b) => {
+    svg.replaceChildren();
+    if (!b) return;
+    const W = 1000, H = 707, cx = (b.x + b.w / 2) * W, cy = (b.y + b.h / 2) * H;
+    const p = svgEl("path", { d: wobblyRing(cx, cy, (b.w * W) / 2 + 16, (b.h * H) / 2 + 12, 5), class: "ring" });
+    svg.append(p);
+    if (reduce) return;
+    const len = p.getTotalLength(); p.style.strokeDasharray = len; p.style.strokeDashoffset = len;
+    requestAnimationFrame(() => { p.style.transition = "stroke-dashoffset .7s cubic-bezier(.6,0,.3,1)"; p.style.strokeDashoffset = 0; });
+  };
+  const rows = $("#revRows");
+  const pick = (tr, c) => {
+    $$("tr.on", rows).forEach((x) => x.classList.remove("on"));
+    tr.classList.add("on");
+    ring($("#revOldSvg"), c.old_box);
+    ring($("#revNewSvg"), c.new_box);
+  };
+  d.changes.forEach((c, i) => {
+    const tr = document.createElement("tr");
+    tr.tabIndex = 0;
+    const kind = { changed: "Changed", added: "Added", removed: "Removed", verify: "Verify" }[c.kind];
+    tr.innerHTML = `<td><span class="pill ${c.kind === "verify" ? "verify" : "sep"}">${kind}</span></td><td>${esc(c.category)}</td><td class="mono">${esc(c.old || "—")}</td><td class="mono">${esc(c.new || "—")}</td><td>${esc(c.reason)}</td>`;
+    tr.addEventListener("click", () => pick(tr, c));
+    tr.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(tr, c); } });
+    rows.append(tr);
+    if (i === 0) pick(tr, c);
+  });
+}).catch(() => { $("#revNote").textContent = "The sample comparison could not be loaded."; });
 
 // ---------- load the sample sheets ----------
 fetch("assets/demo/sheets.json").then((r) => r.json()).then((data) => {
@@ -783,7 +890,7 @@ function hero() {
 // ---------- live demo ----------
 function demo() {
   const input = $("#demoQ"), list = $("#results"), pg = $("#pg"), img = $("#pgImg"), svg = $("#pgSvg"), meta = $("#pgMeta"), time = $("#demoTime"), zoomBtn = $("#zoomBtn");
-  for (const c of ['6"-P-1001-A1B', "PSV1203", "FV 2201", "HV-4410", "DOC-1001-17", "6p1001a1b", "6-P-1OO1-A1B"]) {
+  for (const c of ['6"-P-1001-A1B', "PSV1203", "FV 2201", "HV-4410", '4"-P-1002-A1B', "PSV-120", "DOC-1001-17", "6-P-1OO1-A1B"]) {
     const b = document.createElement("button"); b.type = "button"; b.className = "chip"; b.textContent = c;
     b.onclick = () => { input.value = c; go(); };
     $("#chips").append(b);

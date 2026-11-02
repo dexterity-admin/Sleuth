@@ -11,3 +11,5 @@ node_modules/
 /mockups/
 /site/Sleuth-User-Guide.pdf
 /.claude/
+/apps/desktop/src-tauri/runtime/
+/bench/corpus/

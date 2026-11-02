@@ -147,9 +147,9 @@ fn dispatch(req: Envelope<Request>, engine: &Arc<Engine>, tx: &EventTx) {
     let tx = tx.clone();
     match req.body {
         Request::Hello { .. } => reply(&tx, id, Ok(Event::Hello { protocol: PROTOCOL_VERSION, version: env!("CARGO_PKG_VERSION").into() })),
-        Request::Search { query, roots, deep, limit } => {
+        Request::Search { query, roots, project, deep, limit, offset } => {
             tokio::task::spawn_blocking(move || {
-                if let Err(err) = e.search(id, &query, &roots, deep, limit, &tx) {
+                if let Err(err) = e.search(id, &query, &roots, project.as_deref(), deep, limit.clamp(1, 5000), offset, &tx) {
                     reply(&tx, id, Err(err));
                 }
             });
@@ -158,8 +158,53 @@ fn dispatch(req: Envelope<Request>, engine: &Arc<Engine>, tx: &EventTx) {
             e.cancel_search(search_id);
             reply(&tx, id, Ok(Event::Ok));
         }
-        Request::Preview { path, page, query, max_px } => {
-            tokio::task::spawn_blocking(move || reply(&tx, id, e.preview(&path, page, &query, max_px)));
+        Request::Preview { path, page, query, max_px, tag, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.preview(&path, page, &query, max_px, tag.as_deref(), office)));
+        }
+        Request::Tags { category, contains, project, limit, offset, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.tags(category.as_deref(), contains.as_deref(), project.as_deref(), limit, offset, office)));
+        }
+        Request::TagOccurrences { norm, project, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.occurrences(&norm, project.as_deref(), office)));
+        }
+        Request::Revisions { contains, project, limit, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.revisions(contains.as_deref(), project.as_deref(), limit, office)));
+        }
+        Request::Compare { old, new, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.compare(&old, &new, office)));
+        }
+        Request::Related { path, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.related(&path, office)));
+        }
+        Request::DocInfo { path, office } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.doc_info(&path, office)));
+        }
+        Request::LowConfidence { path, limit, offset } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.low_confidence(path.as_deref(), limit, offset)));
+        }
+        Request::Crop { path, page, bbox, max_px } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.crop(&path, page, bbox, max_px)));
+        }
+        Request::Correct { line_id, text } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.correct(line_id, &text)));
+        }
+        Request::Uncorrect { correction_id } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.uncorrect(correction_id)));
+        }
+        Request::Monitor => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.monitor().map(|m| Event::Monitor { monitor: Box::new(m) })));
+        }
+        Request::History => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.history()));
+        }
+        Request::Pin { query, pinned } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.pin(&query, pinned)));
+        }
+        Request::CheckServer { url, token, ca_file } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, Ok(Event::Server { server: e.check_server(&url, &token, &ca_file) })));
+        }
+        Request::SetServer { url, token, ca_file } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.set_server(&url, &token, &ca_file).map(|_| Event::Ok)));
         }
         Request::Status => {
             tokio::task::spawn_blocking(move || reply(&tx, id, e.status().map(|(status, failed)| Event::Status { status, failed })));

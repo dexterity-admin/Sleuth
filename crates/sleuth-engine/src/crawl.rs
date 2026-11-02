@@ -9,17 +9,35 @@
 //!   with the reason, and the walk carries on.
 //! - Junctions and other reparse points are not followed (they can loop).
 //! - Setting the cancel flag stops every thread within one listing.
+//! - A listing that timed out leaves its helper thread waiting on Windows.
+//!   At most [`MAX_STUCK`] such threads are allowed per server; beyond that
+//!   the server is treated as not answering until they return, so a hung
+//!   share cannot pile up threads.
+//! - An interrupted walk can resume: folders already listed in the same pass
+//!   are not listed again (their known subfolders are walked instead).
 
 use sleuth_core::paths::server_key;
 use std::collections::{HashMap, VecDeque};
 use std::os::windows::fs::MetadataExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const ROOT_PROBE: Duration = Duration::from_secs(4);
+/// Timed-out listings allowed to be still waiting, per server.
+pub const MAX_STUCK: usize = 4;
+
+/// Listings per server that timed out and have not returned yet.
+fn stuck(server: &str) -> Arc<AtomicUsize> {
+    static MAP: std::sync::OnceLock<Mutex<HashMap<String, Arc<AtomicUsize>>>> = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default).lock().unwrap().entry(server.to_string()).or_default().clone()
+}
+
+pub fn stuck_count(server: &str) -> usize {
+    stuck(server).load(Ordering::SeqCst)
+}
 
 #[derive(Debug, Clone)]
 pub struct WalkConfig {
@@ -85,19 +103,50 @@ fn describe(e: &std::io::Error) -> String {
 }
 
 /// List on a helper thread and give up after `timeout`. A stuck listing
-/// thread is abandoned; it ends by itself when Windows finally answers.
-fn list_with_timeout(dir: &str, timeout: Duration) -> Result<Vec<Entry>, String> {
+/// thread is abandoned and counted against its server; it ends by itself
+/// when Windows finally answers.
+pub fn list_with_timeout(dir: &str, timeout: Duration) -> Result<Vec<Entry>, String> {
+    #[derive(PartialEq)]
+    enum Call {
+        Running,
+        TimedOut,
+        Done,
+    }
+    let counter = stuck(&server_key(dir));
+    let waiting = counter.load(Ordering::SeqCst);
+    if waiting >= MAX_STUCK {
+        return Err(format!("server not answering ({waiting} earlier listings still waiting)"));
+    }
     let (tx, rx) = mpsc::channel();
     let d = dir.to_string();
+    let call = Arc::new(Mutex::new(Call::Running));
+    let (call2, counter2) = (Arc::clone(&call), Arc::clone(&counter));
     std::thread::Builder::new()
         .name("sleuth-list".into())
         .spawn(move || {
-            let _ = tx.send(list_dir(&d));
+            let r = list_dir(&d);
+            let mut c = call2.lock().unwrap();
+            if *c == Call::TimedOut {
+                counter2.fetch_sub(1, Ordering::SeqCst);
+            }
+            *c = Call::Done;
+            drop(c);
+            let _ = tx.send(r);
         })
         .map_err(|e| e.to_string())?;
     match rx.recv_timeout(timeout) {
         Ok(r) => r,
-        Err(_) => Err(format!("no answer within {} s", timeout.as_secs())),
+        Err(_) => {
+            let mut c = call.lock().unwrap();
+            if *c == Call::Done {
+                // Answered just as the time ran out.
+                drop(c);
+                return rx.recv().unwrap_or_else(|_| Err("listing failed".into()));
+            }
+            *c = Call::TimedOut;
+            counter.fetch_add(1, Ordering::SeqCst);
+            Err(format!("no answer within {} s", timeout.as_secs()))
+        }
     }
 }
 
@@ -114,18 +163,24 @@ struct Queue {
 /// Walk all roots; `sink` receives events from many threads. Returns when
 /// every root is finished, offline or the walk was cancelled.
 pub fn walk(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, sink: &(dyn Fn(WalkEvent) + Sync)) {
+    walk_resumable(roots, cfg, cancel, &|_| None, sink)
+}
+
+/// [`walk`], skipping folders for which `done` returns their subfolders
+/// (already listed earlier in the same pass).
+pub fn walk_resumable(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done: &(dyn Fn(&str) -> Option<Vec<String>> + Sync), sink: &(dyn Fn(WalkEvent) + Sync)) {
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for r in roots {
         groups.entry(server_key(r)).or_default().push(r.clone());
     }
     std::thread::scope(|s| {
         for (_, group) in groups {
-            s.spawn(move || walk_group(&group, cfg, cancel, sink));
+            s.spawn(move || walk_group(&group, cfg, cancel, done, sink));
         }
     });
 }
 
-fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, sink: &(dyn Fn(WalkEvent) + Sync)) {
+fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done: &(dyn Fn(&str) -> Option<Vec<String>> + Sync), sink: &(dyn Fn(WalkEvent) + Sync)) {
     let network = roots.first().is_some_and(|r| is_network(r));
     let mut live = Vec::new();
     for r in roots {
@@ -169,10 +224,22 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, sink
                         }
                     };
                     let (root, dir) = next;
-                    let listed = if is_network(&dir) { list_with_timeout(&dir, cfg.listing_timeout) } else { list_dir(&dir) };
                     let mut subdirs = Vec::new();
+                    let resumed = done(&norm_dir(&dir));
+                    let listed = match resumed {
+                        Some(kids) => {
+                            subdirs.extend(kids.into_iter().filter(|p| {
+                                let lower = p.to_lowercase();
+                                !cfg.excluded.iter().any(|x| lower.starts_with(x.as_str()))
+                            }));
+                            None
+                        }
+                        None if is_network(&dir) => Some(list_with_timeout(&dir, cfg.listing_timeout)),
+                        None => Some(list_dir(&dir)),
+                    };
                     match listed {
-                        Ok(entries) => {
+                        None => {}
+                        Some(Ok(entries)) => {
                             for e in entries.iter().filter(|e| e.is_dir) {
                                 let p = join(&dir, &e.name);
                                 let lower = p.to_lowercase();
@@ -183,7 +250,7 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, sink
                             }
                             sink(WalkEvent::Listed { root: root.clone(), dir: norm_dir(&dir), entries });
                         }
-                        Err(reason) => sink(WalkEvent::Skipped { root: root.clone(), dir: dir.clone(), reason }),
+                        Some(Err(reason)) => sink(WalkEvent::Skipped { root: root.clone(), dir: dir.clone(), reason }),
                     }
                     let root_finished = {
                         let mut rem = remaining.lock().unwrap();
@@ -247,6 +314,46 @@ mod tests {
         assert_eq!(*files.lock().unwrap(), vec!["PSV-1203.pdf".to_string()]);
         assert_eq!(done.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resumed_walk_skips_listed_folders() {
+        let base = std::env::temp_dir().join(format!("dh-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("a").join("b")).unwrap();
+        std::fs::write(base.join("a").join("b").join("x.pdf"), b"x").unwrap();
+        let root = base.to_string_lossy().to_string();
+        let a = base.join("a").to_string_lossy().to_string();
+        let b = base.join("a").join("b").to_string_lossy().to_string();
+        let cfg = WalkConfig { per_server: 1, local_threads: 2, listing_timeout: Duration::from_secs(5), excluded: vec![], background: false };
+        let listed = Mutex::new(Vec::new());
+        // the root and "a" were listed before the interruption
+        let done = |d: &str| {
+            if d.eq_ignore_ascii_case(&norm_dir(&root)) {
+                Some(vec![a.clone()])
+            } else if d.eq_ignore_ascii_case(&a) {
+                Some(vec![b.clone()])
+            } else {
+                None
+            }
+        };
+        walk_resumable(&[root.clone()], &cfg, &Arc::new(AtomicBool::new(false)), &done, &|ev| {
+            if let WalkEvent::Listed { dir, .. } = ev {
+                listed.lock().unwrap().push(dir);
+            }
+        });
+        let l = listed.lock().unwrap();
+        assert_eq!(*l, vec![norm_dir(&b)], "only the folder not listed before");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stuck_listings_are_capped_per_server() {
+        let k = stuck(&server_key(r"\\nowhere-test\share"));
+        k.store(MAX_STUCK, Ordering::SeqCst);
+        let r = list_with_timeout(r"\\nowhere-test\share\x", Duration::from_secs(1));
+        assert!(r.unwrap_err().contains("not answering"));
+        k.store(0, Ordering::SeqCst);
     }
 
     #[test]

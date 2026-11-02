@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/sleuth-core", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri"]
+members = ["crates/sleuth-core", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri", "apps/server"]
 
 [workspace.package]
-version = "0.1.1"
+version = "1.0.0"
 edition = "2024"
 authors = ["Dexterity Design Services Pvt. Ltd."]
 license = "LicenseRef-Proprietary"
@@ -30,6 +30,11 @@ windows = { version = "0.62", features = [
   "Win32_UI_Shell",
   "Win32_System_Power",
   "Win32_System_WinRT",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Security_Cryptography",
   "Media_Ocr",
   "Graphics_Imaging",
   "Storage_Streams",

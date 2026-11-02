@@ -40,10 +40,22 @@ pub fn pdfium() -> Result<&'static Pdfium> {
     r.as_ref().map_err(|e| anyhow!(e.clone()))
 }
 
-/// Minimum characters a text layer needs before a page is trusted without OCR.
-const MIN_TEXT_CHARS: usize = 40;
-/// A page whose images cover this share of its area is treated as a scan.
-const SCAN_IMAGE_COVERAGE: f32 = 0.4;
+/// What the page itself says about how it was made, used to decide whether
+/// and where it needs OCR (see `reader::classify`).
+#[derive(Debug, Clone, Default)]
+pub struct PageFacts {
+    /// Non-blank characters in the text layer.
+    pub chars: usize,
+    /// Raster images on the page (normalised, origin top-left).
+    pub image_rects: Vec<NormBox>,
+    /// Share of the page area covered by images (overlaps counted twice).
+    pub image_coverage: f32,
+    /// Vector path objects: many paths and no text usually means text was
+    /// plotted as outlines.
+    pub paths: usize,
+    pub width_pt: f32,
+    pub height_pt: f32,
+}
 
 pub struct Doc {
     doc: PdfDocument<'static>,
@@ -77,12 +89,12 @@ impl Doc {
         Ok((p.width().value, p.height().value))
     }
 
-    /// Text-layer lines of one page, and whether the page still needs OCR.
-    pub fn text_layer(&self, index: u32) -> Result<(PageText, bool)> {
+    /// Text-layer lines of one page, and the facts used to classify it.
+    pub fn analyze(&self, index: u32) -> Result<(PageText, PageFacts)> {
         let page = self.page(index)?;
         let (pw, ph) = (page.width().value.max(1.0), page.height().value.max(1.0));
         let mut segs: Vec<(String, NormBox)> = Vec::new();
-        let mut chars = 0usize;
+        let mut facts = PageFacts { width_pt: pw, height_pt: ph, ..Default::default() };
         if let Ok(text) = page.text() {
             for seg in text.segments().iter() {
                 let t = seg.text();
@@ -90,7 +102,7 @@ impl Doc {
                 if trimmed.is_empty() {
                     continue;
                 }
-                chars += trimmed.chars().filter(|c| !c.is_whitespace()).count();
+                facts.chars += trimmed.chars().filter(|c| !c.is_whitespace()).count();
                 let b = seg.bounds();
                 let nb = NormBox {
                     x: b.left().value / pw,
@@ -101,21 +113,50 @@ impl Doc {
                 segs.push((trimmed.to_string(), nb));
             }
         }
-        let mut image_area = 0.0f32;
+        let to_norm = |q: &PdfQuadPoints| {
+            let (l, r) = (q.left().value.min(q.right().value), q.left().value.max(q.right().value));
+            let (b, t) = (q.bottom().value.min(q.top().value), q.bottom().value.max(q.top().value));
+            let x0 = (l / pw).clamp(0.0, 1.0);
+            let x1 = (r / pw).clamp(0.0, 1.0);
+            let y0 = (1.0 - t / ph).clamp(0.0, 1.0);
+            let y1 = (1.0 - b / ph).clamp(0.0, 1.0);
+            NormBox { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+        };
         for obj in page.objects().iter() {
-            if obj.object_type() == PdfPageObjectType::Image
-                && let Ok(b) = obj.bounds()
-            {
-                image_area += (b.width().value * b.height().value).abs();
+            match obj.object_type() {
+                PdfPageObjectType::Image => {
+                    if let Ok(q) = obj.bounds() {
+                        facts.image_rects.push(to_norm(&q));
+                    }
+                }
+                PdfPageObjectType::Path => facts.paths += 1,
+                PdfPageObjectType::XObjectForm => {
+                    // Child bounds are in the form's own space; when a form
+                    // holds an image, treat the whole form area as an image.
+                    if let Some(form) = obj.as_x_object_form_object() {
+                        let mut has_image = false;
+                        for child in form.iter() {
+                            match child.object_type() {
+                                PdfPageObjectType::Image => has_image = true,
+                                PdfPageObjectType::Path => facts.paths += 1,
+                                _ => {}
+                            }
+                        }
+                        if has_image && let Ok(q) = obj.bounds() {
+                            facts.image_rects.push(to_norm(&q));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
-        let coverage = image_area / (pw * ph);
-        let needs_ocr = chars < MIN_TEXT_CHARS || coverage >= SCAN_IMAGE_COVERAGE;
+        // Overlapping images count twice; coverage is a signal, not a measure.
+        facts.image_coverage = facts.image_rects.iter().map(|r| r.area()).sum::<f32>();
         let lines = merge_segments(segs)
             .into_iter()
             .map(|(text, bbox)| Line { text, conf: 1.0, source: TextSource::TextLayer, bbox, alt: false })
             .collect();
-        Ok((PageText { page: index + 1, lines }, needs_ocr))
+        Ok((PageText { page: index + 1, lines }, facts))
     }
 
     /// Render a rectangle of the page at `scale` pixels per point.

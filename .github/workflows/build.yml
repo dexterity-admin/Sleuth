@@ -73,11 +73,15 @@ jobs:
           $name = "Sleuth_${{ steps.ver.outputs.version }}_x64-setup.exe"
           Copy-Item $exe.FullName "out/$name"
           "name=$name" >> $env:GITHUB_OUTPUT
+          $server = Get-ChildItem out/Sleuth-Server_*_x64.zip | Select-Object -First 1
+          "server=$($server.Name)" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         with:
           name: Sleuth-${{ steps.ver.outputs.version }}
-          path: out/*
+          path: |
+            out/*.exe
+            out/*.zip
           retention-days: 14
 
       - name: Publish development build
@@ -86,10 +90,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $repo = '${{ github.repository }}'
-          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/dev/$n" -Notes "Development build ${{ github.sha }}" -Out out/latest.json
+          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $sv = '${{ steps.art.outputs.server }}'; $repo = '${{ github.repository }}'
+          # The current stable release is what a development build rolls back to.
+          gh release download --repo $repo --pattern latest.json --dir prev 2>$null
+          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/dev/$n" -Notes "Development build ${{ github.sha }}" -Previous prev/latest.json -Out out/latest.json
           gh release delete dev --repo $repo --yes --cleanup-tag 2>$null
-          gh release create dev --repo $repo --prerelease --target ${{ github.sha }} --title "Development build $v" --notes "Built from ${{ github.sha }}. For testing only." "out/$n" out/latest.json
+          gh release create dev --repo $repo --prerelease --target ${{ github.sha }} --title "Development build $v" --notes "Built from ${{ github.sha }}. For testing only." "out/$n" "out/$sv" out/latest.json
 
       - name: Publish release
         if: steps.ver.outputs.channel == 'stable'
@@ -97,10 +103,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $repo = '${{ github.repository }}'
+          $v = '${{ steps.ver.outputs.version }}'; $n = '${{ steps.art.outputs.name }}'; $sv = '${{ steps.art.outputs.server }}'; $repo = '${{ github.repository }}'
           $notes = (Get-Content -Raw CHANGELOG.md) -split '(?m)^## ' | Where-Object { $_ -like "$v*" } | Select-Object -First 1
           if (-not $notes) { $notes = "Sleuth $v" } else { $notes = ($notes -split "`n", 2)[1].Trim() }
-          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/v$v/$n" -Notes $notes -Out out/latest.json
+          # The release before this one, offered in the app as a rollback.
+          gh release download --repo $repo --pattern latest.json --dir prev 2>$null
+          ./scripts/make-latest-json.ps1 -Version $v -Installer "out/$n" -DownloadUrl "https://github.com/$repo/releases/download/v$v/$n" -Notes $notes -Previous prev/latest.json -Out out/latest.json
           # A copy under a fixed name, so ".../releases/latest/download/Sleuth_x64-setup.exe" always works.
           Copy-Item "out/$n" out/Sleuth_x64-setup.exe
-          gh release create "v$v" --repo $repo --title "Sleuth $v" --notes $notes "out/$n" out/Sleuth_x64-setup.exe out/latest.json
+          gh release create "v$v" --repo $repo --title "Sleuth $v" --notes $notes "out/$n" out/Sleuth_x64-setup.exe "out/$sv" out/latest.json

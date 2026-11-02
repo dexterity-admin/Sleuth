@@ -7,19 +7,62 @@
 </head>
 <body>
 <div id="app">
-  <header class="toolbar">
+  <header class="toolbar topbar">
     <div class="brand"><img src="icon.png" alt="" width="22" height="22"><span>Sleuth</span></div>
-    <div class="searchbox">
-      <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder='Tag, text or file name, e.g. 10"-P-1001-A1B' aria-label="Search">
-      <button id="clearQ" class="icon" title="Clear (Esc)" aria-label="Clear search">&times;</button>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button role="tab" data-view="search" class="on" title="Search (Ctrl+F)">Search</button>
+      <button role="tab" data-view="tags">Tags</button>
+      <button role="tab" data-view="revisions">Revisions</button>
+      <button role="tab" data-view="check">Check readings</button>
+      <button role="tab" data-view="monitor">Monitor</button>
+    </nav>
+    <span class="grow"></span>
+    <button id="settingsBtn" title="Settings">Settings</button>
+  </header>
+
+  <div id="searchBar" class="toolbar searchbar">
+    <select id="project" aria-label="Where to search" title="Search all ticked locations, or only one project's folders">
+      <option value="">All locations</option>
+    </select>
+    <div class="searchwrap">
+      <div class="searchbox">
+        <input id="q" type="text" autocomplete="off" spellcheck="false" placeholder='Tag, text or file name, e.g. 10"-P-1001-A1B' aria-label="Search" aria-controls="histDrop">
+        <button id="histBtn" class="icon small-icon" title="Recent and pinned searches (Down arrow)" aria-label="Recent and pinned searches">&#9662;</button>
+        <button id="clearQ" class="icon" title="Clear (Esc)" aria-label="Clear search">&times;</button>
+      </div>
+      <div id="histDrop" class="dropdown" hidden role="listbox" aria-label="Recent and pinned searches"></div>
+    </div>
+    <div class="popwrap">
+      <button id="syntaxBtn" class="round" title="How to write a search" aria-label="How to write a search" aria-expanded="false">?</button>
+      <div id="syntaxPop" class="popover" hidden role="dialog" aria-label="How to write a search">
+        <h4>How to write a search</h4>
+        <table class="syntax">
+          <tr><td><code>PSV-1203 FV-1001</code></td><td>Spaces: every word must be in the same file</td></tr>
+          <tr><td><code>PSV-1203 OR PSV-1204</code></td><td><code>OR</code> (capitals) or <code>|</code>: either one</td></tr>
+          <tr><td><code>10"-P-1001 A1B</code></td><td>Line number and spec in the same file</td></tr>
+          <tr><td><code>rev:C dwg:ISO-1001</code></td><td>Revision C of drawing ISO-1001 (from the title block)</td></tr>
+          <tr><td><code>type:instrument FV</code></td><td>Instrument tags containing FV</td></tr>
+          <tr><td><code>name:datasheet</code></td><td>"datasheet" in the file name</td></tr>
+          <tr><td><code>disc:piping</code></td><td>Discipline from the title block or drawing-number prefix</td></tr>
+          <tr><td><code>ext:pdf</code></td><td>Only PDF files</td></tr>
+          <tr><td><code>"OR"</code></td><td>Quotes search the text exactly, e.g. <code>name:"line list"</code></td></tr>
+        </table>
+        <p class="hint">Tag types for <code>type:</code> are the tag rule categories: line, drawing, instrument, valve, equipment, support, weld, spec (or your office's own).</p>
+      </div>
     </div>
     <select id="mode" aria-label="Match mode" title="Smart match also finds tags written without separators and possible OCR misreads">
       <option value="smart">Smart match</option>
       <option value="exact">Exact only</option>
     </select>
     <button id="deep" class="primary" title="Also walk the selected drives live and read any PDFs not read yet">Deep search</button>
-    <button id="settingsBtn" title="Settings">Settings</button>
-  </header>
+    <div class="popwrap">
+      <button id="exportBtn" title="Save these results as a spreadsheet">Export</button>
+      <div id="exportMenu" class="menu below" hidden role="menu">
+        <button data-fmt="xlsx" role="menuitem">Excel workbook (.xlsx)</button>
+        <button data-fmt="csv" role="menuitem">CSV (.csv)</button>
+      </div>
+    </div>
+  </div>
 
   <div id="cacheBanner" class="banner warn" hidden role="alert">
     <span id="cacheBannerText"></span>
@@ -31,8 +74,15 @@
     <span class="banner-actions"><button id="bannerAction" class="primary"></button><button id="bannerClose" class="icon" aria-label="Dismiss">&times;</button></span>
   </div>
 
-  <main class="panes">
+  <div id="noticeBanner" class="banner notice" hidden role="status">
+    <span id="noticeText"></span>
+    <span class="banner-actions"><button id="noticeClose" class="icon" aria-label="Dismiss">&times;</button></span>
+  </div>
+
+  <!-- ===================== Search ===================== -->
+  <main class="panes view" id="view-search">
     <aside class="side" aria-label="Locations and filters">
+      <div id="projectNote" class="project-note" hidden></div>
       <h3>This PC</h3>
       <div id="localDrives" class="drives"></div>
       <h3>Network</h3>
@@ -41,6 +91,7 @@
       <label><input type="checkbox" id="f-exact" checked> <span class="pill exact">Exact</span></label>
       <label><input type="checkbox" id="f-sep" checked> <span class="pill sep">Separators ignored</span></label>
       <label><input type="checkbox" id="f-unc" checked> <span class="pill verify">Verify</span></label>
+      <label title="The text was found only inside a longer tag or word"><input type="checkbox" id="f-partial" checked> <span class="pill partial">Partial</span></label>
       <label><input type="checkbox" id="f-content" checked> Text inside files</label>
       <label><input type="checkbox" id="f-names" checked> File names</label>
       <h3>Folders being read</h3>
@@ -67,32 +118,128 @@
     <aside id="preview" class="preview" aria-label="Preview">
       <div class="pv-empty" id="pvEmpty">Select a result to see the page with the text marked.</div>
       <div id="pvBody" hidden>
-        <div class="pv-tools">
-          <button id="pvPrevHit" class="small" title="Previous mark">&lsaquo; Mark</button>
-          <span id="pvHitInfo"></span>
-          <button id="pvNextHit" class="small" title="Next mark">Mark &rsaquo;</button>
-          <span class="grow"></span>
-          <button id="pvZoom" class="small" title="Zoom to the mark / fit page">Zoom</button>
+        <div class="subtabs" role="tablist">
+          <button role="tab" data-pt="page" class="on">Page</button>
+          <button role="tab" data-pt="details">Details</button>
+          <button role="tab" data-pt="related">Related</button>
         </div>
-        <div id="pvStage" class="pv-stage"><div id="pvCanvas" class="pv-canvas"><img id="pvImg" alt=""></div></div>
-        <div class="pv-pages">
-          <button id="pvPrevPage" class="small" aria-label="Previous page">&lsaquo;</button>
-          <span id="pvPageInfo"></span>
-          <button id="pvNextPage" class="small" aria-label="Next page">&rsaquo;</button>
+        <div id="pt-page" class="pt">
+          <div id="pvViewer"></div>
+          <dl class="kv" id="pvMeta"></dl>
+          <div class="pv-actions">
+            <button id="pvOpen" class="primary">Open</button>
+            <button id="pvReveal">Open folder</button>
+            <button id="pvCopy">Copy path</button>
+          </div>
         </div>
-        <dl class="kv" id="pvMeta"></dl>
-        <div class="pv-actions">
-          <button id="pvOpen" class="primary">Open</button>
-          <button id="pvReveal">Open folder</button>
-          <button id="pvCopy">Copy path</button>
-        </div>
+        <div id="pt-details" class="pt" hidden></div>
+        <div id="pt-related" class="pt" hidden></div>
       </div>
     </aside>
+  </main>
+
+  <!-- ===================== Tags ===================== -->
+  <main class="view tagsview" id="view-tags" hidden>
+    <aside class="side" aria-label="Tag filters">
+      <h3>Source</h3>
+      <div class="seg" id="tagSource">
+        <button data-src="local" class="on">This PC</button>
+        <button data-src="office" title="Only when the office server is connected">Office server</button>
+      </div>
+      <h3>Category</h3>
+      <select id="tagCat" class="full"><option value="">All categories</option></select>
+      <h3>Tag contains</h3>
+      <input id="tagContains" type="text" class="full mono" placeholder="e.g. 1203" spellcheck="false" autocomplete="off">
+      <p class="hint">Separators are ignored: 1203 finds PSV-1203 and PSV1203.</p>
+      <h3>Project</h3>
+      <select id="tagProject" class="full project-select"><option value="">All projects</option></select>
+      <h3>Export</h3>
+      <div class="btnrow"><button id="tagExportX" class="small">Tags .xlsx</button><button id="tagExportC" class="small">Tags .csv</button></div>
+      <div class="btnrow"><button id="occExportX" class="small" disabled>Places .xlsx</button><button id="occExportC" class="small" disabled>Places .csv</button></div>
+      <p class="hint">Confidence under 80% is marked <span class="pill verify">verify</span>: check the drawing before relying on it.</p>
+    </aside>
+    <section class="tablebox" aria-label="Tags">
+      <div class="boxhead"><span id="tagCount">Tags</span></div>
+      <div id="tagTable" class="vt"></div>
+    </section>
+    <div class="tagright">
+      <section class="tablebox occbox" aria-label="Where the tag was found">
+        <div class="boxhead"><span id="occTitle">Select a tag to see every place it was found.</span></div>
+        <div id="occTable" class="vt"></div>
+      </section>
+      <aside class="preview" aria-label="Page">
+        <div id="tagViewer"></div>
+        <dl class="kv" id="tagMeta"></dl>
+        <div class="pv-actions" id="tagActions" hidden>
+          <button id="tagOpen" class="primary">Open</button>
+          <button id="tagReveal">Open folder</button>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- ===================== Revisions ===================== -->
+  <main class="view revview" id="view-revisions" hidden>
+    <aside class="side revside" aria-label="Drawings">
+      <div class="seg" id="revSource">
+        <button data-src="local" class="on">This PC</button>
+        <button data-src="office">Office server</button>
+      </div>
+      <input id="revFilter" type="text" class="full mono" placeholder="Drawing number contains…" spellcheck="false" autocomplete="off">
+      <select id="revProject" class="full project-select"><option value="">All projects</option></select>
+      <div id="revCount" class="dim small-text"></div>
+      <div id="revList" class="revlist" tabindex="0" aria-label="Drawing numbers"></div>
+    </aside>
+    <section class="revmain">
+      <div class="revtop">
+        <div class="revhead">
+          <div id="revTitle" class="revtitle">Pick a drawing number on the left, then two of its revisions.</div>
+          <div id="revSummary" class="revsummary"></div>
+          <p class="hint warnline"><span class="pill verify">Verify</span> rows may be OCR misreadings and are not engineering changes. Check both pages before reporting them.</p>
+          <div class="filters-inline" id="chgFilters">
+            <label><input type="checkbox" data-kind="changed" checked> <span class="pill chg-changed">Changed</span></label>
+            <label><input type="checkbox" data-kind="added" checked> <span class="pill chg-added">Added</span></label>
+            <label><input type="checkbox" data-kind="removed" checked> <span class="pill chg-removed">Removed</span></label>
+            <label><input type="checkbox" data-kind="verify" checked> <span class="pill verify">Verify</span></label>
+          </div>
+        </div>
+        <div id="chgTable" class="vt chg"></div>
+      </div>
+      <div class="sidebyside">
+        <div class="sbs-col"><div class="sbs-head" id="oldHead">Old revision</div><div id="oldViewer"></div></div>
+        <div class="sbs-col"><div class="sbs-head" id="newHead">New revision</div><div id="newViewer"></div></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== Check readings ===================== -->
+  <main class="view checkview" id="view-check" hidden>
+    <div class="checkhead">
+      <div>
+        <h2>Check readings</h2>
+        <p class="hint">Lines read with low confidence, worst first. Type the text exactly as printed on the drawing and save it. The original OCR text is kept alongside your correction, and nothing is learned from corrections: they only change what searches find.</p>
+      </div>
+      <div class="checktools">
+        <label class="check-inline" title="Only lines from the file selected in Search"><input type="checkbox" id="chkOnlyFile"> <span id="chkOnlyFileLbl">Only the file selected in Search</span></label>
+        <button id="chkPrev" class="small">&lsaquo; Previous</button>
+        <span id="chkPageInfo" class="dim"></span>
+        <button id="chkNext" class="small">Next &rsaquo;</button>
+        <button id="chkReload" class="small">Refresh</button>
+      </div>
+    </div>
+    <div id="chkList" class="chklist"></div>
+  </main>
+
+  <!-- ===================== Monitor ===================== -->
+  <main class="view monview" id="view-monitor" hidden>
+    <div class="monhead"><h2>Monitor</h2><span id="monUpdated" class="dim"></span><span class="grow"></span><button id="monRefresh" class="small">Refresh</button></div>
+    <div id="monBody" class="monbody"></div>
   </main>
 
   <footer class="statusbar">
     <span id="sbCount">Ready</span>
     <span id="sbSearch"></span>
+    <button id="sbServer" class="srvbadge" hidden title="Office server"></button>
     <button id="sbReader" class="linkish" title="Index status"></button>
   </footer>
 </div>
@@ -104,6 +251,7 @@
   <button data-act="copyunc" role="menuitem">Copy network path</button>
   <button data-act="copytext" role="menuitem">Copy text found</button>
   <button data-act="read" role="menuitem">Read this PDF now</button>
+  <button data-act="check" role="menuitem">Check low-confidence readings in this file</button>
 </div>
 
 <dialog id="settingsDlg">
@@ -120,9 +268,18 @@
       <label class="row">Resolution for OCR
         <select id="s-dpi"><option value="300">300 dpi (recommended)</option><option value="400">400 dpi (very small print, slower)</option></select>
       </label>
+      <label class="row">OCR runs on
+        <select id="s-backend">
+          <option value="auto">Automatic (graphics card only if it passes a check)</option>
+          <option value="cpu">CPU only</option>
+          <option value="directml">Graphics card (DirectML)</option>
+        </select>
+      </label>
+      <p id="s-backendNote" class="hint"></p>
       <label class="row">Pause reading while other programs use more than
         <span><input id="s-busy" type="number" min="10" max="100" step="5"> % CPU</span>
       </label>
+      <label class="check"><input type="checkbox" id="s-titleblock"> Read the title block of plotted drawings when the text has no drawing number</label>
       <label class="check"><input type="checkbox" id="s-keep"> Keep reading in the background when Sleuth is closed (starts with Windows)</label>
     </section>
     <section id="cacheSection">
@@ -130,6 +287,37 @@
       <p class="hint">Drawings already read on another PC are not read again here, so everyone shares the work. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
       <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button></div>
       <p id="s-cacheState" class="hint"></p>
+    </section>
+    <section id="serverSection">
+      <h3>Office server (optional)</h3>
+      <p class="hint">With an office server, searches also cover the drawings it has read. Leave the address empty to use Sleuth on its own.</p>
+      <label class="row">Address <input id="s-srvUrl" type="text" class="wide mono" placeholder="https://sleuth-server:8455" spellcheck="false" autocomplete="off"></label>
+      <label class="row">Access key <input id="s-srvKey" type="password" class="wide" placeholder="Leave blank to keep the saved key" autocomplete="off"></label>
+      <div class="row">Certificate file (optional)
+        <span class="row-inline wide"><input id="s-srvCa" type="text" placeholder="Found automatically in the shared cache folder" spellcheck="false"><button type="button" id="s-srvCaPick" class="small">Browse</button></span>
+      </div>
+      <p class="hint">Without a certificate file, Sleuth looks for sleuth-server-ca.pem in the shared cache folder.</p>
+      <div class="row-inline">
+        <button type="button" id="s-srvTest" class="small">Test</button>
+        <button type="button" id="s-srvSave" class="small primary">Connect and save</button>
+        <button type="button" id="s-srvOff" class="small">Disconnect</button>
+      </div>
+      <p id="s-srvState" class="hint"></p>
+    </section>
+    <section>
+      <h3>Projects</h3>
+      <p class="hint">A project is a name for a set of folders. Pick it next to the search box to search only those folders.</p>
+      <div id="s-projects" class="projects"></div>
+      <button type="button" id="s-addProject" class="small">Add project</button>
+    </section>
+    <section>
+      <h3>Drawings</h3>
+      <label class="row">Revision order
+        <select id="s-revorder">
+          <option value="letters_then_numbers">A, B, C before 0, 1, 2 (pre-issue letters first)</option>
+          <option value="numbers_then_letters">0, 1, 2 before A, B, C</option>
+        </select>
+      </label>
     </section>
     <section>
       <h3>Deep search</h3>
@@ -146,7 +334,20 @@
         <select id="s-channel"><option value="stable">Stable</option><option value="dev">Development builds</option></select>
       </label>
       <div class="row-inline"><span id="s-version"></span><button type="button" id="s-checkUpdate" class="small">Check for updates</button><span id="s-updateMsg" class="hint"></span></div>
+      <div class="row-inline" id="s-rollbackRow" hidden><button type="button" id="s-rollback" class="small"></button><span id="s-rollbackMsg" class="hint"></span></div>
     </section>
+    <details class="advanced">
+      <summary>Advanced: tag and title-block rules</summary>
+      <p class="hint">Rules are JSON lists. Leave a box empty to use the built-in rules. A pattern the reader cannot use is listed under Monitor &rarr; Rule errors after saving; the file is not read again until the rule is fixed.</p>
+      <label class="col">Tag rules <span class="hint">[{"category": "instrument", "pattern": "regular expression", "enabled": true}, …]</span>
+        <textarea id="s-tagRules" rows="7" spellcheck="false" placeholder="Built-in rules in use"></textarea>
+      </label>
+      <div class="row-inline"><button type="button" id="s-tagRulesCopy" class="small">Copy the built-in rules here to edit</button><button type="button" id="s-tagRulesReset" class="small">Reset to built-in</button></div>
+      <label class="col">Title-block rules <span class="hint">[{"field": "drawing_number", "labels": ["DRAWING NO"], "value": "regular expression"}, …]</span>
+        <textarea id="s-fieldRules" rows="7" spellcheck="false" placeholder="Built-in rules in use"></textarea>
+      </label>
+      <div class="row-inline"><button type="button" id="s-fieldRulesCopy" class="small">Copy the built-in rules here to edit</button><button type="button" id="s-fieldRulesReset" class="small">Reset to built-in</button></div>
+    </details>
     <p id="s-error" class="error" hidden></p>
     <div class="dlg-actions">
       <button type="button" id="s-rescanNow">Refresh index now</button>
@@ -165,6 +366,15 @@
   <div class="dlg-actions"><span class="grow"></span><button id="stClose">Close</button></div>
 </dialog>
 
+<dialog id="confirmDlg">
+  <h2 id="cfTitle"></h2>
+  <div id="cfBody"></div>
+  <div class="dlg-actions"><span class="grow"></span><button id="cfNo">Cancel</button><button id="cfYes" class="primary"></button></div>
+</dialog>
+
+<script src="core.js"></script>
+<script src="search.js"></script>
+<script src="views.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

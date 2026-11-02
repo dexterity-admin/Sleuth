@@ -14,13 +14,14 @@ tokio.workspace = true
 tracing.workspace = true
 rusqlite = { version = "0.37", features = ["bundled"] }
 pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_latest", "image_latest", "thread_safe"] }
-oar-ocr = "0.10.2"
+oar-ocr = { version = "0.10.2", features = ["directml"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 blake3 = "1"
 flate2 = "1"
 base64 = "0.22"
 ureq = "3"
 sha2 = "0.10"
+regex = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

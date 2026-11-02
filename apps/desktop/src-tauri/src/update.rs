@@ -20,23 +20,56 @@ pub struct Manifest {
     pub notes: String,
     pub url: String,
     pub sha256: String,
+    /// The release before this one, for rolling back.
+    #[serde(default)]
+    pub previous: Option<Previous>,
+}
+
+/// The release before the current one, as listed in `latest.json`.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct Previous {
+    pub version: String,
+    pub url: String,
+    pub sha256: String,
+}
+
+impl From<Previous> for Manifest {
+    fn from(p: Previous) -> Manifest {
+        Manifest { version: p.version, notes: String::new(), url: p.url, sha256: p.sha256, previous: None }
+    }
 }
 
 fn manifest_url(channel: &str) -> String {
     if channel == "dev" { format!("{REPO}/download/dev/latest.json") } else { format!("{REPO}/latest/download/latest.json") }
 }
 
-/// The newer release on `channel`, if there is one.
-pub fn check(channel: &str, current: &str) -> Result<Option<Manifest>, String> {
+fn fetch(channel: &str) -> Result<Manifest, String> {
     let body = ureq::get(&manifest_url(channel))
         .call()
         .map_err(|e| format!("could not check for updates: {e}"))?
         .into_body()
         .read_to_string()
         .map_err(|e| format!("could not read the update information: {e}"))?;
-    let m: Manifest = serde_json::from_str(&body).map_err(|e| format!("the update information is not valid: {e}"))?;
-    let newer = semver::Version::parse(&m.version).map_err(|e| e.to_string())? > semver::Version::parse(current).map_err(|e| e.to_string())?;
+    serde_json::from_str(&body).map_err(|e| format!("the update information is not valid: {e}"))
+}
+
+fn version(v: &str) -> Result<semver::Version, String> {
+    semver::Version::parse(v.trim_start_matches('v')).map_err(|e| format!("version {v}: {e}"))
+}
+
+/// The newer release on `channel`, if there is one.
+pub fn check(channel: &str, current: &str) -> Result<Option<Manifest>, String> {
+    let m = fetch(channel)?;
+    let newer = version(&m.version)? > version(current)?;
     Ok(newer.then_some(m))
+}
+
+/// The release before the current one on `channel`, only when it is older
+/// than the running version. Downloaded and checked exactly like an update.
+pub fn rollback_target(channel: &str, current: &str) -> Result<Option<Manifest>, String> {
+    let Some(prev) = fetch(channel)?.previous else { return Ok(None) };
+    let older = version(&prev.version)? < version(current)?;
+    Ok(older.then(|| prev.into()))
 }
 
 /// Download the installer and verify it. Returns the verified file.

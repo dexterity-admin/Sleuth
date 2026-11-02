@@ -17,6 +17,9 @@ pub struct ModelSet {
     pub rec: PathBuf,
     pub dict: PathBuf,
     pub textline_ori: Option<PathBuf>,
+    /// BLAKE3 over the model and dictionary files, for provenance and the
+    /// shared-cache key: a changed model never reuses old readings.
+    pub hash: String,
 }
 
 struct Pinned {
@@ -62,13 +65,35 @@ fn find(file: &str) -> Option<PathBuf> {
 }
 
 fn set(size: &str) -> Option<ModelSet> {
-    Some(ModelSet {
+    let mut s = ModelSet {
         name: format!("PP-OCRv6 {size}"),
         det: find(&format!("pp-ocrv6_{size}_det.onnx"))?,
         rec: find(&format!("pp-ocrv6_{size}_rec.onnx"))?,
         dict: find("ppocrv6_dict.txt")?,
         textline_ori: find("pp-lcnet_x1_0_textline_ori.onnx"),
-    })
+        hash: String::new(),
+    };
+    s.hash = files_hash(&[Some(&s.det), Some(&s.rec), Some(&s.dict), s.textline_ori.as_ref()]).ok()?;
+    Some(s)
+}
+
+/// BLAKE3 of several files' contents in order, remembered per process.
+fn files_hash(files: &[Option<&PathBuf>]) -> Result<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<HashMap<Vec<PathBuf>, String>>> = OnceLock::new();
+    let key: Vec<PathBuf> = files.iter().flatten().map(|p| (*p).clone()).collect();
+    if let Some(h) = MEMO.get_or_init(Default::default).lock().unwrap().get(&key) {
+        return Ok(h.clone());
+    }
+    let mut h = blake3::Hasher::new();
+    for p in &key {
+        h.update(&std::fs::read(p)?);
+        h.update(b"|");
+    }
+    let hex = h.finalize().to_hex().to_string();
+    MEMO.get_or_init(Default::default).lock().unwrap().insert(key, hex.clone());
+    Ok(hex)
 }
 
 #[cfg(windows)]

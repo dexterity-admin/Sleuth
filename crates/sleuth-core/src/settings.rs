@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Office default for the shared reading cache.
 pub const OFFICE_CACHE_DIR: &str = r"U:\Sleuth-cache";
@@ -28,6 +28,113 @@ pub enum OcrQuality {
     Standard,
     /// PP-OCRv6 medium models, downloaded on first use.
     High,
+}
+
+/// Where OCR runs. `Auto` uses a graphics card only after it has passed a
+/// correctness and speed check on this PC; anything else runs on the CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OcrBackend {
+    #[default]
+    Auto,
+    /// Never use the graphics card (safe mode).
+    Cpu,
+    /// DirectML on the first graphics adapter, if it passes the check.
+    Directml,
+}
+
+/// How revisions sort when grouping a drawing's issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionOrder {
+    /// A, B, C (pre-issue) before 0, 1, 2 (issued).
+    #[default]
+    LettersThenNumbers,
+    NumbersThenLetters,
+}
+
+/// A named set of folders, used to limit searches and group drawings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Project {
+    pub name: String,
+    /// Folders (UNC for network locations).
+    pub roots: Vec<String>,
+}
+
+/// One pattern of the engineering tag parser. The first capture group, when
+/// present, is the tag; otherwise the whole match is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagRule {
+    pub category: String,
+    pub pattern: String,
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+/// One title-block field: a value printed after one of `labels`, matching
+/// `value` (a regular expression).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldRule {
+    pub field: String,
+    pub labels: Vec<String>,
+    pub value: String,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Built-in tag patterns. They are generic piping conventions; offices with
+/// their own numbering add or replace rules in settings.
+pub fn default_tag_rules() -> Vec<TagRule> {
+    let r = |c: &str, p: &str| TagRule { category: c.into(), pattern: p.into(), enabled: true };
+    vec![
+        r("line", r#"\b\d{1,2}(?:"|''|'|”|″|IN)?-[A-Z]{1,4}-\d{3,6}(?:-[A-Z0-9]{1,6})+\b"#),
+        r("drawing", r"\b(?:ISO|PID|P&ID|GA|DWG|DOC|STR|LAY)-[A-Z0-9]+(?:-[A-Z0-9]+)*\b"),
+        r("instrument", r"\b(?:[FPTLAHSXZ][A-Z]{1,3})[- ]?\d{3,5}[A-Z]?\b"),
+        r("valve", r"\b(?:V|MOV|XV|SDV|BDV)-\d{3,5}[A-Z]?\b"),
+        r("equipment", r"\b\d{0,3}[A-Z]{1,2}-\d{3,4}[A-Z]?\b"),
+        r("support", r"\b(?:PS|SP|SUP)-?[A-Z]{0,2}-?\d{2,6}\b"),
+        r("weld", r"\b(?:FW|SW|BW|W)-\d{1,4}\b"),
+        r("spec", r"\b(?:SPEC|PIPING CLASS|CLASS)[ .:]+([A-Z0-9]{2,8})\b"),
+    ]
+}
+
+/// Built-in title-block fields.
+pub fn default_field_rules() -> Vec<FieldRule> {
+    let r = |f: &str, labels: &[&str], v: &str| FieldRule { field: f.into(), labels: labels.iter().map(|s| s.to_string()).collect(), value: v.into() };
+    vec![
+        r("drawing_number", &["DRAWING NUMBER", "DRAWING NO", "DRG NO", "DWG NO", "DOCUMENT NO", "DOC NO"], r"[A-Z0-9][A-Z0-9\-_/.]{3,40}"),
+        r("revision", &["REVISION", "REV"], r"[A-Z0-9]{1,3}\b"),
+        r("title", &["DRAWING TITLE", "DRG TITLE", "DWG TITLE", "TITLE"], r".{3,100}"),
+        r("project", &["PROJECT NUMBER", "PROJECT NO", "JOB NO", "PROJECT"], r".{2,60}"),
+        r("sheet", &["SHEET"], r"\d+(?:\s*OF\s*\d+)?"),
+        r("discipline", &["DISCIPLINE"], r"[A-Z][A-Z &/-]{2,30}"),
+        r("status", &["STATUS"], r"[A-Z][A-Z0-9 -]{2,30}"),
+    ]
+}
+
+/// Drawing-number prefixes and the discipline they mean, used when the
+/// title block does not state one.
+pub fn default_discipline_prefixes() -> Vec<(String, String)> {
+    [("ISO", "Piping"), ("PID", "Process"), ("P&ID", "Process"), ("GA", "Layout"), ("LAY", "Layout"), ("STR", "Structural"), ("DOC", "Documents")]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+/// Connection to an optional office Sleuth server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ServerSettings {
+    /// `https://host:8455`; empty means standalone.
+    pub url: String,
+    /// The access key, encrypted for this Windows user (DPAPI, base64).
+    pub token_protected: String,
+    /// The server's certificate authority (PEM). Empty: look for
+    /// `sleuth-server-ca.pem` in the shared cache folder.
+    pub ca_file: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -68,6 +175,22 @@ pub struct Settings {
     /// Seconds before a single folder listing is given up and reported.
     pub listing_timeout_secs: u32,
     pub update_channel: UpdateChannel,
+    /// Where OCR runs (IT override; normally Auto).
+    pub ocr_backend: OcrBackend,
+    /// On plotted (text) drawings with no drawing number in their text, read
+    /// the title block area with OCR.
+    pub ocr_missing_title_block: bool,
+    pub projects: Vec<Project>,
+    /// Tag parser rules; `None` means the built-in rules.
+    pub tag_rules: Option<Vec<TagRule>>,
+    /// Title-block rules; `None` means the built-in rules.
+    pub field_rules: Option<Vec<FieldRule>>,
+    /// Drawing-number prefix -> discipline; `None` means the built-in list.
+    pub discipline_prefixes: Option<Vec<(String, String)>>,
+    pub revision_order: RevisionOrder,
+    pub server: ServerSettings,
+    /// Walk only these folders instead of every drive (office server).
+    pub index_roots: Option<Vec<String>>,
     /// Keys written by newer versions, preserved untouched.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -95,6 +218,15 @@ impl Default for Settings {
             listings_per_server: 4,
             listing_timeout_secs: 20,
             update_channel: UpdateChannel::Stable,
+            ocr_backend: OcrBackend::Auto,
+            ocr_missing_title_block: true,
+            projects: Vec::new(),
+            tag_rules: None,
+            field_rules: None,
+            discipline_prefixes: None,
+            revision_order: RevisionOrder::LettersThenNumbers,
+            server: ServerSettings::default(),
+            index_roots: None,
             extra: Map::new(),
         }
     }
@@ -128,18 +260,31 @@ fn migrate(mut doc: Map<String, Value>) -> Map<String, Value> {
     if from < 1 {
         // v0 was never released; nothing to rename.
     }
+    // v1 -> v2 (Sleuth 1.0) only adds keys, all with defaults.
     doc.insert("schema_version".into(), Value::from(SCHEMA_VERSION.max(from)));
     doc
 }
 
 impl Settings {
+    pub fn tag_rules(&self) -> Vec<TagRule> {
+        self.tag_rules.clone().unwrap_or_else(default_tag_rules)
+    }
+    pub fn field_rules(&self) -> Vec<FieldRule> {
+        self.field_rules.clone().unwrap_or_else(default_field_rules)
+    }
+    pub fn discipline_prefixes(&self) -> Vec<(String, String)> {
+        self.discipline_prefixes.clone().unwrap_or_else(default_discipline_prefixes)
+    }
+
     pub fn load_from(path: &Path) -> anyhow::Result<Settings> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
             Err(e) => return Err(e.into()),
         };
-        let doc: Map<String, Value> = match serde_json::from_str(&text) {
+        // Notepad and PowerShell 5.1 save UTF-8 with a byte-order mark.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        let doc: Map<String, Value> = match serde_json::from_str(text) {
             Ok(d) => d,
             Err(_) => {
                 // A damaged file is kept for inspection and defaults are used.
@@ -212,6 +357,13 @@ mod tests {
         assert_eq!(s.content_scopes, vec![r"\\srv\share".to_string()]);
         assert!(p.with_file_name("settings.v0.bak").exists());
         assert_eq!(s.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn file_with_byte_order_mark_loads() {
+        let p = tmp("bom");
+        std::fs::write(&p, "\u{feff}{\"schema_version\":2,\"ocr_dpi\":400}").unwrap();
+        assert_eq!(Settings::load_from(&p).unwrap().ocr_dpi, 400);
     }
 
     #[test]

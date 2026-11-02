@@ -23,3 +23,4 @@ sha2 = "0.10"
 semver = "1"
 winreg = "0.55"
 windows.workspace = true
+rust_xlsxwriter = { version = "0.102.0", default-features = false }

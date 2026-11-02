@@ -1,4 +1,5 @@
-//! OCR of rendered PDF pages with PP-OCRv6 (ONNX Runtime, CPU).
+//! OCR of rendered PDF pages with PP-OCRv6 (ONNX Runtime on the CPU, or
+//! DirectML where it has passed the check in `accel`).
 //!
 //! Large sheets are rendered in overlapping tiles so small print keeps its
 //! full resolution. The overlap is wider than any tag, so every short line is
@@ -29,31 +30,87 @@ const EDGE: f32 = 6.0;
 /// Below this, ask the Windows reader for a second opinion.
 const SECOND_OPINION_BELOW: f32 = 0.85;
 
+/// Where the ONNX models run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Backend {
+    Cpu,
+    /// DirectML on adapter 0.
+    DirectMl,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::Cpu => "CPU",
+            Backend::DirectMl => "DirectML",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OcrOptions {
+    pub threads: usize,
+    pub tile: i32,
+    pub overlap: i32,
+    pub detect_side: u32,
+    pub backend: Backend,
+}
+
+impl Default for OcrOptions {
+    fn default() -> Self {
+        OcrOptions { threads: 2, tile: TILE, overlap: OVERLAP, detect_side: DETECT_SIDE, backend: Backend::Cpu }
+    }
+}
+
+/// Settings that change what OCR produces; part of the pipeline fingerprint.
+pub fn config_signature(o: &OcrOptions) -> String {
+    format!("tile={}/{}/{};det=0.2/0.45/1.4/3000;second<{SECOND_OPINION_BELOW};edge={EDGE}", o.tile, o.overlap, o.detect_side)
+}
+
+/// Tiles looked at and actually read for one page or region set.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TileStats {
+    pub tiles: u32,
+    pub blank: u32,
+}
+
 pub struct OcrReader {
     ocr: OAROCR,
     pub model: String,
-    tile: i32,
-    overlap: i32,
+    pub model_hash: String,
+    pub opts: OcrOptions,
 }
 
 impl OcrReader {
     pub fn new(models: &ModelSet, threads: usize) -> Result<OcrReader> {
-        Self::with_tile(models, threads, TILE, OVERLAP, DETECT_SIDE)
+        Self::build(models, &OcrOptions { threads, ..Default::default() })
     }
 
     pub fn with_tile(models: &ModelSet, threads: usize, tile: i32, overlap: i32, detect_side: u32) -> Result<OcrReader> {
+        Self::build(models, &OcrOptions { threads, tile, overlap, detect_side, backend: Backend::Cpu })
+    }
+
+    pub fn build(models: &ModelSet, o: &OcrOptions) -> Result<OcrReader> {
         let det = TextDetectionConfig {
             score_threshold: 0.2,
             box_threshold: 0.45,
             unclip_ratio: 1.4,
             max_candidates: 3000,
-            limit_side_len: Some(detect_side),
+            limit_side_len: Some(o.detect_side),
             limit_type: Some(LimitType::Max),
-            max_side_len: Some(detect_side),
+            max_side_len: Some(o.detect_side),
         };
         let mut ort = oar_ocr::core::config::OrtSessionConfig::default();
-        ort.intra_threads = Some(threads.max(1));
+        ort.intra_threads = Some(o.threads.max(1));
         ort.inter_threads = Some(1);
+        if o.backend == Backend::DirectMl {
+            use oar_ocr::core::config::OrtExecutionProvider as P;
+            // DirectML needs sequential execution and no memory patterns. A
+            // node the GPU cannot run falls back to the CPU provider.
+            ort.execution_providers = Some(vec![P::DirectML { device_id: Some(0) }, P::CPU]);
+            ort.parallel_execution = Some(false);
+            ort.enable_mem_pattern = Some(false);
+        }
         let mut b = OAROCRBuilder::new(models.det.clone(), models.rec.clone(), models.dict.clone())
             .text_detection_config(det)
             .ort_session(ort)
@@ -61,12 +118,41 @@ impl OcrReader {
         if let Some(ori) = &models.textline_ori {
             b = b.with_text_line_orientation_classification(ori.clone());
         }
-        let ocr = b.build().map_err(|e| anyhow!("could not load OCR models: {e}"))?;
-        Ok(OcrReader { ocr, model: models.name.clone(), tile, overlap })
+        let ocr = b.build().map_err(|e| anyhow!("could not load OCR models on {}: {e}", o.backend.label()))?;
+        Ok(OcrReader { ocr, model: models.name.clone(), model_hash: models.hash.clone(), opts: o.clone() })
     }
 
-    /// OCR one page. `cancel` is checked between tiles.
+    /// Detect and recognise one image as it is (no tiling, no second
+    /// opinion): `(text, confidence, [x0, y0, x1, y1])`. Used by the backend
+    /// check, which compares two backends on the same picture.
+    pub fn recognize(&self, img: RgbImage) -> Result<Vec<(String, f32, [f32; 4])>> {
+        let results = self.ocr.predict(vec![img]).map_err(|e| anyhow!("OCR failed: {e}"))?;
+        let mut out = Vec::new();
+        for res in results {
+            for region in res.text_regions {
+                let (Some(text), Some(conf)) = (region.text.as_deref(), region.confidence) else { continue };
+                let pts = &region.bounding_box.points;
+                if text.trim().is_empty() || pts.is_empty() {
+                    continue;
+                }
+                let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for p in pts {
+                    b = [b[0].min(p.x), b[1].min(p.y), b[2].max(p.x), b[3].max(p.y)];
+                }
+                out.push((text.trim().to_string(), conf, b));
+            }
+        }
+        Ok(out)
+    }
+
+    /// OCR one whole page. `cancel` is checked between tiles.
     pub fn read_page(&self, doc: &Doc, index: u32, dpi: u32, cancel: &dyn Fn() -> bool) -> Result<PageText> {
+        self.read_regions(doc, index, dpi, &[], cancel).map(|(p, _)| p)
+    }
+
+    /// OCR parts of a page. `regions` (normalised) limit the tiles read; an
+    /// empty list means the whole page.
+    pub fn read_regions(&self, doc: &Doc, index: u32, dpi: u32, regions: &[NormBox], cancel: &dyn Fn() -> bool) -> Result<(PageText, TileStats)> {
         let (pw, ph) = doc.page_size(index)?;
         let mut scale = dpi as f32 / 72.0;
         // Keep pathological page sizes (banners, A0+ at 400 dpi) bounded.
@@ -75,30 +161,56 @@ impl OcrReader {
             scale = max_side / pw.max(ph);
         }
         let (full_w, full_h) = ((pw * scale).ceil() as i32, (ph * scale).ceil() as i32);
-        let (tile_px, step) = (self.tile, self.tile - self.overlap);
+        // Areas in pixels; a region is widened by half a tile overlap so text
+        // straddling its border is read whole.
+        let pad = self.opts.overlap / 2;
+        let areas: Vec<(i32, i32, i32, i32)> = if regions.is_empty() {
+            vec![(0, 0, full_w, full_h)]
+        } else {
+            merge_rects(
+                regions
+                    .iter()
+                    .map(|r| {
+                        let x0 = ((r.x * full_w as f32) as i32 - pad).max(0);
+                        let y0 = ((r.y * full_h as f32) as i32 - pad).max(0);
+                        let x1 = (((r.x + r.w) * full_w as f32).ceil() as i32 + pad).min(full_w);
+                        let y1 = (((r.y + r.h) * full_h as f32).ceil() as i32 + pad).min(full_h);
+                        (x0, y0, x1, y1)
+                    })
+                    .filter(|(x0, y0, x1, y1)| x1 > x0 && y1 > y0)
+                    .collect(),
+            )
+        };
+        let (tile_px, step) = (self.opts.tile, self.opts.tile - self.opts.overlap);
         let mut found: Vec<Found> = Vec::new();
-        let mut y = 0;
-        loop {
-            let mut x = 0;
-            let th = tile_px.min(full_h - y);
+        let mut stats = TileStats::default();
+        for (ax0, ay0, ax1, ay1) in areas {
+            let mut y = ay0;
             loop {
-                if cancel() {
-                    return Err(anyhow!("cancelled"));
+                let mut x = ax0;
+                let th = tile_px.min(ay1 - y);
+                loop {
+                    if cancel() {
+                        return Err(anyhow!("cancelled"));
+                    }
+                    let tw = tile_px.min(ax1 - x);
+                    let tile = doc.render_tile(index, scale, x, y, tw, th)?;
+                    stats.tiles += 1;
+                    if is_blank(&tile) {
+                        stats.blank += 1;
+                    } else {
+                        self.read_tile(tile, x, y, full_w, full_h, &mut found)?;
+                    }
+                    if x + tw >= ax1 {
+                        break;
+                    }
+                    x += step;
                 }
-                let tw = tile_px.min(full_w - x);
-                let tile = doc.render_tile(index, scale, x, y, tw, th)?;
-                if !is_blank(&tile) {
-                    self.read_tile(tile, x, y, full_w, full_h, &mut found)?;
-                }
-                if x + tw >= full_w {
+                if y + th >= ay1 {
                     break;
                 }
-                x += step;
+                y += step;
             }
-            if y + th >= full_h {
-                break;
-            }
-            y += step;
         }
         let kept = dedupe(found);
         let lines = kept
@@ -115,7 +227,7 @@ impl OcrReader {
                 std::iter::once(main).chain(alt)
             })
             .collect();
-        Ok(PageText { page: index + 1, lines })
+        Ok((PageText { page: index + 1, lines }, stats))
     }
 
     fn read_tile(&self, tile: RgbImage, ox: i32, oy: i32, full_w: i32, full_h: i32, out: &mut Vec<Found>) -> Result<()> {
@@ -125,7 +237,9 @@ impl OcrReader {
         for region in res.text_regions {
             let (Some(text), Some(conf)) = (region.text.as_deref(), region.confidence) else { continue };
             let text = text.trim();
-            if text.is_empty() {
+            // A reading with no letter or digit (specks, hatching, symbols)
+            // can never be searched for.
+            if !text.chars().any(char::is_alphanumeric) {
                 continue;
             }
             let pts = &region.bounding_box.points;
@@ -235,6 +349,27 @@ fn dedupe(mut found: Vec<Found>) -> Vec<Found> {
     found
 }
 
+/// Join overlapping rectangles so no area is read twice.
+fn merge_rects(mut rects: Vec<(i32, i32, i32, i32)>) -> Vec<(i32, i32, i32, i32)> {
+    loop {
+        let mut merged = false;
+        'outer: for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                let (a, b) = (rects[i], rects[j]);
+                if a.0 < b.2 && b.0 < a.2 && a.1 < b.3 && b.1 < a.3 {
+                    rects[i] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+                    rects.remove(j);
+                    merged = true;
+                    break 'outer;
+                }
+            }
+        }
+        if !merged {
+            return rects;
+        }
+    }
+}
+
 /// A tile with almost no dark pixels has nothing to read.
 fn is_blank(img: &RgbImage) -> bool {
     let mut dark = 0usize;
@@ -272,6 +407,12 @@ mod tests {
     fn long_cut_line_without_whole_copy_is_kept() {
         let out = dedupe(vec![f("A VERY LONG NOTE", 100.0, 1600.0, true, 0.9)]);
         assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn overlapping_regions_merge() {
+        let r = merge_rects(vec![(0, 0, 10, 10), (5, 5, 20, 20), (50, 50, 60, 60)]);
+        assert_eq!(r, vec![(0, 0, 20, 20), (50, 50, 60, 60)]);
     }
 
     #[test]

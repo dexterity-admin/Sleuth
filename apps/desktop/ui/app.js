@@ -1,462 +1,63 @@
-// Sleuth window logic. Talks to sleuth-worker.exe through the Rust shell:
-//   invoke("call", {req})           one request, one reply
-//   invoke("start_search", {...})   streaming search; events arrive as "worker-event"
+// Sleuth window: worker connection, status bar, shared-cache enforcement,
+// settings, updates and start-up. Loaded last (after core.js, search.js, views.js).
 "use strict";
-
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
-const $ = (id) => document.getElementById(id);
-const call = (req) => invoke("call", { req });
-
-const ROW_H = 30;
-const CLASS_LABEL = { exact: "Exact", separators_ignored: "Separators ignored", uncertain: "Verify, OCR unsure" };
-const CLASS_PILL = { exact: "exact", separators_ignored: "sep", uncertain: "verify" };
-const CLASS_ORDER = { exact: 0, separators_ignored: 1, uncertain: 2 };
-const SOURCE_LABEL = { file_name: "File name", text_layer: "PDF text", ocr: "OCR", pending: "Waiting to be read" };
-
-const state = {
-  settings: null,
-  drives: [],
-  driveOn: new Map(),       // root -> checked
-  driveState: new Map(),    // root -> {cls, text}
-  hits: new Map(),          // lower path -> hit
-  view: [],                 // filtered + sorted
-  sortKey: "class",
-  asc: true,
-  sel: -1,
-  searchId: 0,
-  deepRunning: false,
-  queued: 0,
-  query: "",
-  lastDone: null,
-  pv: null,                 // {hit, page, pages, boxes, cur, zoom}
-  updateChannel: "stable",
-};
-
-// ---------- helpers ----------
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
-function fmtDate(secs) {
-  if (!secs) return "";
-  const d = new Date(secs * 1000);
-  return d.toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
-}
-function fmtSize(n) {
-  if (n < 1024) return n + " B";
-  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
-  return (n / 1048576).toFixed(1) + " MB";
-}
-function folderOf(p) { const i = p.lastIndexOf("\\"); return i > 0 ? p.slice(0, i) : p; }
-function extOf(name) { const i = name.lastIndexOf("."); return i > 0 ? name.slice(i + 1).toUpperCase().slice(0, 4) : ""; }
-function isPdf(name) { return /\.pdf$/i.test(name); }
-function toast(msg) { $("sbSearch").textContent = msg; }
-function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
-async function copyText(t) {
-  try { await navigator.clipboard.writeText(t); toast("Copied"); }
-  catch { toast("Could not copy"); }
-}
 
 // ---------- worker connection ----------
 async function waitForWorker() {
   for (let i = 0; i < 60; i++) {
-    try { await call({ req: "hello", protocol: 1 }); return true; }
-    catch { await new Promise((r) => setTimeout(r, 500)); }
+    try {
+      const r = await call({ req: "hello", protocol: PROTOCOL });
+      if (r.protocol !== undefined && r.protocol !== PROTOCOL) {
+        showBanner(`The background reader (version ${r.version || "?"}) does not match this window. Close Sleuth and open it again; if this stays, reinstall Sleuth.`, null);
+      }
+      return true;
+    } catch { await new Promise((r) => setTimeout(r, 500)); }
   }
   showBanner("The Sleuth reader did not start. Close Sleuth and open it again.", null);
   return false;
 }
-
-// ---------- drives / scopes ----------
-async function loadDrives() {
-  const r = await call({ req: "drives" });
-  state.drives = r.drives.filter((d) => d.kind === "fixed" || d.kind === "network");
-  for (const d of state.drives) if (!state.driveOn.has(rootOf(d))) state.driveOn.set(rootOf(d), true);
-  renderDrives();
-}
-function rootOf(d) { return d.letter + "\\"; }
-function renderDrives() {
-  for (const [boxId, kind] of [["localDrives", "fixed"], ["netDrives", "network"]]) {
-    const box = $(boxId);
-    box.replaceChildren();
-    const list = state.drives.filter((d) => d.kind === kind);
-    if (!list.length) box.append(el("div", "dim", "None"));
-    for (const d of list) {
-      const root = rootOf(d);
-      const lab = el("label");
-      const cb = el("input"); cb.type = "checkbox"; cb.checked = state.driveOn.get(root) !== false;
-      cb.onchange = () => { state.driveOn.set(root, cb.checked); runSearch(false); };
-      lab.append(cb, el("span", "drv-name", d.letter));
-      if (d.unc) { const u = el("span", "drv-unc", d.unc.replace(/^\\\\/, "")); u.title = d.unc; lab.append(u); }
-      else lab.append(el("span", "drv-unc", ""));
-      const st = state.driveState.get(d.unc ? d.unc.toLowerCase() + "\\" : root.toLowerCase());
-      if (st) lab.append(el("span", "drv-state " + st.cls, st.text));
-      box.append(lab);
-    }
-  }
-}
-function selectedRoots() {
-  const roots = state.drives.map(rootOf);
-  const on = roots.filter((r) => state.driveOn.get(r) !== false);
-  return on.length === roots.length ? [] : on;
-}
-function renderScopes() {
-  const box = $("scopes");
-  box.replaceChildren();
-  const scopes = state.settings?.content_scopes || [];
-  if (!scopes.length) box.append(el("div", "none", "None yet. Add the project folders whose PDFs should be read."));
-  for (const s of scopes) {
-    const row = el("div", "scope");
-    const t = el("span", null, s); t.title = s;
-    const x = el("button", "icon", "×"); x.title = "Stop reading this folder"; x.setAttribute("aria-label", "Remove " + s);
-    x.onclick = async () => { await saveSettings({ ...state.settings, content_scopes: scopes.filter((v) => v !== s) }); };
-    row.append(t, x); box.append(row);
-  }
-}
-$("addScope").onclick = async () => {
-  const p = await invoke("pick_folder");
-  if (!p) return;
-  const scopes = state.settings.content_scopes || [];
-  if (!scopes.some((s) => s.toLowerCase() === p.toLowerCase())) {
-    await saveSettings({ ...state.settings, content_scopes: [...scopes, p] });
-    await call({ req: "rescan_now" });
-    toast("Added. Its PDFs will be read in the background.");
-  }
-};
-
-// ---------- searching ----------
-async function runSearch(deep) {
-  const q = $("q").value.trim();
-  if (state.searchId) { call({ req: "cancel", search_id: state.searchId }).catch(() => {}); }
-  state.query = q;
-  state.hits.clear(); state.sel = -1; state.queued = 0; state.lastDone = null;
-  setDeepRunning(false);
-  $("deepbar").hidden = true;
-  state.driveState.clear(); renderDrives();
-  if (!q) { state.searchId = 0; refreshView(); clearPreview(); return; }
-  try {
-    state.searchId = await invoke("start_search", { query: q, roots: selectedRoots(), deep });
-    if (deep) { setDeepRunning(true); $("deepbar").hidden = false; $("deepbar").replaceChildren(); }
-    toast(deep ? "Deep search running…" : "Searching…");
-  } catch (e) { toast(String(e)); }
-  refreshView();
-}
-const searchSoon = debounce(() => runSearch(false), 250);
-$("q").addEventListener("input", searchSoon);
-$("q").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") { e.preventDefault(); runSearch(e.ctrlKey); }
-  if (e.key === "Escape") { $("q").value = ""; runSearch(false); }
-  if (e.key === "ArrowDown") { e.preventDefault(); $("rows").focus(); move(1); }
-});
-$("clearQ").onclick = () => { $("q").value = ""; runSearch(false); $("q").focus(); };
-$("mode").onchange = () => refreshView();
-for (const id of ["f-exact", "f-sep", "f-unc", "f-content", "f-names"]) $(id).onchange = () => refreshView();
-$("deep").onclick = () => {
-  if (state.deepRunning) { call({ req: "cancel", search_id: state.searchId }).catch(() => {}); setDeepRunning(false); toast("Deep search stopped"); return; }
-  if (!$("q").value.trim()) { $("q").focus(); toast("Type what to look for first"); return; }
-  runSearch(true);
-};
-function setDeepRunning(on) {
-  state.deepRunning = on;
-  $("deep").textContent = on ? "Stop" : "Deep search";
-  $("deep").classList.toggle("running", on);
-}
-
-function addHits(list) {
-  for (const h of list) {
-    const k = h.path.toLowerCase();
-    const old = state.hits.get(k);
-    if (!old || CLASS_ORDER[h.class] < CLASS_ORDER[old.class] || (old.source === "file_name" && h.source !== "file_name")) state.hits.set(k, h);
-  }
-  refreshView();
-}
-
-listen("worker-event", (e) => {
-  const v = e.payload;
-  if (v.id !== state.searchId) return;
-  switch (v.ev) {
-    case "hits": addHits(v.hits); break;
-    case "resolved":
-      state.queued = Math.max(0, state.queued - 1);
-      if (v.hits.length) addHits(v.hits);
-      updateSearchStatus();
-      break;
-    case "progress": renderProgress(v.roots); break;
-    case "done":
-      state.lastDone = v; setDeepRunning(false); updateSearchStatus(); break;
-    case "error": toast(v.message); setDeepRunning(false); break;
-  }
-});
 listen("worker-down", () => { $("sbReader").textContent = "Reader restarting…"; });
 listen("worker-up", () => { loadStatus(); });
-
-function renderProgress(roots) {
-  const bar = $("deepbar");
-  bar.hidden = false;
-  bar.replaceChildren();
-  let queuedTotal = 0;
-  for (const p of roots) {
-    const cls = { done: "done", offline: "off", stopped: "stop" }[p.state] || "";
-    const box = el("div", "dp " + cls);
-    const lbl = el("span", "lbl", p.label); lbl.title = p.root;
-    const txt = p.state === "offline" ? "Offline, skipped" : p.state === "done" ? `Done · ${p.hits} found` : p.state === "stopped" ? "Stopped" : `${p.folders_done.toLocaleString()} folders · ${p.hits} found`;
-    box.append(lbl, el("span", "dim", txt));
-    const trk = el("div", "trk"); trk.append(el("div", "fill")); box.append(trk);
-    if (p.skipped.length && p.state !== "offline") {
-      const s = el("span", "skips", `${p.skipped.length} folder${p.skipped.length > 1 ? "s" : ""} not searched`);
-      s.title = p.skipped.slice(0, 30).map(([d, r]) => `${d}: ${r}`).join("\n");
-      box.append(s);
-    }
-    bar.append(box);
-    const key = p.root.toLowerCase();
-    state.driveState.set(key.endsWith("\\") ? key : key + "\\", { cls: cls === "done" ? "done" : cls === "off" ? "off" : cls === "stop" ? "" : "run", text: p.state === "offline" ? "offline" : p.state === "done" ? "done" : p.state === "stopped" ? "stopped" : "searching" });
-    queuedTotal += 0;
-  }
-  renderDrives();
-  updateSearchStatus();
-}
-
-function updateSearchStatus() {
-  const n = state.view.length;
-  $("sbCount").textContent = state.query ? `${n.toLocaleString()} result${n === 1 ? "" : "s"}` : "Ready";
-  if (state.deepRunning) toast("Deep search running…");
-  else if (state.lastDone) toast(`Finished in ${(state.lastDone.millis / 1000).toFixed(1)} s` + (state.queued ? ` · ${state.queued} PDFs still being read` : ""));
-}
-
-// ---------- results view ----------
-function keep(h) {
-  const mode = $("mode").value;
-  if (mode === "exact" && h.class !== "exact") return false;
-  if (h.class === "exact" && !$("f-exact").checked) return false;
-  if (h.class === "separators_ignored" && !$("f-sep").checked) return false;
-  if (h.class === "uncertain" && !$("f-unc").checked) return false;
-  if (h.source === "file_name" && !$("f-names").checked) return false;
-  if (h.source !== "file_name" && !$("f-content").checked) return false;
-  return true;
-}
-function sortValue(h, k) {
-  switch (k) {
-    case "name": return h.name.toLowerCase();
-    case "folder": return folderOf(h.display_path).toLowerCase();
-    case "found": return (h.found || "").toLowerCase();
-    case "page": return h.page || 0;
-    case "class": return CLASS_ORDER[h.class] * 10 + (h.source === "file_name" ? 1 : 0);
-    case "modified": return h.modified;
-  }
-  return 0;
-}
-function refreshView() {
-  const selPath = state.view[state.sel]?.path;
-  const k = state.sortKey, dir = state.asc ? 1 : -1;
-  state.view = [...state.hits.values()].filter(keep).sort((a, b) => {
-    const va = sortValue(a, k), vb = sortValue(b, k);
-    if (va < vb) return -dir; if (va > vb) return dir;
-    return b.modified - a.modified;
-  });
-  state.sel = selPath ? state.view.findIndex((h) => h.path === selPath) : -1;
-  $("spacer").style.height = state.view.length * ROW_H + "px";
-  for (const b of document.querySelectorAll(".thead button")) {
-    b.classList.toggle("sorted", b.dataset.k === k);
-    b.classList.toggle("desc", b.dataset.k === k && !state.asc);
-  }
-  renderRows();
-  renderEmpty();
-  updateSearchStatus();
-}
-function renderRows() {
-  const box = $("rows"), spacer = $("spacer");
-  const top = box.scrollTop, h = box.clientHeight;
-  const first = Math.max(0, Math.floor(top / ROW_H) - 5);
-  const last = Math.min(state.view.length, Math.ceil((top + h) / ROW_H) + 5);
-  spacer.replaceChildren();
-  for (let i = first; i < last; i++) spacer.append(rowEl(state.view[i], i));
-}
-function rowEl(hit, i) {
-  const r = el("div", "rrow" + (i === state.sel ? " on" : ""));
-  r.style.top = i * ROW_H + "px";
-  r.setAttribute("role", "row");
-  const nm = el("div", "nm");
-  const ext = extOf(hit.name);
-  nm.append(el("span", "ext" + (ext === "PDF" ? " pdf" : ""), ext || "FILE"), el("span", null, hit.name));
-  nm.title = hit.name;
-  const folder = el("div", "dim", folderOf(hit.display_path)); folder.title = hit.display_path;
-  const found = el("div", "mono", hit.source === "file_name" ? "" : hit.found); found.title = hit.found;
-  const pg = el("div", "num", hit.page ? String(hit.page) : "");
-  const m = el("div");
-  m.append(el("span", "pill " + (hit.source === "file_name" ? "name" : CLASS_PILL[hit.class]), hit.source === "file_name" ? "Name · " + CLASS_LABEL[hit.class] : CLASS_LABEL[hit.class]));
-  m.title = SOURCE_LABEL[hit.source] + (hit.source === "ocr" ? ` · confidence ${Math.round(hit.confidence * 100)}%` : "") + (hit.hits > 1 ? ` · ${hit.hits} matching lines` : "");
-  const mod = el("div", "dim", fmtDate(hit.modified));
-  r.append(nm, folder, found, pg, m, mod);
-  r.onclick = () => select(i);
-  r.ondblclick = () => openHit(hit);
-  r.oncontextmenu = (ev) => { ev.preventDefault(); select(i); showMenu(ev.clientX, ev.clientY); };
-  return r;
-}
-function renderEmpty() {
-  const box = $("empty");
-  box.replaceChildren();
-  if (state.view.length) { box.hidden = true; return; }
-  box.hidden = false;
-  if (!state.query) {
-    box.append(el("h2", null, "Find any tag, in any drawing, on any drive"));
-    box.append(el("p", null, "Type a tag number, document number or any text printed on a drawing."));
-    const p = el("p", "tags", '10"-P-1001-A1B   ·   PSV-1203   ·   DOC-1001-15-1659');
-    box.append(p);
-    if (!(state.settings?.content_scopes || []).length) box.append(el("p", null, "To search inside PDFs, add your project folders under “Folders being read” on the left."));
-    return;
-  }
-  if (state.deepRunning) { box.append(el("p", null, "Searching the drives…")); return; }
-  box.append(el("h2", null, "Nothing found yet"));
-  box.append(el("p", null, state.lastDone && state.lastDone.total === 0 && state.hits.size === 0
-    ? "Not in the files read so far. Deep search walks the drives and reads any PDFs it finds that have not been read."
-    : "Some results are hidden by the filters on the left."));
-}
-$("rows").addEventListener("scroll", () => renderRows());
-window.addEventListener("resize", () => renderRows());
-for (const b of document.querySelectorAll(".thead button")) {
-  b.onclick = () => { state.asc = state.sortKey === b.dataset.k ? !state.asc : true; state.sortKey = b.dataset.k; refreshView(); };
-}
-function select(i) {
-  if (i < 0 || i >= state.view.length) return;
-  state.sel = i;
-  const box = $("rows");
-  const y = i * ROW_H;
-  if (y < box.scrollTop) box.scrollTop = y;
-  else if (y + ROW_H > box.scrollTop + box.clientHeight) box.scrollTop = y + ROW_H - box.clientHeight;
-  renderRows();
-  showPreview(state.view[i]);
-}
-function move(d) { select(Math.min(state.view.length - 1, Math.max(0, state.sel + d))); }
-$("rows").addEventListener("keydown", (e) => {
-  if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); if (state.sel <= 0) $("q").focus(); else move(-1); }
-  else if (e.key === "PageDown") { e.preventDefault(); move(10); }
-  else if (e.key === "PageUp") { e.preventDefault(); move(-10); }
-  else if (e.key === "Enter" && state.view[state.sel]) openHit(state.view[state.sel]);
-});
-
-// ---------- actions ----------
-async function openHit(h) { try { await invoke("open_path", { path: h.display_path }); } catch (e) { toast(String(e)); } }
-async function revealHit(h) { try { await invoke("reveal_path", { path: h.display_path }); } catch (e) { toast(String(e)); } }
-function showMenu(x, y) {
-  const m = $("ctx");
-  const h = state.view[state.sel];
-  m.querySelector('[data-act="read"]').hidden = !(h && isPdf(h.name));
-  m.hidden = false;
-  m.style.left = Math.min(x, innerWidth - 200) + "px";
-  m.style.top = Math.min(y, innerHeight - 220) + "px";
-}
-document.addEventListener("click", () => { $("ctx").hidden = true; });
-$("ctx").addEventListener("click", async (e) => {
-  const act = e.target.dataset.act, h = state.view[state.sel];
-  if (!act || !h) return;
-  if (act === "open") openHit(h);
-  if (act === "reveal") revealHit(h);
-  if (act === "copy") copyText(h.display_path);
-  if (act === "copyunc") copyText(h.path);
-  if (act === "copytext") copyText(h.found);
-  if (act === "read") {
-    try { await call({ req: "read_now", path: h.path }); toast("Queued for reading first"); } catch (err) { toast(String(err)); }
-  }
-});
-document.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.key.toLowerCase() === "f") { e.preventDefault(); $("q").focus(); $("q").select(); }
-});
-
-// ---------- preview ----------
-function clearPreview() { state.pv = null; $("pvBody").hidden = true; $("pvEmpty").hidden = false; }
-async function showPreview(hit, page) {
-  $("pvEmpty").hidden = true; $("pvBody").hidden = false;
-  const meta = $("pvMeta"); meta.replaceChildren();
-  const add = (k, v) => { meta.append(el("dt", null, k), el("dd", null, v)); };
-  add("File", hit.name);
-  add("Folder", folderOf(hit.display_path));
-  if (hit.path !== hit.display_path) add("Network path", folderOf(hit.path));
-  add("Found", hit.source === "file_name" ? "In the file name" : `${hit.found}`);
-  add("Read from", SOURCE_LABEL[hit.source] + (hit.source === "ocr" ? ` · confidence ${Math.round(hit.confidence * 100)}%` : ""));
-  add("Size · modified", `${fmtSize(hit.size)} · ${fmtDate(hit.modified)}`);
-  $("pvOpen").onclick = () => openHit(hit);
-  $("pvReveal").onclick = () => revealHit(hit);
-  $("pvCopy").onclick = () => copyText(hit.display_path);
-  const stage = $("pvStage"), canvas = $("pvCanvas");
-  canvas.querySelectorAll(".mark").forEach((m) => m.remove());
-  if (!isPdf(hit.name)) {
-    $("pvImg").removeAttribute("src");
-    $("pvHitInfo").textContent = ""; $("pvPageInfo").textContent = "Preview is shown for PDFs";
-    return;
-  }
-  const pg = page || hit.page || 1;
-  let loading = stage.querySelector(".pv-loading");
-  if (!loading) { loading = el("div", "pv-loading", "Loading page…"); stage.append(loading); }
-  state.pv = { hit, page: pg, pages: 0, boxes: [], cur: 0, zoom: false };
-  try {
-    const r = await call({ req: "preview", path: hit.path, page: pg, query: state.query, max_px: 3000 });
-    if (state.pv?.hit !== hit) return;
-    state.pv.pages = r.pages; state.pv.boxes = r.boxes;
-    $("pvImg").src = "data:image/png;base64," + r.png_base64;
-    for (const [i, b] of r.boxes.entries()) {
-      const m = el("div", "mark" + (i === 0 ? " cur" : ""));
-      // Pad the box a little so a thin line of text is clearly circled.
-      Object.assign(m.style, { left: `calc(${b.x * 100}% - 4px)`, top: `calc(${b.y * 100}% - 4px)`, width: `calc(${b.w * 100}% + 8px)`, height: `calc(${b.h * 100}% + 8px)` });
-      canvas.append(m);
-    }
-    $("pvPageInfo").textContent = `Page ${pg} of ${r.pages}`;
-    $("pvHitInfo").textContent = r.boxes.length ? `Mark 1 of ${r.boxes.length}` : (r.source === "pending" ? "Not read yet" : "No mark on this page");
-    applyZoom(r.boxes.length > 0);
-  } catch (e) {
-    $("pvImg").removeAttribute("src");
-    $("pvPageInfo").textContent = String(e);
-  } finally { loading.remove(); }
-}
-function applyZoom(zoom) {
-  const pv = state.pv; if (!pv) return;
-  pv.zoom = zoom;
-  const canvas = $("pvCanvas"), stage = $("pvStage");
-  const b = pv.boxes[pv.cur];
-  if (zoom && b) {
-    // Show the mark about a third of the stage wide, centred.
-    const scale = Math.min(8, Math.max(1.5, 0.33 / Math.max(b.w, 0.01)));
-    canvas.style.width = scale * 100 + "%";
-    requestAnimationFrame(() => {
-      const W = canvas.clientWidth, H = canvas.clientHeight;
-      stage.scrollLeft = (b.x + b.w / 2) * W - stage.clientWidth / 2;
-      stage.scrollTop = (b.y + b.h / 2) * H - stage.clientHeight / 2;
-    });
-  } else {
-    canvas.style.width = "100%";
-    stage.scrollLeft = 0; stage.scrollTop = 0;
-  }
-  canvas.querySelectorAll(".mark").forEach((m, i) => m.classList.toggle("cur", i === pv.cur));
-  $("pvZoom").textContent = zoom ? "Fit page" : "Zoom to mark";
-}
-$("pvZoom").onclick = () => applyZoom(!state.pv?.zoom);
-function stepHit(d) {
-  const pv = state.pv; if (!pv || !pv.boxes.length) return;
-  pv.cur = (pv.cur + d + pv.boxes.length) % pv.boxes.length;
-  $("pvHitInfo").textContent = `Mark ${pv.cur + 1} of ${pv.boxes.length}`;
-  applyZoom(true);
-}
-$("pvPrevHit").onclick = () => stepHit(-1);
-$("pvNextHit").onclick = () => stepHit(1);
-$("pvPrevPage").onclick = () => { const pv = state.pv; if (pv && pv.page > 1) showPreview(pv.hit, pv.page - 1); };
-$("pvNextPage").onclick = () => { const pv = state.pv; if (pv && pv.page < pv.pages) showPreview(pv.hit, pv.page + 1); };
 
 // ---------- status ----------
 async function loadStatus() {
   try {
     const r = await call({ req: "status" });
     const s = r.status;
-    let t = s.reader_state === "reading" && s.current_file ? `Reading ${s.current_file.split("\\").pop()}` : cap(s.reader_state);
+    let t = s.reader_state === "reading" && s.current_file ? `Reading ${baseName(s.current_file)}` : cap(s.reader_state);
     t += ` · ${s.pdfs_read.toLocaleString()} PDFs read · ${s.pdfs_waiting.toLocaleString()} waiting`;
     if (s.pages_per_hour) t += ` · ${s.pages_per_hour} pages/h`;
     $("sbReader").textContent = t;
     state.lastStatus = r;
+    setServer(s.server);
     enforceCache(s.cache);
   } catch { /* worker restarting */ }
 }
+const SERVER_BADGE = {
+  connected: ["ok", "Office server connected"],
+  syncing: ["run", "Office server: first reading pass"],
+  offline: ["off", "Office server offline"],
+  degraded: ["warn", "Office server refusing this PC"],
+};
+function setServer(srv) {
+  const before = officeConnected();
+  const beforeProjects = JSON.stringify(state.server?.projects || []);
+  state.server = srv || { state: "not_configured" };
+  const b = $("sbServer");
+  const badge = SERVER_BADGE[state.server.state];
+  b.hidden = !badge;
+  if (badge) {
+    b.className = "srvbadge " + badge[0];
+    b.textContent = badge[1];
+    b.title = (state.server.message || badge[1]) + (state.server.last_ok ? `\nLast contact ${fmtDateTime(state.server.last_ok)}` : "");
+  }
+  if (before !== officeConnected() || beforeProjects !== JSON.stringify(state.server.projects || [])) {
+    renderProjects();
+    syncSeg("tagSource", reloadTags);
+    syncSeg("revSource", loadRevisions);
+  }
+}
+$("sbServer").onclick = () => openSettings(false, "serverSection");
 
 // ---------- shared reading cache: required on every PC ----------
 // Not set up -> a message that cannot be dismissed. Ignored for a minute ->
@@ -509,7 +110,6 @@ async function testCache() {
 }
 $("s-cacheTest").onclick = () => testCache().catch((e) => { $("s-cacheState").textContent = String(e); });
 $("settingsDlg").addEventListener("close", () => { if (cacheNeedsUser(state.lastStatus?.status?.cache)) cacheNagSince = Date.now(); });
-function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : ""; }
 $("sbReader").onclick = async () => {
   await loadStatus();
   const r = state.lastStatus; if (!r) return;
@@ -531,38 +131,200 @@ async function loadSettings() {
   state.settings = r.settings;
   state.updateChannel = r.settings.update_channel || "stable";
   renderScopes();
+  renderProjects();
 }
 async function saveSettings(s) {
   await call({ req: "set_settings", settings: s });
   state.settings = s;
   state.updateChannel = s.update_channel;
   renderScopes();
+  renderProjects();
   try { await invoke("set_autostart", { enabled: !!s.keep_indexing_when_closed }); } catch { /* registry blocked */ }
 }
 $("settingsBtn").onclick = () => openSettings(false);
-async function openSettings(focusCache) {
+
+let draftProjects = [];
+async function openSettings(focusCache, focusSection) {
   await loadSettings();
   const s = state.settings;
   $("s-quality").value = s.ocr_quality === "high" ? "high" : "auto"; $("s-dpi").value = String(s.ocr_dpi);
+  $("s-backend").value = s.ocr_backend || "auto";
+  // DirectML is an IT override; offer it only when it is already chosen.
+  $("s-backend").querySelector('[value="directml"]').hidden = s.ocr_backend !== "directml";
+  $("s-titleblock").checked = s.ocr_missing_title_block !== false;
   $("s-busy").value = s.busy_cpu_percent; $("s-keep").checked = s.keep_indexing_when_closed;
   $("s-cache").value = s.shared_cache_dir || ""; $("s-per").value = s.listings_per_server;
   $("s-timeout").value = s.listing_timeout_secs; $("s-rescan").value = s.name_rescan_minutes;
   $("s-excluded").value = (s.excluded || []).join("\n"); $("s-channel").value = s.update_channel;
+  $("s-revorder").value = s.revision_order || "letters_then_numbers";
+  $("s-srvUrl").value = s.server?.url || ""; $("s-srvKey").value = ""; $("s-srvCa").value = s.server?.ca_file || "";
+  $("s-srvKey").placeholder = s.server?.token_protected ? "Saved. Leave blank to keep it" : "Access key from IT";
+  showServerState(state.server, false);
+  $("s-tagRules").value = s.tag_rules ? JSON.stringify(s.tag_rules, null, 2) : "";
+  $("s-fieldRules").value = s.field_rules ? JSON.stringify(s.field_rules, null, 2) : "";
+  draftProjects = (s.projects || []).map((p) => ({ name: p.name, roots: [...(p.roots || [])] }));
+  renderProjectEditor();
   $("s-version").textContent = "Version " + (await invoke("app_version"));
   $("s-error").hidden = true; $("s-updateMsg").textContent = "";
-  const c = state.lastStatus?.status?.cache;
+  const st = state.lastStatus?.status;
+  $("s-backendNote").textContent = st?.ocr_backend ? `Currently running on: ${st.ocr_backend}.` : "";
+  call({ req: "monitor" }).then((r) => { if (r.monitor?.backend_note) $("s-backendNote").textContent = `Currently running on: ${st?.ocr_backend || r.monitor.status?.ocr_backend || "?"}. ${r.monitor.backend_note}`; }).catch(() => {});
+  const c = st?.cache;
   if (c) showCacheCheck(c); else $("s-cacheState").textContent = "";
   $("settingsDlg").showModal();
+  checkRollback();
   if (focusCache || cacheNeedsUser(c)) highlightCache();
+  else if (focusSection) $(focusSection).scrollIntoView({ block: "start" });
 }
 $("s-cachePick").onclick = async () => { const p = await invoke("pick_folder"); if (p) { $("s-cache").value = p; testCache().catch(() => {}); } };
+
+// Projects editor (kept as a draft until Save).
+function renderProjectEditor() {
+  const box = $("s-projects");
+  box.replaceChildren();
+  if (!draftProjects.length) box.append(el("div", "hint", "No projects yet."));
+  draftProjects.forEach((p, i) => {
+    const card = el("div", "proj");
+    const top = el("div", "row-inline");
+    const name = el("input"); name.type = "text"; name.value = p.name; name.placeholder = "Project name, e.g. P12513"; name.setAttribute("aria-label", "Project name");
+    name.oninput = () => { p.name = name.value; };
+    const add = el("button", "small", "Add folder"); add.type = "button";
+    add.onclick = async () => {
+      const f = await invoke("pick_folder");
+      if (f && !p.roots.some((r) => r.toLowerCase() === f.toLowerCase())) { p.roots.push(f); renderProjectEditor(); }
+    };
+    const del = el("button", "small", "Remove project"); del.type = "button";
+    del.onclick = () => { draftProjects.splice(i, 1); renderProjectEditor(); };
+    top.append(name, add, del);
+    card.append(top);
+    if (!p.roots.length) card.append(el("div", "hint", "No folders yet."));
+    for (const r of p.roots) {
+      const row = el("div", "scope");
+      const t = el("span", null, r); t.title = r;
+      const x = el("button", "icon", "×"); x.type = "button"; x.title = "Remove this folder"; x.setAttribute("aria-label", "Remove " + r);
+      x.onclick = () => { p.roots = p.roots.filter((v) => v !== r); renderProjectEditor(); };
+      row.append(t, x); card.append(row);
+    }
+    box.append(card);
+  });
+}
+$("s-addProject").onclick = () => { draftProjects.push({ name: "", roots: [] }); renderProjectEditor(); $("s-projects").querySelector(".proj:last-child input")?.focus(); };
+
+// Office server: these buttons act at once (the key is encrypted by the reader).
+function showServerState(srv, tested) {
+  const p = $("s-srvState");
+  if (!srv) { p.textContent = ""; return; }
+  const ok = srv.state === "connected" || srv.state === "syncing";
+  p.className = "hint " + (ok ? "ok-text" : srv.state === "not_configured" ? "" : "error");
+  const label = { not_configured: "Not set up: Sleuth works on its own.", connected: "Connected.", syncing: "Connected. The server is still reading its first pass.", offline: "The server does not answer.", degraded: "The server answers but refuses this PC." }[srv.state] || srv.state;
+  p.textContent = (tested ? "Test: " : "Now: ") + label + (srv.version && srv.state !== "not_configured" ? ` Server version ${srv.version}.` : "") + (srv.message ? ` ${srv.message}` : "");
+}
+function serverFields() { return { url: $("s-srvUrl").value.trim(), token: $("s-srvKey").value, ca_file: $("s-srvCa").value.trim() }; }
+$("s-srvCaPick").onclick = async () => {
+  const p = await invoke("pick_file", { title: "Office server certificate", name: "Certificate", extensions: ["pem", "crt", "cer"] });
+  if (p) $("s-srvCa").value = p;
+};
+$("s-srvTest").onclick = async () => {
+  const f = serverFields();
+  if (!f.url) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = "Type the server address first."; return; }
+  $("s-srvState").className = "hint"; $("s-srvState").textContent = "Testing…";
+  try { const r = await call({ req: "check_server", ...f }); showServerState(r.server, true); }
+  catch (e) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = String(e); }
+};
+async function refreshServerSettings() {
+  // The reader saved the server part itself; keep it so Save does not overwrite it.
+  try { const r = await call({ req: "get_settings" }); state.settings.server = r.settings.server; } catch { /* keep */ }
+  $("s-srvKey").value = "";
+  $("s-srvKey").placeholder = state.settings.server?.token_protected ? "Saved. Leave blank to keep it" : "Access key from IT";
+  await loadStatus();
+  showServerState(state.server, false);
+}
+$("s-srvSave").onclick = async () => {
+  const f = serverFields();
+  if (!f.url) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = "Type the server address first, or use Disconnect."; return; }
+  $("s-srvState").className = "hint"; $("s-srvState").textContent = "Connecting…";
+  try { await call({ req: "set_server", ...f }); await refreshServerSettings(); toast("Office server saved"); }
+  catch (e) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = String(e); }
+};
+$("s-srvOff").onclick = async () => {
+  if (!(await confirmBox("Disconnect from the office server?", ["Searches will cover this PC's index only. The saved access key is removed."], "Disconnect"))) return;
+  try {
+    await call({ req: "set_server", url: "", token: "", ca_file: "" });
+    $("s-srvUrl").value = ""; $("s-srvCa").value = "";
+    await refreshServerSettings();
+    toast("Disconnected from the office server");
+  } catch (e) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = String(e); }
+};
+
+// Advanced rules. Copy of the built-in rules in crates/sleuth-core/src/settings.rs,
+// used only to give an editable starting point.
+const BUILTIN_TAG_RULES = [
+  { category: "line", pattern: String.raw`\b\d{1,2}(?:"|''|IN)?-[A-Z]{1,4}-\d{3,6}(?:-[A-Z0-9]{1,6})+\b`, enabled: true },
+  { category: "drawing", pattern: String.raw`\b(?:ISO|PID|P&ID|GA|DWG|DOC|STR|LAY)-[A-Z0-9]+(?:-[A-Z0-9]+)*\b`, enabled: true },
+  { category: "instrument", pattern: String.raw`\b(?:[FPTLAHSXZ][A-Z]{1,3})[- ]?\d{3,5}[A-Z]?\b`, enabled: true },
+  { category: "valve", pattern: String.raw`\b(?:V|MOV|XV|SDV|BDV)-\d{3,5}[A-Z]?\b`, enabled: true },
+  { category: "equipment", pattern: String.raw`\b\d{0,3}[A-Z]{1,2}-\d{3,4}[A-Z]?\b`, enabled: true },
+  { category: "support", pattern: String.raw`\b(?:PS|SP|SUP)-?[A-Z]{0,2}-?\d{2,6}\b`, enabled: true },
+  { category: "weld", pattern: String.raw`\b(?:FW|SW|BW|W)-\d{1,4}\b`, enabled: true },
+  { category: "spec", pattern: String.raw`\b(?:SPEC|PIPING CLASS|CLASS)[ .:]+([A-Z0-9]{2,8})\b`, enabled: true },
+];
+const BUILTIN_FIELD_RULES = [
+  { field: "drawing_number", labels: ["DRAWING NUMBER", "DRAWING NO", "DRG NO", "DWG NO", "DOCUMENT NO", "DOC NO"], value: String.raw`[A-Z0-9][A-Z0-9\-_/.]{3,40}` },
+  { field: "revision", labels: ["REVISION", "REV"], value: String.raw`[A-Z0-9]{1,3}\b` },
+  { field: "title", labels: ["DRAWING TITLE", "DRG TITLE", "DWG TITLE", "TITLE"], value: ".{3,100}" },
+  { field: "project", labels: ["PROJECT NUMBER", "PROJECT NO", "JOB NO", "PROJECT"], value: ".{2,60}" },
+  { field: "sheet", labels: ["SHEET"], value: String.raw`\d+(?:\s*OF\s*\d+)?` },
+  { field: "discipline", labels: ["DISCIPLINE"], value: "[A-Z][A-Z &/-]{2,30}" },
+  { field: "status", labels: ["STATUS"], value: "[A-Z][A-Z0-9 -]{2,30}" },
+];
+$("s-tagRulesCopy").onclick = () => { if (!$("s-tagRules").value.trim()) $("s-tagRules").value = JSON.stringify(BUILTIN_TAG_RULES, null, 2); };
+$("s-fieldRulesCopy").onclick = () => { if (!$("s-fieldRules").value.trim()) $("s-fieldRules").value = JSON.stringify(BUILTIN_FIELD_RULES, null, 2); };
+$("s-tagRulesReset").onclick = () => { $("s-tagRules").value = ""; };
+$("s-fieldRulesReset").onclick = () => { $("s-fieldRules").value = ""; };
+function parseRules(id, what, check) {
+  const t = $(id).value.trim();
+  if (!t) return null;
+  let v;
+  try { v = JSON.parse(t); } catch (e) { throw new Error(`${what}: not valid JSON (${e.message}). Fix it, or empty the box to use the built-in rules.`); }
+  if (!Array.isArray(v)) throw new Error(`${what}: must be a list in [ ].`);
+  v.forEach((r, i) => { const m = check(r); if (m) throw new Error(`${what}, rule ${i + 1}: ${m}`); });
+  return v;
+}
+const isStr = (x) => typeof x === "string" && x.length > 0;
+function checkTagRule(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return "must be an object { }";
+  if (!isStr(r.category)) return "needs a \"category\"";
+  if (!isStr(r.pattern)) return "needs a \"pattern\"";
+  if (r.enabled !== undefined && typeof r.enabled !== "boolean") return "\"enabled\" must be true or false";
+  return null;
+}
+function checkFieldRule(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return "must be an object { }";
+  if (!isStr(r.field)) return "needs a \"field\"";
+  if (!Array.isArray(r.labels) || !r.labels.length || !r.labels.every(isStr)) return "needs \"labels\": a list of words printed before the value";
+  if (!isStr(r.value)) return "needs a \"value\" pattern";
+  return null;
+}
+
 $("s-save").onclick = async () => {
   const num = (id, lo, hi) => { const v = Number($(id).value); if (!Number.isFinite(v) || v < lo || v > hi) throw new Error(`Enter a number from ${lo} to ${hi}`); return Math.round(v); };
+  $("s-error").hidden = true;
   try {
+    const tagRules = parseRules("s-tagRules", "Tag rules", checkTagRule);
+    const fieldRules = parseRules("s-fieldRules", "Title-block rules", checkFieldRule);
+    const projects = draftProjects.map((p) => ({ name: p.name.trim(), roots: p.roots })).filter((p) => p.name || p.roots.length);
+    const names = new Set();
+    for (const p of projects) {
+      if (!p.name) throw new Error("Every project needs a name.");
+      if (names.has(p.name.toLowerCase())) throw new Error(`Two projects are called "${p.name}".`);
+      names.add(p.name.toLowerCase());
+    }
     const s = {
       ...state.settings,
       ocr_quality: $("s-quality").value,
       ocr_dpi: Number($("s-dpi").value),
+      ocr_backend: $("s-backend").value,
+      ocr_missing_title_block: $("s-titleblock").checked,
       busy_cpu_percent: num("s-busy", 10, 100),
       keep_indexing_when_closed: $("s-keep").checked,
       shared_cache_dir: $("s-cache").value.trim() || null,
@@ -571,6 +333,10 @@ $("s-save").onclick = async () => {
       name_rescan_minutes: num("s-rescan", 15, 10080),
       excluded: $("s-excluded").value.split(/\r?\n/).map((x) => x.trim()).filter(Boolean),
       update_channel: $("s-channel").value,
+      revision_order: $("s-revorder").value,
+      projects,
+      tag_rules: tagRules,
+      field_rules: fieldRules,
     };
     const c = await testCache();
     if (c.state === "not_set" || c.state === "no_access") {
@@ -580,7 +346,7 @@ $("s-save").onclick = async () => {
     await saveSettings(s);
     $("settingsDlg").close();
     loadStatus();
-    toast("Settings saved");
+    toast("Settings saved" + (tagRules || fieldRules ? ". Rule problems, if any, are listed under Monitor → Rule errors." : ""));
   } catch (e) { $("s-error").textContent = e.message || String(e); $("s-error").hidden = false; }
 };
 $("s-rescanNow").onclick = async () => { await call({ req: "rescan_now" }); toast("Refreshing the file-name index in the background"); };
@@ -591,32 +357,71 @@ $("s-checkUpdate").onclick = async () => {
     $("s-updateMsg").textContent = u ? `Version ${u.version} is available` : "You have the latest version";
     if (u) offerUpdate(u, $("s-channel").value);
   } catch (e) { $("s-updateMsg").textContent = String(e); }
+  checkRollback();
 };
+$("s-channel").onchange = () => checkRollback();
 
 // ---------- updates ----------
 function showBanner(text, actionLabel, action) {
   $("bannerText").textContent = text;
   $("bannerAction").hidden = !actionLabel;
+  $("bannerAction").disabled = false;
   if (actionLabel) { $("bannerAction").textContent = actionLabel; $("bannerAction").onclick = action; }
   $("banner").hidden = false;
 }
 $("bannerClose").onclick = () => { $("banner").hidden = true; };
-function offerUpdate(u, channel) {
-  showBanner(`Sleuth ${u.version} is available. Your settings and index are kept.`, "Restart and update", async () => {
-    $("bannerAction").disabled = true;
-    const un = await listen("update-progress", (e) => {
-      const { done, total } = e.payload;
-      $("bannerText").textContent = total ? `Downloading update… ${Math.round((done / total) * 100)}%` : "Downloading update…";
-    });
-    try { await invoke("install_update", { channel }); }
-    catch (e) { $("bannerText").textContent = String(e); $("bannerAction").disabled = false; }
-    finally { un(); }
+async function runInstall(command, channel) {
+  $("bannerAction").disabled = true;
+  const un = await listen("update-progress", (e) => {
+    const { done, total } = e.payload;
+    $("bannerText").textContent = total ? `Downloading… ${Math.round((done / total) * 100)}%` : "Downloading…";
   });
+  try { await invoke(command, { channel }); }
+  catch (e) { $("bannerText").textContent = String(e); $("bannerAction").disabled = false; }
+  finally { un(); }
+}
+function offerUpdate(u, channel) {
+  showBanner(`Sleuth ${u.version} is available. Your settings and index are kept.`, "Restart and update", () => runInstall("install_update", channel));
 }
 async function autoCheckUpdate() {
   try { const u = await invoke("check_update", { channel: state.updateChannel }); if (u) offerUpdate(u, state.updateChannel); }
   catch { /* offline: try again later */ }
 }
+
+// ---------- roll back to the previous release ----------
+async function checkRollback() {
+  const row = $("s-rollbackRow");
+  const channel = $("s-channel").value;
+  try {
+    const t = await invoke("check_rollback", { channel });
+    if (!t || channel !== $("s-channel").value) { row.hidden = true; return; }
+    row.hidden = false;
+    $("s-rollback").textContent = `Roll back to version ${t.version}`;
+    $("s-rollbackMsg").textContent = "";
+    $("s-rollback").onclick = async () => {
+      const ok = await confirmBox(`Roll back to Sleuth ${t.version}?`, [
+        "Sleuth closes, installs the earlier version and starts again. The installer is checked against its published checksum first, the same as an update.",
+        "Your settings and the index are kept. An index made by 1.0 is still readable by 0.1, because changes to it only add to it, but 0.1 will not show the 1.0 features (tags, revisions, corrections, office server).",
+      ], "Roll back and restart");
+      if (!ok) return;
+      $("settingsDlg").close();
+      showBanner(`Rolling back to Sleuth ${t.version}…`, "Retry", () => runInstall("install_rollback", channel));
+      runInstall("install_rollback", channel);
+    };
+  } catch { row.hidden = true; }
+}
+
+// ---------- keyboard ----------
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    if (state.view_ !== "search") showView("search");
+    $("q").focus(); $("q").select();
+  }
+  if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
+    $("ctx").hidden = true; $("exportMenu").hidden = true; $("syntaxPop").hidden = true;
+  }
+});
 
 // ---------- start ----------
 (async function start() {
