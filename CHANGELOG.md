@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
 
 - Fixed: empty banners showed at the top of the window on start-up.
 - A tag typed with a space (`FV 2201`) is now found.
