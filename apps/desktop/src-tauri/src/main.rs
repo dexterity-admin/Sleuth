@@ -310,6 +310,20 @@ async fn check_update(app: AppHandle, channel: String) -> Result<Option<update::
     tauri::async_runtime::spawn_blocking(move || update::check(&channel, &current)).await.map_err(|e| e.to_string())?
 }
 
+/// Check for a newer release and, when there is one, download and verify its
+/// installer in the background, so that installing it later starts at once.
+#[tauri::command]
+async fn prepare_update(app: AppHandle, channel: String) -> Result<Option<update::Manifest>, String> {
+    let current = app.package_info().version.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(m) = update::check(&channel, &current)? else { return Ok(None) };
+        update::download(&m, &|_, _| {})?;
+        Ok(Some(m))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Download and verify the update, stop the background reader, run the
 /// installer and close this window; the installer starts Sleuth again.
 #[tauri::command]
@@ -386,6 +400,7 @@ fn main() {
             set_autostart,
             app_version,
             check_update,
+            prepare_update,
             install_update,
             check_rollback,
             install_rollback

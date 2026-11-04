@@ -5179,7 +5179,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sleuth"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "rust_xlsxwriter",
@@ -5200,7 +5200,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "serde",
@@ -5210,7 +5210,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-engine"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5233,7 +5233,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-server"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -5260,7 +5260,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-worker"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "serde_json",

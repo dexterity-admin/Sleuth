@@ -420,9 +420,11 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <h2><span class="n">18</span>Updates</h2>
 <p class="intro">Sleuth keeps itself up to date. Your settings and index are always kept.</p>
 <ul>
-  <li>Sleuth checks for a new version when it starts and every 6 hours. When there is one, a blue bar appears at the top: <b>Restart and update</b>.</li>
-  <li>Sleuth downloads the new installer, checks it against the published checksum, stops the reader, installs, and starts again, usually in under a minute.</li>
-  <li>To check yourself: <b>Settings → Check for updates</b>.</li>
+  <li>Sleuth checks for a new version by itself: 10 seconds after it starts, then every hour. You never need to look for one.</li>
+  <li>When there is one, Sleuth downloads it in the background and checks it against the published checksum. Then it asks: <b>Restart and update</b> or <b>Later</b>.</li>
+  <li><b>Later</b> leaves an <b>Update ready</b> button in the status bar and a blue bar at the top; click either when it suits you. Sleuth asks again the next time it starts.</li>
+  <li>Updating stops the reader, installs and starts Sleuth again, usually in under a minute, and Sleuth then says it was updated.</li>
+  <li><b>Settings → Check for updates</b> checks straight away.</li>
   <li>The Windows "protected your PC" prompt does not appear for in-app updates.</li>
 </ul>
 <h3>Rolling back</h3>

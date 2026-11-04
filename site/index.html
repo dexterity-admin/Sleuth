@@ -316,7 +316,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="bar">
     <a class="cell brand" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
     <span class="cell hide-s">DWG SLH-001</span>
-    <span class="cell hide-s">REV 1.0.1</span>
+    <span class="cell hide-s">REV 1.0.2</span>
     <span class="grow"></span>
     <a class="cell hide-s" href="#try">Try it</a>
     <a class="cell hide-s" href="#revisions">Revisions</a>
@@ -337,7 +337,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
-    <div class="facts">v1.0.1 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
+    <div class="facts">v1.0.2 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
@@ -537,7 +537,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
             <tr><td>7</td><td>Local index</td><td>1</td><td>SQLite with trigram search. Folder limits applied before result limits.</td></tr>
             <tr><td>8</td><td>Shared reading cache</td><td>1</td><td>Keyed by content and reading pipeline, checksummed. Each drawing read once for the office.</td></tr>
             <tr><td>9</td><td>Office server</td><td>Optional</td><td>Same engine over shared folders. HTTPS, access keys, per-project permissions, audit log.</td></tr>
-            <tr><td>10</td><td>Updater</td><td>1</td><td>Checks the SHA-256 before installing. Rolls back to the previous release. Keeps settings and index.</td></tr>
+            <tr><td>10</td><td>Updater</td><td>1</td><td>Checks every hour and asks when an update is downloaded and ready. Checks the SHA-256 before installing. Rolls back to the previous release. Keeps settings and index.</td></tr>
           </tbody>
         </table>
       </div>
@@ -591,7 +591,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <div class="issue reveal">
       <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
-        <span class="t2">REV 1.0.1 · 56 MB · WIN 10/11</span>
+        <span class="t2">REV 1.0.2 · 56 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
       </a>
       <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.5 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
@@ -606,7 +606,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="big"><span class="k">Title</span><span class="v">Sleuth · drawing search</span></div>
       <div><span class="k">Client</span><span class="v">Dexterity Design Services</span></div>
       <div><span class="k">Dwg no.</span><span class="v mono">SLH-001</span></div>
-      <div><span class="k">Rev</span><span class="v mono">1.0.1</span></div>
+      <div><span class="k">Rev</span><span class="v mono">1.0.2</span></div>
       <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6</span></div>
       <div><span class="k">Source</span><span class="v"><a href="https://github.com/dexterity-admin/Sleuth">GitHub</a></span></div>
       <div><span class="k">Sheet</span><span class="v mono">1 of 1</span></div>
@@ -614,6 +614,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <table class="reg revs" aria-label="Revisions">
       <thead><tr><th>Rev</th><th>Date</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td>1.0.2</td><td>04 Nov 2026</td><td>Updates find you: checked every hour, downloaded in the background, then a dialog asks to restart and update or later. An "Update ready" button stays in the status bar until installed.</td></tr>
         <tr><td>1.0.1</td><td>04 Nov 2026</td><td>Reading folders chosen by drive letter are read. Every folder of every drive is listed, reading folders first; listings resume and survive network drops. Progress shown for both stages, with time left. File names found like Everything. Index repaired on install.</td></tr>
         <tr><td>1.0.0</td><td>03 Nov 2026</td><td>Pages classified, OCR only where needed. Every match explained; partial matches never exact. Tags, revision compare, related drawings, reading checks, monitor. Projects, OR and filters, export. Optional office server. Rollback.</td></tr>
         <tr><td>0.1.1</td><td>02 Nov 2026</td><td>Tags typed with a space are found. Empty start-up banners fixed. Background reading starts with Windows from the first launch.</td></tr>

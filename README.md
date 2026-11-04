@@ -83,6 +83,8 @@ No AI of any kind: no language models, chat, generated summaries or learning fro
 1. **Download** `Sleuth_x.y.z_x64-setup.exe` from the [latest release](https://github.com/dexterity-admin/Sleuth/releases/latest) and run it. It installs for your account only, with no admin rights needed.
 
    Windows may say it protected your PC, because the installer isn't code-signed. Click **More info**, then **Run anyway**. Later updates install from inside Sleuth without that prompt.
+
+   **Updates come to you.** Sleuth checks every hour, downloads a new version in the background, and asks: **Restart and update** or **Later**. Later leaves an **Update ready** button in the status bar.
 2. **Shared cache:** Sleuth connects to `U:\Sleuth-cache` by itself. If it can't, it shows you where to fix it.
 3. **Add your project folders** under *Folders being read*, and name them as projects in Settings if you like.
 4. **Search.** Type a tag. Use **Deep search** when you don't know where a file is.

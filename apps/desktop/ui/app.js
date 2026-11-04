@@ -252,7 +252,8 @@ async function openSettings(focusCache, focusSection) {
   draftProjects = (s.projects || []).map((p) => ({ name: p.name, roots: [...(p.roots || [])] }));
   renderProjectEditor();
   $("s-version").textContent = "Version " + (await invoke("app_version"));
-  $("s-error").hidden = true; $("s-updateMsg").textContent = "";
+  $("s-error").hidden = true;
+  $("s-updateMsg").textContent = upd.ready ? `Version ${upd.ready.version} is ready to install` : (upd.lastCheck ? `Up to date (checked ${new Date(upd.lastCheck).toLocaleTimeString()}). Sleuth checks every hour by itself.` : "Sleuth checks for updates by itself every hour.");
   const st = state.lastStatus?.status;
   $("s-backendNote").textContent = st?.ocr_backend ? `Currently running on: ${st.ocr_backend}.` : "";
   call({ req: "monitor" }).then((r) => { if (r.monitor?.backend_note) $("s-backendNote").textContent = `Currently running on: ${st?.ocr_backend || r.monitor.status?.ocr_backend || "?"}. ${r.monitor.backend_note}`; }).catch(() => {});
@@ -445,9 +446,9 @@ $("s-rescanNow").onclick = async () => {
 $("s-checkUpdate").onclick = async () => {
   $("s-updateMsg").textContent = "Checking…";
   try {
-    const u = await invoke("check_update", { channel: $("s-channel").value });
-    $("s-updateMsg").textContent = u ? `Version ${u.version} is available` : "You have the latest version";
-    if (u) offerUpdate(u, $("s-channel").value);
+    const u = await prepareUpdate($("s-channel").value, false);
+    if (u) { $("settingsDlg").close(); askUpdate(u, $("s-channel").value, true); }
+    else $("s-updateMsg").textContent = "You have the latest version";
   } catch (e) { $("s-updateMsg").textContent = String(e); }
   checkRollback();
 };
@@ -469,15 +470,78 @@ async function runInstall(command, channel) {
     $("bannerText").textContent = total ? `Downloading… ${Math.round((done / total) * 100)}%` : "Downloading…";
   });
   try { await invoke(command, { channel }); }
-  catch (e) { $("bannerText").textContent = String(e); $("bannerAction").disabled = false; }
+  catch (e) { $("bannerText").textContent = `Not installed: ${e}. Sleuth keeps running; try again.`; $("bannerAction").disabled = false; }
   finally { un(); }
 }
-function offerUpdate(u, channel) {
-  showBanner(`Sleuth ${u.version} is available. Your settings and index are kept.`, "Restart and update", () => runInstall("install_update", channel));
+// Updates are found by themselves: 10 s after start, then every hour and
+// whenever the window comes back after an hour away. A newer release is
+// downloaded and checked in the background first, then the user is asked once
+// per version and start (a banner and a status-bar button stay until it is
+// installed).
+const UPDATE_EVERY = 3600 * 1000;
+const upd = { ready: null, busy: null, lastCheck: 0, asked: "" };
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* private mode */ } }
+function noteLines(notes) {
+  // The first paragraph of the release notes, unwrapped and without Markdown.
+  const para = String(notes || "").trim().split(/\r?\n\s*\r?\n/)[0] || "";
+  const text = para.split(/\r?\n/).map((l) => l.trim()).join(" ").replace(/\*\*|`/g, "");
+  return text ? [text.length > 400 ? text.slice(0, 400).replace(/\s+\S*$/, "") + "…" : text] : [];
 }
-async function autoCheckUpdate() {
-  try { const u = await invoke("check_update", { channel: state.updateChannel }); if (u) offerUpdate(u, state.updateChannel); }
-  catch { /* offline: try again later */ }
+function startUpdate(channel) {
+  lsSet("sleuth.updatingTo", upd.ready?.version || "");
+  $("banner").hidden = false;
+  showBanner(`Installing Sleuth ${upd.ready?.version || ""}…`, "Restart and update", () => runInstall("install_update", channel));
+  runInstall("install_update", channel);
+}
+function offerUpdate(u, channel) {
+  upd.ready = u;
+  showBanner(`Sleuth ${u.version} is ready to install. Your settings and index are kept.`, "Restart and update", () => startUpdate(channel));
+  const b = $("sbUpdate");
+  b.hidden = false;
+  b.textContent = `Update ${u.version} ready`;
+  b.title = "Restart Sleuth and install the update. Your settings and index are kept.";
+  b.onclick = () => askUpdate(u, channel, true);
+  if ($("settingsDlg").open) $("s-updateMsg").textContent = `Version ${u.version} is ready to install`;
+}
+async function askUpdate(u, channel, force) {
+  if (!force && (upd.asked === u.version || document.querySelector("dialog[open]"))) return;
+  upd.asked = u.version;
+  const yes = await confirmBox(`Sleuth ${u.version} is ready to install`, [
+    `You have version ${await invoke("app_version")}. The update is downloaded and checked. Sleuth closes for a few seconds, installs it and opens again. Your settings, reading folders and index are kept.`,
+    ...noteLines(u.notes),
+  ], "Restart and update", "Later");
+  if (yes) startUpdate(channel);
+}
+/** Find, download and offer a newer release. Rejects when offline; callers decide whether to say so. */
+function prepareUpdate(channel, ask) {
+  if (upd.busy) return upd.busy;
+  upd.lastCheck = Date.now();
+  upd.busy = (async () => {
+    try {
+      const u = await invoke("check_update", { channel });
+      if (!u) return null;
+      if (!upd.ready || upd.ready.version !== u.version) {
+        showBanner(`Sleuth ${u.version} is available. Downloading it in the background…`);
+        await invoke("prepare_update", { channel });
+      }
+      offerUpdate(u, channel);
+      if (ask) askUpdate(u, channel, false);
+      return u;
+    } catch (e) {
+      if (upd.ready) offerUpdate(upd.ready, channel); else $("banner").hidden = true;
+      throw e;
+    } finally { upd.busy = null; }
+  })();
+  return upd.busy;
+}
+function autoCheckUpdate() { prepareUpdate(state.updateChannel, true).catch(() => { /* offline: try again later */ }); }
+window.addEventListener("focus", () => { if (Date.now() - upd.lastCheck > UPDATE_EVERY) autoCheckUpdate(); });
+async function sayUpdated() {
+  const to = lsGet("sleuth.updatingTo");
+  if (!to) return;
+  lsSet("sleuth.updatingTo", null);
+  if (to === (await invoke("app_version"))) toast(`Sleuth was updated to ${to}.`);
 }
 
 // ---------- roll back to the previous release ----------
@@ -525,6 +589,7 @@ document.addEventListener("keydown", (e) => {
   if (state.settings) invoke("set_autostart", { enabled: !!state.settings.keep_indexing_when_closed }).catch(() => {});
   renderEmpty();
   // loadStatus() re-arms itself: 2 s while working, 10 s when idle.
-  setTimeout(autoCheckUpdate, 15000);
-  setInterval(autoCheckUpdate, 6 * 3600 * 1000);
+  sayUpdated().catch(() => {});
+  setTimeout(autoCheckUpdate, 10000);
+  setInterval(autoCheckUpdate, UPDATE_EVERY);
 })();

@@ -78,6 +78,20 @@ pub fn download(m: &Manifest, progress: &dyn Fn(u64, Option<u64>)) -> Result<Pat
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join(format!("Sleuth_{}_setup.exe", m.version));
     let part = file.with_extension("part");
+    // Installers of other versions are no longer needed.
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            if e.path() != file && e.path() != part {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    // Downloaded earlier (in the background, before the user was asked).
+    if file.is_file() && sha256_of(&file).is_some_and(|h| h.eq_ignore_ascii_case(m.sha256.trim())) {
+        let n = std::fs::metadata(&file).map(|md| md.len()).unwrap_or(0);
+        progress(n, Some(n));
+        return Ok(file);
+    }
     let resp = ureq::get(&m.url).call().map_err(|e| format!("download failed: {e}"))?;
     let total = resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
     let mut reader = resp.into_body().into_reader();
@@ -103,6 +117,20 @@ pub fn download(m: &Manifest, progress: &dyn Fn(u64, Option<u64>)) -> Result<Pat
     }
     std::fs::rename(&part, &file).map_err(|e| e.to_string())?;
     Ok(file)
+}
+
+fn sha256_of(file: &PathBuf) -> Option<String> {
+    let mut f = std::fs::File::open(file).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Run the installer in update mode: it shows only a progress bar, replaces

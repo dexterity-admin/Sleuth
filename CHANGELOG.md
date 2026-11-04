@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.2
+
+Updates now find you. Install over 1.0.1 (or 1.0.0); settings and index are kept.
+
+- **Sleuth asks when an update is ready.** It checks 10 seconds after it starts,
+  every hour, and when the window comes back after an hour away. A newer
+  release is downloaded and checked against its published SHA-256 in the
+  background first; then a dialog asks to **Restart and update** or **Later**.
+  Nobody has to open Settings and click **Check for updates**.
+- **"Later" keeps the update in view.** An **Update x.y.z ready** button stays
+  in the status bar, and the blue bar at the top, until it is installed. The
+  dialog asks again at the next start.
+- **Installing starts at once**, because the download is already done.
+  Installers of older versions are deleted from the temp folder.
+- **After the restart Sleuth says it was updated**, and a failed install says
+  why and leaves Sleuth running, with a button to try again.
+
 ## 1.0.1
 
 Fixes the indexing problems that left 1.0.0 with nothing to search, and shows

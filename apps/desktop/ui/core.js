@@ -235,12 +235,13 @@ function fillProjectSelect(sel, allLabel) {
 }
 
 // ---------- confirm dialog ----------
-function confirmBox(title, body, yesLabel) {
+function confirmBox(title, body, yesLabel, noLabel) {
   return new Promise((resolve) => {
     $("cfTitle").textContent = title;
     const b = $("cfBody"); b.replaceChildren();
     for (const para of [].concat(body)) b.append(el("p", null, para));
     $("cfYes").textContent = yesLabel || "OK";
+    $("cfNo").textContent = noLabel || "Cancel";
     const dlg = $("confirmDlg");
     const done = (v) => { dlg.close(); resolve(v); };
     $("cfYes").onclick = () => done(true);
