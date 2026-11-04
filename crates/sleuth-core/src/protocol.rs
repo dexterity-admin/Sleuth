@@ -312,6 +312,74 @@ pub struct Status {
     pub ocr_backend: String,
     #[serde(default)]
     pub server: ServerStatus,
+    /// Progress of the file-name index (the walk of every drive).
+    #[serde(default)]
+    pub index: IndexProgress,
+    /// PDFs found outside the folders chosen for reading (names only).
+    #[serde(default)]
+    pub pdfs_unread: u64,
+    /// Pages still to read in the waiting PDFs, where known (0 = unknown).
+    #[serde(default)]
+    pub reading_eta_secs: u64,
+    /// Plain-language reason for the reader's state, e.g. why it waits.
+    #[serde(default)]
+    pub reader_note: String,
+    /// Reading folders as chosen, each with its PDF counts.
+    #[serde(default)]
+    pub scopes: Vec<ScopeProgress>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexProgress {
+    /// "starting", "walking" (listing folders), "up to date".
+    pub phase: String,
+    /// Unix seconds the running walk started; 0 when none runs.
+    pub pass_started: i64,
+    /// Folders listed so far in the running walk.
+    pub folders_listed: u64,
+    /// Folders found but not listed yet in the running walk.
+    pub folders_pending: u64,
+    /// Files seen so far in the running walk.
+    pub files_seen: u64,
+    /// Unix seconds the last complete walk finished; 0 = never.
+    pub last_complete: i64,
+    /// Unix seconds the next scheduled walk starts; 0 = unknown.
+    pub next_walk: i64,
+    /// True until the first complete walk of this index finished.
+    pub first_walk: bool,
+    pub roots: Vec<IndexRoot>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexRoot {
+    /// Network path or drive root as walked.
+    pub root: String,
+    /// How the user sees it ("Z:\ (\\server\Project)").
+    pub display: String,
+    /// "waiting", "walking", "done", "partial", "offline".
+    pub state: String,
+    /// Folders and files listed under this root in the running (or last) walk.
+    pub folders: u64,
+    pub files: u64,
+    /// Folders skipped (timeouts, no access) in the running walk.
+    pub skipped: u64,
+    pub note: String,
+    /// Unix seconds this root last finished a complete walk; 0 = never.
+    pub last_ok: i64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScopeProgress {
+    /// As written in settings ("Z:\").
+    pub folder: String,
+    /// Network path it resolves to, empty when the letter is not mapped.
+    pub unc: String,
+    pub pdfs: u64,
+    pub read: u64,
+    pub waiting: u64,
+    pub failed: u64,
+    /// "ok", "not mapped", "offline", "not indexed yet".
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

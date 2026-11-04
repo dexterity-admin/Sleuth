@@ -6,6 +6,7 @@ pub mod cache;
 pub mod crawl;
 pub mod derive;
 pub mod models;
+pub mod namemem;
 pub mod ocr;
 pub mod pdf;
 pub mod reader;

@@ -16,22 +16,123 @@ async function waitForWorker() {
   showBanner("The Sleuth reader did not start. Close Sleuth and open it again.", null);
   return false;
 }
-listen("worker-down", () => { $("sbReader").textContent = "Reader restarting…"; });
+listen("worker-down", () => {
+  for (const id of ["stage1", "stage2"]) { $(id).className = "stage warn"; }
+  $("stage1").querySelector(".st-text").textContent = "The background reader is restarting…";
+  $("stage2").querySelector(".st-text").textContent = "";
+});
 listen("worker-up", () => { loadStatus(); });
 
 // ---------- status ----------
-async function loadStatus() {
+// Polled every 2 s while files are being listed or read, every 10 s otherwise,
+// so every view shows live numbers without pressing Refresh.
+const POLL_BUSY_MS = 2000, POLL_IDLE_MS = 10000;
+let pollTimer = 0, pollFastUntil = 0, statusBusy = false;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const fast = statusBusy || Date.now() < pollFastUntil;
+  pollTimer = setTimeout(loadStatus, fast ? POLL_BUSY_MS : POLL_IDLE_MS);
+}
+/** Poll quickly for a while, e.g. after a reading folder was added. */
+function pollFast(ms) { pollFastUntil = Date.now() + (ms || 120000); schedulePoll(); }
+let statusInFlight = null;
+function loadStatus() {
+  if (!statusInFlight) statusInFlight = fetchStatus().finally(() => { statusInFlight = null; schedulePoll(); });
+  return statusInFlight;
+}
+async function fetchStatus() {
   try {
     const r = await call({ req: "status" });
     const s = r.status;
-    let t = s.reader_state === "reading" && s.current_file ? `Reading ${baseName(s.current_file)}` : cap(s.reader_state);
-    t += ` · ${s.pdfs_read.toLocaleString()} PDFs read · ${s.pdfs_waiting.toLocaleString()} waiting`;
-    if (s.pages_per_hour) t += ` · ${s.pages_per_hour} pages/h`;
-    $("sbReader").textContent = t;
     state.lastStatus = r;
+    const p = progressModel(s);
+    statusBusy = p.walking || p.reading || /^loading/i.test(s.reader_state || "");
+    renderStages(p);
     setServer(s.server);
     enforceCache(s.cache);
+    onStatus(p);
   } catch { /* worker restarting */ }
+}
+function paintStage(id, st) {
+  const b = $(id);
+  b.className = "stage " + st.cls;
+  b.querySelector(".st-text").textContent = st.text;
+  b.title = st.text + "\n" + (st.title ? st.title + "\n" : "") + "Click for details";
+  const fill = b.querySelector(".st-fill");
+  fill.classList.toggle("moving", st.bar === null);
+  fill.style.width = st.bar === null ? "" : Math.round(Math.min(1, Math.max(0, st.bar)) * 100) + "%";
+}
+function renderStages(p) {
+  paintStage("stage1", stageFind(p));
+  paintStage("stage2", stageRead(p));
+}
+/** Everything else that shows progress follows the latest status. */
+function onStatus(p) {
+  updateWalkBanner(p);
+  if (!state.query) renderEmpty();
+  renderScopes();
+  scopeFeedback(p);
+  if (state.view_ === "monitor") renderIndexing();
+  if ($("settingsDlg").open) renderSettingsIndex(p);
+}
+for (const id of ["stage1", "stage2"]) $(id).onclick = () => showIndexing();
+$("walkBannerMore").onclick = () => showIndexing();
+function showIndexing() {
+  if ($("settingsDlg").open) $("settingsDlg").close();
+  showView("monitor");
+  $("monBody").scrollTop = 0;
+}
+
+// Search banner: results can be incomplete while the drives are still listed.
+function updateWalkBanner(p) {
+  p = p || progressModel(state.lastStatus?.status);
+  const lines = [];
+  const ix = p.ix;
+  if (ix && p.walking && state.query) {
+    if (p.firstWalk) lines.push(`Still finding files — results may be incomplete (${plural(ix.files_seen || p.s.files_indexed, "file")} found so far).`);
+    else lines.push(`Checking the drives for new files (${plural(ix.files_seen, "file")} checked so far). Files added since ${fmtAgo(ix.last_complete)} may not show yet.`);
+  }
+  if (state.query && state.view.length && looksLikeFileName(state.query) && p.waiting > 0 && p.scopeCount) {
+    lines.push(`Text inside PDFs is searched only in PDFs already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far.`);
+  }
+  $("walkBannerText").textContent = lines.join(" ");
+  $("walkBanner").hidden = !lines.length || state.view_ !== "search";
+}
+function looksLikeFileName(q) {
+  q = String(q || "").trim();
+  if (!q || /\s/.test(q) || /:/.test(q)) return false;
+  if (/\.[a-z0-9]{2,4}$/i.test(q)) return true;
+  return /[a-z]/i.test(q) && /\d/.test(q) && /[-_]/.test(q);
+}
+
+// Feedback after a reading folder is added: show the queue once it is counted.
+let scopeWatch = null; // {folder, since, told}
+function watchScope(folder) { scopeWatch = { folder, since: Date.now(), told: "" }; pollFast(); }
+function scopeFeedback(p) {
+  if (!scopeWatch) return;
+  const sc = (p.scopes || []).find((x) => String(x.folder).toLowerCase() === scopeWatch.folder.toLowerCase());
+  let msg = "";
+  if (!p.scopes) msg = `${scopeWatch.folder} added. Its PDFs will be read in the background.`;
+  else if (!sc) msg = `${scopeWatch.folder} added. Counting its PDFs…`;
+  else if (sc.note && sc.note !== "ok" && sc.note !== "not indexed yet") msg = `${scopeWatch.folder}: ${sc.note}. ${SCOPE_NOTE[sc.note] || ""}`;
+  else if (sc.pdfs > 0) msg = `${sc.folder} — ${plural(sc.waiting, "PDF")} queued for reading` + (sc.read ? `, ${fmtNum(sc.read)} already read` : "") + ".";
+  else if (sc.note === "not indexed yet" || p.walking) msg = `${scopeWatch.folder} added. Its PDFs are queued as soon as stage 1 lists it.`;
+  else msg = `${scopeWatch.folder} added. No PDFs found in it.`;
+  if (msg !== scopeWatch.told) { toast(msg); scopeWatch.told = msg; }
+  const settled = sc && (sc.pdfs > 0 || (sc.note && !["ok", "not indexed yet"].includes(sc.note)));
+  if (settled || !p.scopes || Date.now() - scopeWatch.since > 10 * 60000) scopeWatch = null;
+}
+
+// Settings: the same two lines next to "Refresh index now".
+function renderSettingsIndex(p) {
+  p = p || progressModel(state.lastStatus?.status);
+  const box = $("s-indexState");
+  box.replaceChildren();
+  for (const [name, st] of [["Finding files", stageFind(p)], ["Reading PDFs", stageRead(p)]]) {
+    const row = el("div", "idx-line " + st.cls);
+    row.append(el("span", "st-dot"), el("b", null, name + ": "), el("span", null, st.text));
+    box.append(row);
+  }
 }
 const SERVER_BADGE = {
   connected: ["ok", "Office server connected"],
@@ -110,20 +211,6 @@ async function testCache() {
 }
 $("s-cacheTest").onclick = () => testCache().catch((e) => { $("s-cacheState").textContent = String(e); });
 $("settingsDlg").addEventListener("close", () => { if (cacheNeedsUser(state.lastStatus?.status?.cache)) cacheNagSince = Date.now(); });
-$("sbReader").onclick = async () => {
-  await loadStatus();
-  const r = state.lastStatus; if (!r) return;
-  const s = r.status;
-  const grid = $("stGrid"); grid.replaceChildren();
-  for (const [l, v] of [["Files indexed", s.files_indexed], ["PDFs read", s.pdfs_read], ["Waiting to be read", s.pdfs_waiting], ["Could not be read", s.pdfs_failed]]) {
-    const c = el("div", "stat"); c.append(el("div", "l", l), el("div", "v", Number(v).toLocaleString())); grid.append(c);
-  }
-  const f = $("stFailed"); f.replaceChildren();
-  if (!r.failed.length) f.append(el("div", "dim", "None"));
-  for (const x of r.failed) { const row = el("div"); const p = el("span", "p", x.path); p.title = x.path; row.append(p, el("span", "r", x.reason)); f.append(row); }
-  $("statusDlg").showModal();
-};
-$("stClose").onclick = () => $("statusDlg").close();
 
 // ---------- settings ----------
 async function loadSettings() {
@@ -171,6 +258,7 @@ async function openSettings(focusCache, focusSection) {
   call({ req: "monitor" }).then((r) => { if (r.monitor?.backend_note) $("s-backendNote").textContent = `Currently running on: ${st?.ocr_backend || r.monitor.status?.ocr_backend || "?"}. ${r.monitor.backend_note}`; }).catch(() => {});
   const c = st?.cache;
   if (c) showCacheCheck(c); else $("s-cacheState").textContent = "";
+  renderSettingsIndex();
   $("settingsDlg").showModal();
   checkRollback();
   if (focusCache || cacheNeedsUser(c)) highlightCache();
@@ -349,7 +437,11 @@ $("s-save").onclick = async () => {
     toast("Settings saved" + (tagRules || fieldRules ? ". Rule problems, if any, are listed under Monitor → Rule errors." : ""));
   } catch (e) { $("s-error").textContent = e.message || String(e); $("s-error").hidden = false; }
 };
-$("s-rescanNow").onclick = async () => { await call({ req: "rescan_now" }); toast("Refreshing the file-name index in the background"); };
+$("s-rescanNow").onclick = async () => {
+  await call({ req: "rescan_now" });
+  toast("Checking the drives for new files in the background. Progress shows at the bottom of the window.");
+  pollFast(60000); loadStatus();
+};
 $("s-checkUpdate").onclick = async () => {
   $("s-updateMsg").textContent = "Checking…";
   try {
@@ -432,7 +524,7 @@ document.addEventListener("keydown", (e) => {
   // Apply "keep reading in the background" from the first start, not only after a save.
   if (state.settings) invoke("set_autostart", { enabled: !!state.settings.keep_indexing_when_closed }).catch(() => {});
   renderEmpty();
-  setInterval(loadStatus, 4000);
+  // loadStatus() re-arms itself: 2 s while working, 10 s when idle.
   setTimeout(autoCheckUpdate, 15000);
   setInterval(autoCheckUpdate, 6 * 3600 * 1000);
 })();

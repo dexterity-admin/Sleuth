@@ -25,14 +25,15 @@ use crate::derive::Deriver;
 use crate::text::{FileText, Line};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use sleuth_core::analyzer::{MatchClass, Term, fold_form, norm_form};
+use sleuth_core::analyzer::{MatchClass, MatchDetail, Term, fold_form, glob_match, looks_like_path, norm_form, sep_form};
 use sleuth_core::protocol::{DrawingMeta, NormBox, PageInfo, Provenance, TextSource};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// `PRAGMA user_version`: what Sleuth 0.1 checks. Never raised again.
 pub const SCHEMA_VERSION: i64 = 1;
 /// Additive schema level in `meta.schema`.
-pub const SCHEMA_LEVEL: i64 = 2;
+pub const SCHEMA_LEVEL: i64 = 4;
 /// Removed files keep their readings this long, so a moved or renamed
 /// drawing is not read again.
 pub const GONE_KEEP_SECS: i64 = 7 * 24 * 3600;
@@ -55,6 +56,8 @@ pub mod state {
 
 pub struct Store {
     pub conn: Connection,
+    /// The names in memory, kept in step with every file added or removed.
+    pub mem: Option<std::sync::Arc<crate::namemem::NameMem>>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +152,64 @@ fn like_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }
 
+/// A `*`/`?` pattern as the body of a LIKE pattern (escape `\`).
+fn like_glob(s: &str) -> String {
+    like_escape(s).replace('*', "%").replace('?', "_")
+}
+
+/// One character of a case-insensitive GLOB pattern: `[еЕ]` for a letter
+/// with two cases, `[*]` for GLOB's own special characters, and `*`/`?`
+/// passed through when `wild` (the term's own wildcards).
+fn glob_char(c: char, wild: bool) -> String {
+    if wild && (c == '*' || c == '?') {
+        return c.to_string();
+    }
+    let up: String = c.to_uppercase().collect();
+    let low: String = c.to_lowercase().collect();
+    match c {
+        '*' | '?' | '[' => format!("[{c}]"),
+        _ if up.chars().count() == 1 && low.chars().count() == 1 && up != low => format!("[{low}{up}]"),
+        _ => c.to_string(),
+    }
+}
+
+/// Every spelling of `s` with each letter in either case (`об` -> `об`,
+/// `Об`, `оБ`, `ОБ`); `None` when there would be more than 16.
+fn case_variants(s: &str) -> Option<Vec<String>> {
+    let mut out = vec![String::new()];
+    for c in s.chars() {
+        let up: String = c.to_uppercase().collect();
+        let low: String = c.to_lowercase().collect();
+        let forms: Vec<String> = if up != low { vec![low, up] } else { vec![c.to_string()] };
+        out = out.iter().flat_map(|p| forms.iter().map(move |f| format!("{p}{f}"))).collect();
+        if out.len() > 16 {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Name-index rows read for one term (three or more letters and digits)
+/// before giving up on finding more exact matches.
+const NAME_SCAN_BUDGET: usize = 100_000;
+/// The same for one or two characters, which are in most names.
+const SHORT_SCAN_BUDGET: usize = 20_000;
+
+/// `(id, name, path)` of one file.
+type NameRow = (i64, String, String);
+
+fn name_row(r: &rusqlite::Row) -> rusqlite::Result<NameRow> {
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+}
+
+fn push_new(seen: &mut std::collections::HashSet<i64>, out: &mut Vec<NameRow>, rows: Vec<NameRow>) {
+    for r in rows {
+        if seen.insert(r.0) {
+            out.push(r);
+        }
+    }
+}
+
 pub fn source_code(s: TextSource) -> i64 {
     match s {
         TextSource::TextLayer => 1,
@@ -186,8 +247,8 @@ impl Store {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open index {}", path.display()))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
-        let mut s = Store { conn };
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=15000; PRAGMA journal_size_limit=67108864;")?;
+        let mut s = Store { conn, mem: None };
         s.migrate(Some(path))?;
         Ok(s)
     }
@@ -195,7 +256,7 @@ impl Store {
     pub fn open_in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let mut s = Store { conn };
+        let mut s = Store { conn, mem: None };
         s.migrate(None)?;
         Ok(s)
     }
@@ -264,6 +325,47 @@ impl Store {
             }
             self.upgrade_to_2()?;
         }
+        if level < 3 {
+            self.upgrade_to_3()?;
+        }
+        if level < 4 {
+            self.upgrade_to_4()?;
+        }
+        Ok(())
+    }
+
+    /// Level 4: an index on file names, so a file named exactly as typed is
+    /// found (and ranked first) however many other names contain the text.
+    fn upgrade_to_4(&mut self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN;
+            CREATE INDEX IF NOT EXISTS files_name ON files(name COLLATE NOCASE);
+            INSERT INTO meta(key, value) VALUES('schema', '4') ON CONFLICT(key) DO UPDATE SET value='4';
+            COMMIT;",
+        )?;
+        Ok(())
+    }
+
+    /// Level 3: `dirs.listed` records the walk that actually listed a folder.
+    /// Before it, `seen` was also set on subfolders when their parent was
+    /// listed, so a resumed or racing walk took them as listed and skipped
+    /// their contents. Existing folders count as never listed, and the next
+    /// walk starts afresh.
+    fn upgrade_to_3(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let has: bool = {
+            let mut st = tx.prepare("PRAGMA table_info(dirs)")?;
+            let cols: Vec<String> = st.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?;
+            cols.iter().any(|c| c == "listed")
+        };
+        if !has {
+            tx.execute_batch("ALTER TABLE dirs ADD COLUMN listed INTEGER;")?;
+        }
+        tx.execute_batch(
+            "DELETE FROM meta WHERE key='pass';
+            INSERT INTO meta(key, value) VALUES('schema', '3') ON CONFLICT(key) DO UPDATE SET value='3';",
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -382,6 +484,11 @@ impl Store {
                     "UPDATE files SET size=?2, mtime=?3, seen=?4, read_state=?5, gone_at=NULL, dir=?6, name=?7 WHERE id=?1",
                     params![id, size as i64, mtime, seen, new_state, dir, name],
                 )?;
+                if (changed || ostate == state::GONE)
+                    && let Some(m) = &self.mem
+                {
+                    m.put(id, dir, name, size, mtime);
+                }
                 Ok((id, changed))
             }
             None => {
@@ -391,11 +498,15 @@ impl Store {
                 )?;
                 let id = self.conn.last_insert_rowid();
                 self.conn.execute("INSERT INTO names(rowid, fold) VALUES(?1, ?2)", params![id, fold_form(name)])?;
+                if let Some(m) = &self.mem {
+                    m.put(id, dir, name, size, mtime);
+                }
                 Ok((id, true))
             }
         }
     }
 
+    /// Record a folder seen in pass `seen` (as a subfolder of a listing).
     pub fn touch_dir(&self, path: &str, parent: Option<&str>, seen: i64) -> Result<()> {
         self.conn.execute(
             "INSERT INTO dirs(path, parent, seen) VALUES(?1,?2,?3) ON CONFLICT(path) DO UPDATE SET seen=excluded.seen",
@@ -404,10 +515,20 @@ impl Store {
         Ok(())
     }
 
-    /// Subfolders already listed in pass `seen` (resuming an interrupted walk).
+    /// Record that a folder itself was listed completely in pass `seen`.
+    pub fn mark_listed(&self, path: &str, parent: Option<&str>, seen: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO dirs(path, parent, seen, listed) VALUES(?1,?2,?3,?3) ON CONFLICT(path) DO UPDATE SET seen=excluded.seen, listed=excluded.listed",
+            params![path, parent, seen],
+        )?;
+        Ok(())
+    }
+
+    /// Subfolders of a folder already listed in pass `seen` (resuming an
+    /// interrupted walk); `None` when the folder was not listed in it.
     pub fn listed_in_pass(&self, dir: &str, seen: i64) -> Result<Option<Vec<String>>> {
-        let done: Option<i64> = self.conn.query_row("SELECT seen FROM dirs WHERE path=?1", [dir], |r| r.get(0)).optional()?;
-        if done != Some(seen) {
+        let done: Option<Option<i64>> = self.conn.query_row("SELECT listed FROM dirs WHERE path=?1", [dir], |r| r.get(0)).optional()?;
+        if done.flatten() != Some(seen) {
             return Ok(None);
         }
         let mut st = self.conn.prepare_cached("SELECT path FROM dirs WHERE parent=?1")?;
@@ -418,6 +539,31 @@ impl Store {
     /// After a folder was listed completely: forget its files and subfolders
     /// that were not seen in this listing. Never called for a listing that
     /// failed or timed out, so an unreachable folder never loses its files.
+    /// Files the index holds directly in `dir`, by lower-case name:
+    /// `(id, size, mtime, read_state)`.
+    pub fn dir_files(&self, dir: &str) -> Result<HashMap<String, (i64, u64, i64, i64)>> {
+        let mut st = self.conn.prepare_cached("SELECT id, name, size, mtime, read_state FROM files WHERE dir=?1")?;
+        let rows = st.query_map([dir], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? as u64, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)))?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (id, name, size, mtime, st) = row?;
+            out.insert(name.to_lowercase(), (id, size, mtime, st));
+        }
+        Ok(out)
+    }
+
+    /// Subfolders the index holds for `dir`, lower case.
+    pub fn dir_children(&self, dir: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached("SELECT path FROM dirs WHERE parent=?1")?;
+        let rows = st.query_map([dir], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let p = row?;
+            out.push((p.to_lowercase(), p));
+        }
+        Ok(out)
+    }
+
     pub fn reconcile_dir(&self, dir: &str, seen: i64, now: i64) -> Result<()> {
         let gone: Vec<i64> = {
             let mut st = self.conn.prepare_cached("SELECT id FROM files WHERE dir=?1 AND seen<?2 AND read_state<>?3")?;
@@ -436,25 +582,46 @@ impl Store {
         Ok(())
     }
 
-    fn delete_tree(&self, dir: &str, now: i64) -> Result<()> {
-        let prefix = format!("{}\\\\%", like_escape(dir.trim_end_matches('\\')));
+    /// Forget a folder and everything under it, as if deleted (readings are
+    /// kept for the grace period, for identical copies elsewhere).
+    pub fn forget_tree(&self, dir: &str, now: i64) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        self.delete_tree(dir, now)?;
+        let d = dir.trim_end_matches('\\');
+        self.conn.execute("DELETE FROM root_scans WHERE root=?1 OR root=?2", params![d, format!("{d}\\")])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn delete_tree(&self, dir: &str, now: i64) -> Result<()> {
+        // Range scans of the folder indexes (`\` sorts just before `]`): a
+        // LIKE here read every file of the index, and ran whenever a folder
+        // disappeared during a walk.
+        let d = dir.trim_end_matches('\\');
+        let (lo, hi) = (format!("{d}\\"), format!("{d}]"));
         let ids: Vec<i64> = {
-            let mut st = self.conn.prepare("SELECT id FROM files WHERE (dir=?1 OR dir LIKE ?2 ESCAPE '\\') AND read_state<>?3")?;
-            st.query_map(params![dir, prefix, state::GONE], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+            let mut st = self.conn.prepare_cached(
+                "SELECT id FROM files WHERE dir=?1 AND read_state<>?4 UNION ALL SELECT id FROM files WHERE dir>=?2 AND dir<?3 AND read_state<>?4",
+            )?;
+            st.query_map(params![d, lo, hi, state::GONE], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
         };
         for id in ids {
             self.delete_file(id, now)?;
         }
-        self.conn.execute("DELETE FROM dirs WHERE path=?1 OR path LIKE ?2 ESCAPE '\\'", params![dir, prefix])?;
+        self.conn.execute("DELETE FROM dirs WHERE path=?1", params![d])?;
+        self.conn.execute("DELETE FROM dirs WHERE path>=?1 AND path<?2", params![lo, hi])?;
         Ok(())
     }
 
     /// A file is no longer where it was. A read file keeps its readings for a
     /// while (state `GONE`) so the same content found elsewhere is not read
     /// again; anything else is removed now.
-    fn delete_file(&self, id: i64, now: i64) -> Result<()> {
+    pub(crate) fn delete_file(&self, id: i64, now: i64) -> Result<()> {
         let (st, has_hash): (i64, bool) = self.conn.query_row("SELECT read_state, hash IS NOT NULL FROM files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         self.conn.execute("DELETE FROM names WHERE rowid=?1", [id])?;
+        if let Some(m) = &self.mem {
+            m.remove(id);
+        }
         if st == state::READ && has_hash {
             self.conn.execute("UPDATE files SET read_state=?2, gone_at=?3, lease_until=NULL WHERE id=?1", params![id, state::GONE, now])?;
             return Ok(());
@@ -497,17 +664,60 @@ impl Store {
     }
 
     pub fn claim_next(&self, now: i64, owner: &str) -> Result<Option<FileRow>> {
+        self.claim_from(now, owner, 0)
+    }
+
+    /// Claim only files someone asked for (search, open), not the backlog.
+    pub fn claim_urgent(&self, now: i64, owner: &str) -> Result<Option<FileRow>> {
+        self.claim_from(now, owner, 1)
+    }
+
+    fn claim_from(&self, now: i64, owner: &str, min_priority: i64) -> Result<Option<FileRow>> {
         Ok(self
             .conn
             .query_row(
                 "UPDATE files SET lease_until=?3, lease_owner=?4 WHERE id=(
-                    SELECT id FROM files WHERE read_state=?1 AND (retry_at IS NULL OR retry_at<=?2) AND (lease_until IS NULL OR lease_until<=?2)
+                    SELECT id FROM files WHERE read_state=?1 AND priority>=?5 AND (retry_at IS NULL OR retry_at<=?2) AND (lease_until IS NULL OR lease_until<=?2)
                     ORDER BY priority DESC, mtime DESC LIMIT 1)
                  RETURNING id, path, name, size, mtime, read_state",
-                params![state::WAITING, now, now + LEASE_SECS, owner],
+                params![state::WAITING, now, now + LEASE_SECS, owner, min_priority],
                 file_row,
             )
             .optional()?)
+    }
+
+    /// PDFs under one reading folder by state: (all, read, waiting, failed).
+    pub fn scope_counts(&self, folder: &str) -> Result<(u64, u64, u64, u64)> {
+        let f = folder.trim_end_matches('\\');
+        // Two range scans of the folder index (`\` sorts just before `]`),
+        // not a LIKE over every file: this runs on indexes of millions.
+        let mut st = self.conn.prepare_cached(
+            "SELECT read_state, COUNT(*) FROM (
+                SELECT read_state FROM files WHERE dir=?1
+                UNION ALL SELECT read_state FROM files WHERE dir>=?2 AND dir<?8)
+             WHERE read_state IN (?3,?4,?5,?6,?7) GROUP BY read_state",
+        )?;
+        let (mut all, mut read, mut waiting, mut failed) = (0u64, 0u64, 0u64, 0u64);
+        let rows = st.query_map(
+            params![f, format!("{f}\\"), state::WAITING, state::READ, state::FAILED, state::UNREAD, state::OFFICE, format!("{f}]")],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)? as u64)),
+        )?;
+        for row in rows {
+            let (s, n) = row?;
+            all += n;
+            match s {
+                state::READ => read += n,
+                state::WAITING => waiting += n,
+                state::FAILED => failed += n,
+                _ => {}
+            }
+        }
+        Ok((all, read, waiting, failed))
+    }
+
+    /// Files in one read state.
+    pub fn count_state(&self, s: i64) -> Result<u64> {
+        Ok(self.conn.query_row("SELECT COUNT(*) FROM files WHERE read_state=?1", [s], |r| r.get::<_, i64>(0))? as u64)
     }
 
     /// Give a job back without a result (reader stopped).
@@ -535,8 +745,47 @@ impl Store {
         Ok(self.conn.query_row("SELECT id, path, name, size, mtime, read_state FROM files WHERE path=?1", [path], file_row).optional()?)
     }
 
+    /// [`Store::file_by_id`] from memory when the names are loaded (no
+    /// disk read per result row); `read_state` is then not known (-1).
+    pub fn file_quick(&self, id: i64) -> Result<Option<FileRow>> {
+        if let Some(f) = self.mem.as_ref().and_then(|m| m.get(id)) {
+            return Ok(Some(FileRow { id, path: f.path, name: f.name, size: f.size, mtime: f.mtime, read_state: -1 }));
+        }
+        self.file_by_id(id)
+    }
+
+    /// Title-block details of many files in one query per 500.
+    pub fn metadata_many(&self, ids: &[i64]) -> Result<HashMap<i64, DrawingMeta>> {
+        let mut out = HashMap::new();
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let sql = format!("SELECT file_id, drawing_no, title, revision, project, discipline, sheet, status, evidence FROM drawing_metadata WHERE file_id IN ({marks})");
+            let mut st = self.conn.prepare(&sql)?;
+            let rows = st.query_map(rusqlite::params_from_iter(chunk.iter()), |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    DrawingMeta {
+                        drawing_no: r.get(1)?,
+                        title: r.get(2)?,
+                        revision: r.get(3)?,
+                        project: r.get(4)?,
+                        discipline: r.get(5)?,
+                        sheet: r.get(6)?,
+                        status: r.get(7)?,
+                        evidence: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, m) = row?;
+                out.insert(id, m);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn file_by_id(&self, id: i64) -> Result<Option<FileRow>> {
-        Ok(self.conn.query_row("SELECT id, path, name, size, mtime, read_state FROM files WHERE id=?1", [id], file_row).optional()?)
+        Ok(self.conn.prepare_cached("SELECT id, path, name, size, mtime, read_state FROM files WHERE id=?1")?.query_row([id], file_row).optional()?)
     }
 
     /// A file already read with the same content (copied, moved or renamed).
@@ -728,33 +977,267 @@ impl Store {
         Ok(out)
     }
 
-    /// Files whose name matches one term, inside `scope`.
+    /// Files whose name matches one term, inside `scope`, best first.
+    ///
+    /// Works like Everything: a case-insensitive substring of the name, of
+    /// any length and any file type, with `*` and `?` wildcards; a term with
+    /// `\` is compared with the full path (a pasted `\\server\share\...` or
+    /// local `C:\...` path finds that file or folder). Names are exact text,
+    /// so look-alike folding never applies; separators may differ
+    /// ([`MatchClass::SeparatorsIgnored`]).
     pub fn search_names(&self, term: &Term, scope: &Scope, limit: usize) -> Result<Vec<Candidate>> {
-        let (where_, sp) = scope.sql_from(2);
-        let gone = format!("f.read_state<>{}", state::GONE);
-        let (sql, first) = if term.fold.chars().count() >= 3 {
-            (
-                format!("SELECT f.id, f.name FROM names JOIN files f ON f.id=names.rowid WHERE names MATCH ?1 AND {gone}{where_} LIMIT ?2"),
-                format!("fold : {}", fts_phrase(&term.fold)),
-            )
-        } else {
-            (format!("SELECT f.id, f.name FROM files f WHERE f.name LIKE ?1 ESCAPE '\\' AND {gone}{where_} LIMIT ?2"), format!("%{}%", like_escape(&term.raw)))
-        };
-        let mut st = self.conn.prepare_cached(&sql)?;
-        let mut args: Vec<rusqlite::types::Value> = vec![first.into(), ((limit * 4) as i64).into()];
-        args.extend(sp.into_iter().map(Into::into));
-        let rows: Vec<(i64, String)> = st.query_map(params_from_iter(args), |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        let mut out = Vec::new();
-        for (file_id, name) in rows {
-            // Names are exact text; look-alike folding only applies to OCR.
-            if let Some(d) = term.explain(&name, 1.0)
-                && d.class != MatchClass::Uncertain
-            {
-                out.push(Candidate { file_id, page: None, text: name, conf: 1.0, source: TextSource::FileName, bbox: None, class: d.class, why: format!("In the file name: {}", d.why.to_lowercase()) });
+        let rows = self.name_candidates(term, scope, limit * 4)?;
+        let mut out: Vec<(bool, Candidate)> = Vec::new();
+        for (file_id, name, path) in rows {
+            if let Some(d) = term.explain_name(&name, &path) {
+                let whole = term.is_whole_name(&name, &path);
+                let why = if whole {
+                    if term.is_path() { "This is the path typed".to_string() } else { "The file name is the text typed".to_string() }
+                } else {
+                    format!("In the file {}: {}", if term.is_path() { "path" } else { "name" }, d.why.to_lowercase())
+                };
+                out.push((whole, Candidate { file_id, page: None, text: name, conf: 1.0, source: TextSource::FileName, bbox: None, class: d.class, why }));
             }
+        }
+        out.sort_by_key(|(whole, c)| (c.class, !*whole));
+        out.truncate(limit);
+        Ok(out.into_iter().map(|(_, c)| c).collect())
+    }
+
+    /// Files matching every term of `terms`, each term in the file name or
+    /// anywhere in its folder path (`ISO 2632 HOLD`, `Rev-1 PSV-2809`).
+    /// Candidates come from the most specific term, so no per-term limit can
+    /// drop a file before the others are checked.
+    pub fn search_names_all(&self, terms: &[Term], scope: &Scope, limit: usize) -> Result<Vec<Candidate>> {
+        let Some(anchor) = terms.iter().max_by_key(|t| (t.is_path(), sep_form(t.literal()).chars().count())) else { return Ok(Vec::new()) };
+        let cap = limit * 4;
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        match self.mem.as_ref().filter(|m| m.serves(scope) && !terms.iter().any(|t| t.is_path())) {
+            // Every word checked against every name and folder at once.
+            Some(m) => rows = m.candidates_all(terms, scope, cap),
+            None => {
+                push_new(&mut seen, &mut rows, self.name_candidates(anchor, scope, cap)?);
+                if !anchor.is_path() {
+                    push_new(&mut seen, &mut rows, self.files_under_dirs(&anchor.raw, scope, cap)?);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        'file: for (file_id, name, path) in rows {
+            let dir = path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+            let mut found: Vec<MatchDetail> = Vec::new();
+            for t in terms {
+                let d = t.explain_name(&name, &path).or_else(|| {
+                    if t.is_path() {
+                        return None;
+                    }
+                    let d = if t.has_wildcards() {
+                        glob_match(&format!("*{}*", t.raw), &dir.to_lowercase()).then(|| MatchDetail { class: MatchClass::Partial, why: "Part of the folder path matches the pattern".into() })
+                    } else {
+                        t.explain(dir, 1.0).filter(|d| d.class != MatchClass::Uncertain)
+                    };
+                    d.map(|d| MatchDetail { class: d.class, why: format!("In the folder path: {}", d.why.to_lowercase()) })
+                });
+                match d {
+                    Some(d) => found.push(d),
+                    None => continue 'file,
+                }
+            }
+            let class = found.iter().map(|d| d.class).max().unwrap_or(MatchClass::Partial);
+            let why = found.iter().map(|d| d.why.clone()).collect::<Vec<_>>().join("; ");
+            out.push(Candidate { file_id, page: None, text: name, conf: 1.0, source: TextSource::FileName, bbox: None, class, why: format!("Every word is in the file name or path: {}", why.to_lowercase()) });
         }
         out.sort_by_key(|c| c.class);
         out.truncate(limit);
+        Ok(out)
+    }
+
+    /// `(id, name, path)` of files that may match `term` by name or path,
+    /// at most about `cap`, whole-name matches first.
+    fn name_candidates(&self, term: &Term, scope: &Scope, cap: usize) -> Result<Vec<NameRow>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        if term.is_path() {
+            if looks_like_path(&term.raw) {
+                let prefix = term.raw.split(['*', '?']).next().unwrap_or("");
+                push_new(&mut seen, &mut out, self.paths_with_prefix(prefix, scope, cap)?);
+            } else {
+                let frag = term.raw.trim_end_matches('\\');
+                let last = frag.rsplit('\\').next().unwrap_or("");
+                if !term.raw.ends_with('\\')
+                    && let Some(t) = Term::new(last)
+                {
+                    push_new(&mut seen, &mut out, self.whole_names(&t, scope, cap)?);
+                    push_new(&mut seen, &mut out, self.names_containing(&t, scope, cap)?);
+                }
+                push_new(&mut seen, &mut out, self.files_under_dirs(frag, scope, cap)?);
+            }
+        } else if let Some(m) = self.mem.as_ref().filter(|m| m.serves(scope)) {
+            out = m.candidates(term, scope, cap);
+        } else {
+            push_new(&mut seen, &mut out, self.whole_names(term, scope, cap)?);
+            push_new(&mut seen, &mut out, self.names_containing(term, scope, cap)?);
+        }
+        Ok(out)
+    }
+
+    /// Files named exactly `term`, with or without an extension (indexed).
+    /// The index compares ASCII case only; other names are found as whole
+    /// names by [`Store::names_containing`], which ranks them first.
+    fn whole_names(&self, term: &Term, scope: &Scope, cap: usize) -> Result<Vec<NameRow>> {
+        if term.has_wildcards() || term.is_path() || !term.raw.is_ascii() {
+            return Ok(Vec::new());
+        }
+        let (where_, sp) = scope.sql_from(3);
+        let sql = format!(
+            "SELECT f.id, f.name, f.path FROM files f WHERE f.name COLLATE NOCASE >= ?1 AND f.name COLLATE NOCASE < ?2 AND f.read_state<>{}{where_} LIMIT ?3",
+            state::GONE
+        );
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let mut out = Vec::new();
+        for (lo, hi) in [(term.raw.clone(), format!("{}\u{1}", term.raw)), (format!("{}.", term.raw), format!("{}.\u{10FFFF}", term.raw))] {
+            let mut args: Vec<rusqlite::types::Value> = vec![lo.into(), hi.into(), (cap as i64).into()];
+            args.extend(sp.iter().cloned().map(Into::into));
+            for r in st.query_map(params_from_iter(args), name_row)? {
+                let r = r?;
+                if term.is_whole_name(&r.1, &r.2) {
+                    out.push(r);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Files whose name contains the term, at most `cap`, best first: the
+    /// whole name, then the term standing on its own, then with other
+    /// separators, then inside a longer word. Candidates are read in index
+    /// order and classified here (Unicode case-insensitively), so a common
+    /// fragment (`Thumbs`, `_ACTIVIT`) cannot fill the cap with partial
+    /// matches before the exact ones are seen. Three or more letters and
+    /// digits use the trigram index; fewer scan the name index.
+    fn names_containing(&self, term: &Term, scope: &Scope, cap: usize) -> Result<Vec<NameRow>> {
+        let lit = fold_form(term.literal());
+        let n = lit.chars().count();
+        // A pre-filter in SQL, so rows that cannot match are skipped cheaply:
+        // the text as typed (wildcards, or fewer than three letters and
+        // digits), else its letters and digits in order. LIKE folds ASCII
+        // case only, so other text uses GLOB with both cases of each letter.
+        let spread = !term.has_wildcards() && n > 2;
+        // `{c}` stands for the name column; the pattern is bound as ?2.
+        let (filter, pat): (String, String) = if term.raw.is_ascii() {
+            let body = if term.has_wildcards() {
+                like_glob(&term.raw)
+            } else if spread {
+                term.sep.chars().map(|c| like_escape(&c.to_string())).collect::<Vec<_>>().join("%")
+            } else {
+                like_escape(&term.raw)
+            };
+            ("{c} LIKE ?2 ESCAPE '\\'".into(), format!("%{body}%"))
+        } else if let Some(v) = (n <= 2 && !term.has_wildcards()).then(|| case_variants(&term.raw)).flatten() {
+            // A short term is a scan of every name: plain substring tests of
+            // each spelling are much faster than a GLOB with letter classes.
+            let tests: Vec<String> = v.iter().map(|s| format!("instr({{c}}, '{}')>0", s.replace('\'', "''"))).collect();
+            (format!("?2='' AND ({})", tests.join(" OR ")), String::new())
+        } else {
+            let body = if spread { term.sep.chars().map(|c| glob_char(c, false)).collect::<Vec<_>>().join("*") } else { term.raw.chars().map(|c| glob_char(c, term.has_wildcards())).collect() };
+            ("{c} GLOB ?2".into(), format!("*{body}*"))
+        };
+        let mut best: [Vec<NameRow>; 4] = Default::default();
+        let mut take = |row: NameRow| -> bool {
+            if let Some(d) = term.explain_name(&row.1, &row.2) {
+                let b = if term.is_whole_name(&row.1, &row.2) {
+                    0
+                } else {
+                    match d.class {
+                        MatchClass::Exact => 1,
+                        MatchClass::SeparatorsIgnored => 2,
+                        _ => 3,
+                    }
+                };
+                if best[b].len() < cap {
+                    best[b].push(row);
+                }
+            }
+            // Enough of the best kinds: stop reading.
+            best[0].len() + best[1].len() >= cap
+        };
+        let gone = format!("f.read_state<>{}", state::GONE);
+        let mut scanned = 0usize;
+        if n >= 3 {
+            let (where_, sp) = scope.sql_from(2);
+            let sql = format!("SELECT f.id, f.name, f.path FROM names JOIN files f ON f.id=names.rowid WHERE names MATCH ?1 AND ({}) AND {gone}{where_}", filter.replace("{c}", "f.name"));
+            let mut st = self.conn.prepare_cached(&sql)?;
+            let mut args: Vec<rusqlite::types::Value> = vec![format!("fold : {}", fts_phrase(&lit)).into(), pat.into()];
+            args.extend(sp.into_iter().map(Into::into));
+            for r in st.query_map(params_from_iter(args), name_row)? {
+                scanned += 1;
+                if take(r?) || scanned >= NAME_SCAN_BUDGET {
+                    break;
+                }
+            }
+        } else {
+            // Below what the trigram index can look up: scan the name index
+            // (names only, much smaller than the table). One or two
+            // characters are in a large share of all names, so reading
+            // stops sooner.
+            let (where_, sp) = scope.sql_from(2);
+            let sql = format!("SELECT f.id, f.name, f.path FROM files n INDEXED BY files_name JOIN files f ON f.id=n.id WHERE ?1 IS NULL AND ({}) AND {gone}{where_}", filter.replace("{c}", "n.name"));
+            let mut st = self.conn.prepare_cached(&sql)?;
+            let mut args: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Null, pat.into()];
+            args.extend(sp.into_iter().map(Into::into));
+            for r in st.query_map(params_from_iter(args), name_row)? {
+                scanned += 1;
+                if take(r?) || scanned >= SHORT_SCAN_BUDGET {
+                    break;
+                }
+            }
+        }
+        let mut out: Vec<NameRow> = best.into_iter().flatten().collect();
+        out.truncate(cap);
+        Ok(out)
+    }
+
+    /// Files whose path starts with `prefix` (the unique path index).
+    fn paths_with_prefix(&self, prefix: &str, scope: &Scope, cap: usize) -> Result<Vec<NameRow>> {
+        let (where_, sp) = scope.sql_from(3);
+        let sql = format!("SELECT f.id, f.name, f.path FROM files f WHERE f.path >= ?1 AND f.path < ?2 AND f.read_state<>{}{where_} LIMIT ?3", state::GONE);
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let mut args: Vec<rusqlite::types::Value> = vec![prefix.to_string().into(), format!("{prefix}\u{10FFFF}").into(), (cap as i64).into()];
+        args.extend(sp.into_iter().map(Into::into));
+        Ok(st.query_map(params_from_iter(args), name_row)?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Files in (or below) folders whose path contains `fragment` (`*` and
+    /// `?` allowed).
+    fn files_under_dirs(&self, fragment: &str, scope: &Scope, cap: usize) -> Result<Vec<NameRow>> {
+        if sep_form(fragment).is_empty() {
+            return Ok(Vec::new());
+        }
+        let dirs: Vec<String> = {
+            // LIKE folds ASCII case only; GLOB with both cases otherwise.
+            let (sql, pat) = if fragment.is_ascii() {
+                ("SELECT path FROM dirs WHERE path LIKE ?1 ESCAPE '\\' LIMIT 2000", format!("%{}%", like_glob(fragment)))
+            } else {
+                ("SELECT path FROM dirs WHERE path GLOB ?1 LIMIT 2000", format!("*{}*", fragment.chars().map(|c| glob_char(c, true)).collect::<String>()))
+            };
+            let mut st = self.conn.prepare_cached(sql)?;
+            st.query_map([pat], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+        };
+        let (where_, sp) = scope.sql_from(2);
+        let sql = format!("SELECT f.id, f.name, f.path FROM files f WHERE f.dir=?1 AND f.read_state<>{}{where_} LIMIT ?2", state::GONE);
+        let mut st = self.conn.prepare_cached(&sql)?;
+        let mut out = Vec::new();
+        for d in dirs {
+            if out.len() >= cap {
+                break;
+            }
+            let mut args: Vec<rusqlite::types::Value> = vec![d.into(), ((cap - out.len()) as i64).into()];
+            args.extend(sp.iter().cloned().map(Into::into));
+            for r in st.query_map(params_from_iter(args), name_row)? {
+                out.push(r?);
+            }
+        }
         Ok(out)
     }
 
@@ -828,8 +1311,8 @@ impl Store {
     pub fn metadata(&self, file_id: i64) -> Result<DrawingMeta> {
         Ok(self
             .conn
+            .prepare_cached("SELECT drawing_no, title, revision, project, discipline, sheet, status, evidence FROM drawing_metadata WHERE file_id=?1")?
             .query_row(
-                "SELECT drawing_no, title, revision, project, discipline, sheet, status, evidence FROM drawing_metadata WHERE file_id=?1",
                 [file_id],
                 |r| {
                     Ok(DrawingMeta {
@@ -878,7 +1361,32 @@ impl Store {
     /// PDFs under the office server's folders are left to the server.
     pub fn apply_scopes(&self, scopes: &[String], office: &[String]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("UPDATE files SET read_state=?1 WHERE read_state IN (?2, ?3)", params![state::UNREAD, state::WAITING, state::OFFICE])?;
+        // Only the files whose state changes are written: resetting every
+        // waiting PDF and setting it back rewrote tens of thousands of rows
+        // at every start, holding the index for minutes on a hard disk.
+        let inside = |dir: &str, folders: &[String]| {
+            let d = dir.to_lowercase();
+            folders.iter().any(|f| {
+                let f = f.trim_end_matches('\\').to_lowercase();
+                d == f || d.starts_with(&format!("{f}\\"))
+            })
+        };
+        let leaving: Vec<i64> = {
+            let mut st = tx.prepare("SELECT id, dir, read_state FROM files WHERE read_state IN (?1, ?2)")?;
+            let rows = st.query_map(params![state::WAITING, state::OFFICE], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, dir, st) = row?;
+                let keep = if st == state::OFFICE { inside(&dir, office) } else { inside(&dir, scopes) && !inside(&dir, office) };
+                if !keep {
+                    out.push(id);
+                }
+            }
+            out
+        };
+        for id in leaving {
+            tx.execute("UPDATE files SET read_state=?1 WHERE id=?2", params![state::UNREAD, id])?;
+        }
         for s in scopes {
             let s = s.trim_end_matches('\\');
             tx.execute(
@@ -1105,6 +1613,181 @@ mod tests {
         assert!(s.search_names(&parse_query("old")[0], &Scope::default(), 10).unwrap().is_empty());
     }
 
+    /// The user's index: names of every type, two copies of one iso on the share.
+    fn office_names() -> Store {
+        let s = Store::open_in_memory().unwrap();
+        let share = r"\\10.0.0.54\docs-latest\00_DOCUMENTS\Isometrics\Rev-1";
+        for (dir, name, st) in [
+            (r"D:", "FSK_Piping-Layout and GAD-Final Submission.zip", state::NOT_PDF),
+            (r"D:", "FSK As-Built request_18-Sep-2026.xlsx", state::NOT_PDF),
+            (r"D:\lots", "FSK_Batch-1.zip", state::NOT_PDF),
+            (r"D:\lots", "FSK_Batch-12.zip", state::NOT_PDF),
+            (r"D:\lots", "Other FS notes.dwg", state::NOT_PDF),
+            (r"D:\lots", "FS", state::NOT_PDF),
+            (r"\\10.0.0.20\Project\P20002-14-01-63-1636\MAIN DOC", "P20002-14-01-63-1636-REV.2.xlsx", state::NOT_PDF),
+            (r"\\10.0.0.20\Project\P20002-14-01-63-1636\RELATED FILES", "CRS-14-01-63-1636_1.pdf", state::UNREAD),
+            (r"\\10.0.0.20\Project\x", "ISO-1636.pdf", state::UNREAD),
+            (format!(r"{share}\26-02-2024\14-01-15-2632").as_str(), "14-01-15-2632_PSV-2809-01_HOLD.pdf", state::UNREAD),
+            (format!(r"{share}\26-02-2024\ISOMETRIC ISSUANCE_26-FEB-2024\14-01-15-2632").as_str(), "14-01-15-2632_PSV-2809-01_HOLD.pdf", state::UNREAD),
+            (r"C:\x", "notes.txt", state::NOT_PDF),
+        ] {
+            s.touch_dir(dir, None, 1).unwrap();
+            s.upsert_file(&format!(r"{dir}\{name}"), dir, name, 1, 1, 1, st).unwrap();
+        }
+        s
+    }
+
+    fn names(s: &Store, q: &str) -> Vec<(String, MatchClass)> {
+        let t = &parse_query(q)[0];
+        s.search_names(t, &Scope::default(), 100).unwrap().into_iter().map(|c| (c.text, c.class)).collect()
+    }
+
+    #[test]
+    fn names_like_everything_any_length_and_type() {
+        let s = office_names();
+        // exact name with punctuation, a zip: the whole name first, then longer names
+        let r = names(&s, "FSK_Batch-1");
+        assert_eq!(r[0], ("FSK_Batch-1.zip".into(), MatchClass::Exact));
+        assert!(r.contains(&("FSK_Batch-12.zip".into(), MatchClass::Partial)));
+        // separators differ
+        assert_eq!(names(&s, "FSKBatch1")[0], ("FSK_Batch-1.zip".into(), MatchClass::SeparatorsIgnored));
+        // three letters: zip, xlsx; never notes.txt
+        let r = names(&s, "FSK");
+        assert_eq!(r.iter().filter(|(_, c)| *c == MatchClass::Exact).count(), 4, "{r:?}");
+        assert_eq!(r.len(), 4, "{r:?}");
+        // two letters (below the trigram index) and one
+        let r = names(&s, "FS");
+        assert_eq!(r[0], ("FS".into(), MatchClass::Exact), "a file named exactly FS first: {r:?}");
+        assert!(r.contains(&("Other FS notes.dwg".into(), MatchClass::Exact)));
+        assert!(r.contains(&("FSK_Batch-1.zip".into(), MatchClass::Partial)));
+        assert_eq!(r.len(), 6, "{r:?}");
+        assert!(names(&s, "x").iter().any(|(n, _)| n == "P20002-14-01-63-1636-REV.2.xlsx"));
+        // digits, any type
+        let r = names(&s, "1636");
+        assert_eq!(r.len(), 3, "{r:?}");
+        assert!(r.iter().all(|(_, c)| *c == MatchClass::Exact));
+        // wildcards: whole name first, part of a name after
+        let r = names(&s, "*1636");
+        assert_eq!(r[0], ("ISO-1636.pdf".into(), MatchClass::Exact), "{r:?}");
+        assert_eq!(r.len(), 3, "{r:?}");
+        let r = names(&s, "fsk_batch-?.zip");
+        assert_eq!(r, vec![("FSK_Batch-1.zip".into(), MatchClass::Exact)]);
+        assert_eq!(names(&s, "*.dwg"), vec![("Other FS notes.dwg".into(), MatchClass::Exact)]);
+        assert_eq!(names(&s, "PSV").len(), 2);
+    }
+
+    #[test]
+    fn names_by_path() {
+        let s = office_names();
+        let full = r"\\10.0.0.54\docs-latest\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf";
+        let t = Term::new(full).unwrap();
+        let r = s.search_names(&t, &Scope::default(), 10).unwrap();
+        assert_eq!(r.len(), 1, "only that copy, not the one in ISSUANCE: {r:?}");
+        assert_eq!(r[0].class, MatchClass::Exact);
+        // relative pieces of a path, with and without the name
+        let r = names(&s, r"14-01-15-2632\14-01-15-2632_PSV");
+        assert_eq!(r.len(), 2, "{r:?}");
+        let r = names(&s, r"26-02-2024\14-01-15-2632\");
+        assert_eq!(r.len(), 1, "{r:?}");
+        let r = names(&s, r#""MAIN DOC\""#);
+        assert_eq!(r, vec![("P20002-14-01-63-1636-REV.2.xlsx".into(), MatchClass::Exact)]);
+        assert_eq!(names(&s, r"\\10.0.0.20\project\*.pdf").len(), 2);
+    }
+
+    #[test]
+    fn several_words_in_name_or_path() {
+        let s = office_names();
+        let q = parse_query("ISSUANCE PSV-2809 hold");
+        let r = s.search_names_all(&q, &Scope::default(), 10).unwrap();
+        assert_eq!(r.len(), 1, "{r:?}");
+        assert!(r[0].why.contains("folder path"));
+        assert_eq!(s.search_names_all(&parse_query("FSK zip"), &Scope::default(), 10).unwrap().len(), 3);
+        assert!(s.search_names_all(&parse_query("FSK dwg"), &Scope::default(), 10).unwrap().is_empty());
+    }
+
+    fn store_of(names: &[&str]) -> Store {
+        let s = Store::open_in_memory().unwrap();
+        for (i, n) in names.iter().enumerate() {
+            let dir = format!(r"C:\d{i}");
+            s.upsert_file(&format!(r"{dir}\{n}"), &dir, n, 1, 1, 1, state::NOT_PDF).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn punctuation_and_short_literal_names() {
+        let s = store_of(&["a_b.pdf", "a&b.dwg", "ab.pdf", "PSV-1.pdf", "PSV-12.pdf", "PSV1.pdf", "1.pdf"]);
+        let r = names(&s, "_");
+        assert_eq!(r, vec![("a_b.pdf".into(), MatchClass::Exact)]);
+        assert_eq!(names(&s, "&"), vec![("a&b.dwg".into(), MatchClass::Exact)]);
+        let r = names(&s, "-1");
+        assert_eq!(r, vec![("PSV-1.pdf".into(), MatchClass::Exact), ("PSV-12.pdf".into(), MatchClass::Partial)], "the dash is required");
+    }
+
+    #[test]
+    fn names_match_unicode_case() {
+        let s = store_of(&["Обычный.pmvx", "Įprastasis.pmvx", "ОБЫЧНЫЙ отчёт.xlsx", "Ob.pdf"]);
+        let r = names(&s, "обычный");
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!(r[0], ("Обычный.pmvx".into(), MatchClass::Exact), "the whole name first");
+        assert_eq!(names(&s, "įprastasis"), vec![("Įprastasis.pmvx".into(), MatchClass::Exact)]);
+        assert_eq!(names(&s, "ĮPRAST").len(), 1);
+        // fewer than three letters, too
+        assert_eq!(names(&s, "об").len(), 2);
+        assert_eq!(names(&s, "į").len(), 1);
+        assert_eq!(names(&s, "ob").len(), 1);
+        // and folder paths
+        let s2 = Store::open_in_memory().unwrap();
+        s2.touch_dir(r"C:\Отчёты", None, 1).unwrap();
+        s2.upsert_file(r"C:\Отчёты\a.pdf", r"C:\Отчёты", "a.pdf", 1, 1, 1, state::NOT_PDF).unwrap();
+        assert_eq!(s2.search_names_all(&parse_query("ОТЧЁТЫ a"), &Scope::default(), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_name_search_leaves_no_read_transaction_open() {
+        // A long-lived search connection must not stop WAL checkpoints.
+        let dir = std::env::temp_dir().join(format!("sl-wal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("index.db");
+        let w = Store::open(&p).unwrap();
+        for i in 0..50 {
+            w.upsert_file(&format!(r"C:\d\Thumbs{i}.db"), r"C:\d", &format!("Thumbs{i}.db"), 1, 1, 1, state::NOT_PDF).unwrap();
+        }
+        let r = Store::open(&p).unwrap();
+        for q in ["Thumbs", "th", "_", "Thumbs1 db"] {
+            let terms = parse_query(q);
+            r.search_names(&terms[0], &Scope::default(), 2).unwrap();
+            r.search_names_all(&terms, &Scope::default(), 2).unwrap();
+        }
+        assert!(r.conn.is_autocommit());
+        w.upsert_file(r"C:\d\new.db", r"C:\d", "new.db", 1, 1, 1, state::NOT_PDF).unwrap();
+        let busy: i64 = w.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0)).unwrap();
+        assert_eq!(busy, 0, "a reader still holds a snapshot");
+        drop((r, w));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn common_fragment_keeps_exact_names_before_the_cap() {
+        // Many partial matches first in the index, the exact ones last.
+        let mut list: Vec<String> = (0..300).map(|i| format!("X_ACTIVITY{i}.log")).collect();
+        list.extend(["Thumbs.db".to_string(), "PLAN_ACTIVIT_A.pdf".to_string()]);
+        list.extend((0..300).map(|i| format!("Thumbsnail{i}.png")));
+        list.push("old Thumbs.db".into());
+        let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+        let s = store_of(&refs);
+        let t = &parse_query("_ACTIVIT")[0];
+        let r = s.search_names(t, &Scope::default(), 5).unwrap();
+        assert_eq!(r[0].text, "PLAN_ACTIVIT_A.pdf");
+        assert_eq!(r[0].class, MatchClass::Exact);
+        let t = &parse_query("Thumbs")[0];
+        let r = s.search_names(t, &Scope::default(), 5).unwrap();
+        assert_eq!(r[0].text, "Thumbs.db");
+        assert_eq!(r[1].text, "old Thumbs.db");
+        assert_eq!(r.len(), 5);
+    }
+
     #[test]
     fn moved_file_keeps_its_reading() {
         let mut s = Store::open_in_memory().unwrap();
@@ -1173,7 +1856,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&p).unwrap();
-        assert_eq!(s.get_meta("schema").unwrap().as_deref(), Some("2"));
+        assert_eq!(s.get_meta("schema").unwrap(), Some(SCHEMA_LEVEL.to_string()));
         assert!(p.with_extension("v1.bak.db").exists(), "level-1 copy kept");
         let hits = s.search_lines(&parse_query("PSV-1203")[0], &Scope::default(), 5).unwrap();
         assert_eq!(hits.len(), 1, "old readings still searchable");
@@ -1223,5 +1906,39 @@ mod retry_tests {
         assert!(s.defer(id, "share offline", 2000, 3).unwrap());
         assert!(!s.defer(id, "share offline", 9000, 3).unwrap());
         assert_eq!(s.file_by_id(id).unwrap().unwrap().read_state, state::FAILED);
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::*;
+
+    #[test]
+    fn a_subfolder_seen_but_not_listed_is_not_taken_as_listed() {
+        let s = Store::open_in_memory().unwrap();
+        s.mark_listed(r"\srv\Project", None, 7).unwrap();
+        // Listing the root records its subfolder with the same pass...
+        s.touch_dir(r"\srv\Project\J100", Some(r"\srv\Project"), 7).unwrap();
+        // ...which must not make a resumed walk skip the subfolder's contents.
+        assert_eq!(s.listed_in_pass(r"\srv\Project\J100", 7).unwrap(), None);
+        assert_eq!(s.listed_in_pass(r"\srv\Project", 7).unwrap(), Some(vec![r"\srv\Project\J100".to_string()]));
+        s.mark_listed(r"\srv\Project\J100", Some(r"\srv\Project"), 7).unwrap();
+        assert_eq!(s.listed_in_pass(r"\srv\Project\J100", 7).unwrap(), Some(vec![]));
+        assert_eq!(s.listed_in_pass(r"\srv\Project\J100", 8).unwrap(), None, "another pass lists it again");
+    }
+
+    #[test]
+    fn scopes_given_as_network_paths_queue_pdfs_and_count_them() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_file(r"\srv\Project\J1\a.pdf", r"\srv\Project\J1", "a.pdf", 1, 1, 1, state::UNREAD).unwrap();
+        s.upsert_file(r"\srv\Project\b.pdf", r"\srv\Project", "b.pdf", 1, 1, 1, state::UNREAD).unwrap();
+        s.upsert_file(r"\srv\Projects\c.pdf", r"\srv\Projects", "c.pdf", 1, 1, 1, state::UNREAD).unwrap();
+        s.apply_scopes(&[r"\srv\project".to_string()], &[]).unwrap();
+        assert_eq!(s.scope_counts(r"\srv\Project").unwrap(), (2, 0, 2, 0));
+        assert_eq!(s.count_state(state::UNREAD).unwrap(), 1, "a sibling with a longer name is not inside the folder");
+        // Only asked-for files are claimed while the first walk runs.
+        assert!(s.claim_urgent(10, "t").unwrap().is_none());
+        assert!(s.request_read(r"\srv\Projects\c.pdf").unwrap());
+        assert_eq!(s.claim_urgent(10, "t").unwrap().unwrap().name, "c.pdf");
     }
 }

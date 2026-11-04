@@ -7,6 +7,7 @@ use crate::cache::{ClaimResult, SharedCache, check_cache, hash_file};
 use crate::crawl::{Entry, WalkConfig, WalkEvent, list_with_timeout, norm_dir, walk_resumable};
 use crate::derive::Deriver;
 use crate::models;
+use crate::namemem::NameMem;
 use crate::ocr::{Backend, OcrOptions, OcrReader, config_signature};
 use crate::reader::{ReadOptions, pipeline_fingerprint, read_pdf};
 use crate::remote;
@@ -28,6 +29,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
 pub type EventTx = tokio::sync::mpsc::UnboundedSender<Envelope<Event>>;
+
+/// Write-ahead log size at which writing waits for a checkpoint.
+const WAL_LIMIT: u64 = 512 * 1024 * 1024;
 
 /// Unread PDFs a single deep search may queue for reading.
 const DEEP_READ_LIMIT: usize = 400;
@@ -53,6 +57,55 @@ fn under(path_lower: &str, scopes: &[String]) -> bool {
         let s = s.trim_end_matches('\\').to_lowercase();
         path_lower == s || path_lower.starts_with(&format!("{s}\\"))
     })
+}
+
+/// A walked root as the user knows it: `Z:\ (\\server\Project)`.
+fn root_display(root: &str, drives: &DriveMap) -> String {
+    let shown = drives.to_display(root);
+    if shown.eq_ignore_ascii_case(root) { root.to_string() } else { format!("{shown} ({})", root.trim_end_matches('\\')) }
+}
+
+fn fmt_count(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Only a damaged file or one from a newer Sleuth justifies starting the
+/// index again; anything else (busy, locked, disk full) is passing.
+fn index_is_damaged(e: &anyhow::Error) -> bool {
+    if format!("{e:#}").contains("made by a newer Sleuth") {
+        return true;
+    }
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _)) if matches!(f.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+    })
+}
+
+/// Reading folders as stored paths, without duplicates.
+fn resolve_scopes(chosen: &[String], drives: &DriveMap) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in chosen {
+        let c = c.trim();
+        if c.is_empty() {
+            continue;
+        }
+        let unc = drives.to_unc(c);
+        let norm = crate::crawl::norm_dir(&unc);
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&norm)) {
+            out.push(norm);
+        }
+    }
+    out
 }
 
 fn join(dir: &str, name: &str) -> String {
@@ -95,6 +148,20 @@ struct Office {
     docs: HashMap<String, i64>,
 }
 
+/// Index counts for the status bar, refreshed by `stats_loop`.
+#[derive(Default, Clone)]
+struct CountSnap {
+    walk_complete: i64,
+    roots: Vec<IndexRoot>,
+    all: u64,
+    read: u64,
+    waiting: u64,
+    failed: u64,
+    unread: u64,
+    scopes: Vec<ScopeProgress>,
+    fails: Vec<Failed>,
+}
+
 /// How a reading job ended.
 enum Outcome {
     Read(u32),
@@ -118,6 +185,10 @@ pub struct Engine {
     indexer_signal: Signal,
     cache_signal: Signal,
     office_signal: Signal,
+    stats_signal: Signal,
+    /// Every file name in memory, for name searches (see `namemem`).
+    names: Arc<NameMem>,
+    counts: Mutex<CountSnap>,
     cache: Mutex<CacheCheck>,
     waiting: Mutex<HashMap<String, Vec<Waiter>>>,
     searches: Mutex<HashMap<u64, Arc<AtomicBool>>>,
@@ -140,6 +211,9 @@ pub struct Engine {
     full_walk: AtomicBool,
     /// Runs as the office server: no office client, roots from settings.
     pub server_mode: bool,
+    /// One long-lived read connection for searches, so its page cache stays
+    /// warm (`None` until first use, and again after an error).
+    search_store: Mutex<Option<Store>>,
 }
 
 impl Engine {
@@ -163,6 +237,9 @@ impl Engine {
             indexer_signal: Signal::default(),
             cache_signal: Signal::default(),
             office_signal: Signal::default(),
+            stats_signal: Signal::default(),
+            names: Arc::new(NameMem::default()),
+            counts: Mutex::new(CountSnap::default()),
             cache: Mutex::new(CacheCheck::default()),
             waiting: Mutex::new(HashMap::new()),
             searches: Mutex::new(HashMap::new()),
@@ -182,13 +259,40 @@ impl Engine {
             office: Mutex::new(Office::default()),
             full_walk: AtomicBool::new(true),
             server_mode,
+            search_store: Mutex::new(None),
         })
     }
 
+    /// The index, with the in-memory names attached so every file it adds or
+    /// forgets is applied to them too.
     pub fn open_store(&self) -> Result<Store> {
-        match Store::open(&self.db_path) {
-            Ok(s) => Ok(s),
-            Err(e) => {
+        let mut s = self.open_index()?;
+        s.mem = Some(Arc::clone(&self.names));
+        Ok(s)
+    }
+
+    fn open_index(&self) -> Result<Store> {
+        let mut last = None;
+        for attempt in 0..5u64 {
+            match Store::open(&self.db_path) {
+                Ok(s) => return Ok(s),
+                // Busy, locked, out of disk space, no access: the index is
+                // fine and must never be thrown away for it. Try again.
+                Err(e) if !index_is_damaged(&e) => {
+                    warn!("cannot open the index yet: {e:#}");
+                    last = Some(e);
+                    std::thread::sleep(Duration::from_secs(1 + attempt * 2));
+                }
+                Err(e) => {
+                    last = Some(e);
+                    break;
+                }
+            }
+        }
+        match last {
+            None => Store::open(&self.db_path),
+            Some(e) if !index_is_damaged(&e) => Err(e),
+            Some(e) => {
                 // Damaged or newer-format index: move it aside and start fresh.
                 warn!("index unusable ({e:#}); rebuilding");
                 let aside = self.db_path.with_extension(format!("broken-{}.db", now()));
@@ -221,6 +325,10 @@ impl Engine {
         std::thread::Builder::new().name("sleuth-reader".into()).spawn(move || e.reader_loop())?;
         let e = Arc::clone(self);
         std::thread::Builder::new().name("sleuth-cache".into()).spawn(move || e.cache_loop())?;
+        let e = Arc::clone(self);
+        std::thread::Builder::new().name("sleuth-stats".into()).spawn(move || e.stats_loop())?;
+        let e = Arc::clone(self);
+        std::thread::Builder::new().name("sleuth-names".into()).spawn(move || e.load_names())?;
         if !self.server_mode {
             let e = Arc::clone(self);
             std::thread::Builder::new().name("sleuth-office".into()).spawn(move || e.office_loop())?;
@@ -234,6 +342,7 @@ impl Engine {
         self.indexer_signal.raise();
         self.cache_signal.raise();
         self.office_signal.raise();
+        self.stats_signal.raise();
         for flag in self.searches.lock().unwrap().values() {
             flag.store(true, Ordering::SeqCst);
         }
@@ -263,14 +372,22 @@ impl Engine {
             self.reader_signal.raise();
         }
         if old.content_scopes != s.content_scopes {
-            store.apply_scopes(&s.content_scopes, &self.office_roots())?;
+            store.apply_scopes(&self.read_scopes(), &self.office_roots())?;
             self.reader_signal.raise();
         }
         if old.server != s.server {
             self.office_signal.raise();
         }
+        self.stats_signal.raise();
         self.changed();
         Ok(())
+    }
+
+    fn set_reader_note(&self, note: &str) {
+        let mut st = self.status.lock().unwrap();
+        if st.reader_note != note {
+            st.reader_note = note.into();
+        }
     }
 
     fn set_reader_state(&self, s: &str, file: Option<String>) {
@@ -279,9 +396,70 @@ impl Engine {
         st.current_file = file;
     }
 
-    pub fn status(&self) -> Result<(Status, Vec<Failed>)> {
-        let store = self.open_store()?;
+    /// Read every file name into memory; until it is done name searches use
+    /// the index on disk.
+    fn load_names(self: Arc<Self>) {
+        let t = Instant::now();
+        match self.open_index().and_then(|s| self.names.load(&s)) {
+            Ok(n) => {
+                info!("{n} file names in memory after {} ms", t.elapsed().as_millis());
+                self.changed();
+            }
+            Err(e) => warn!("file names not loaded into memory (searching the index instead): {e:#}"),
+        }
+    }
+
+    /// Counting a big index takes seconds on a slow disk, so the counts are
+    /// kept up to date by their own thread and `status` only copies them.
+    fn stats_loop(self: Arc<Self>) {
+        crate::sys::enter_background_mode();
+        while !self.shutdown.load(Ordering::SeqCst) {
+            let started = Instant::now();
+            match self.open_store().and_then(|store| self.count_now(&store)) {
+                Ok(snap) => *self.counts.lock().unwrap() = snap,
+                Err(e) => warn!("counting the index: {e:#}"),
+            }
+            // Never spend more than a fifth of the time counting.
+            let spent = started.elapsed();
+            self.stats_signal.wait((spent * 5).clamp(Duration::from_secs(2), Duration::from_secs(60)));
+        }
+    }
+
+    fn count_now(&self, store: &Store) -> Result<CountSnap> {
         let (all, read, waiting, failed) = store.counts()?;
+        let walk_complete: i64 = store.get_meta("walk_complete")?.and_then(|v| v.parse().ok()).unwrap_or(0);
+        let first_walk = walk_complete == 0;
+        let drives = self.drives.read().unwrap().clone();
+        // Before the first walk of this session: the drives as last walked.
+        let roots = store
+            .root_scans()?
+            .into_iter()
+            .map(|(root, state, last_ok, note)| IndexRoot {
+                display: root_display(&root, &drives),
+                root,
+                // An unfinished first walk's old dates prove nothing.
+                state: if first_walk { "waiting".into() } else if state == "ok" { "done".into() } else { state },
+                last_ok,
+                note,
+                ..Default::default()
+            })
+            .collect();
+        Ok(CountSnap {
+            walk_complete,
+            roots,
+            all,
+            read,
+            waiting,
+            failed,
+            unread: store.count_state(state::UNREAD)?,
+            scopes: self.scope_progress(store, first_walk),
+            fails: store.failures(50)?.into_iter().map(|(path, reason)| Failed { path, reason }).collect(),
+        })
+    }
+
+    pub fn status(&self) -> Result<(Status, Vec<Failed>)> {
+        let snap = self.counts.lock().unwrap().clone();
+        let (all, read, waiting, failed) = (snap.all, snap.read, snap.waiting, snap.failed);
         let mut st = self.status.lock().unwrap().clone();
         st.files_indexed = all;
         st.pdfs_read = read;
@@ -292,10 +470,65 @@ impl Engine {
             log.pop_front();
         }
         st.pages_per_hour = log.iter().map(|(_, n)| *n as u64).sum();
+        // Time left: waiting PDFs at the pace of the PDFs read in the last
+        // hour; unknown until a few were read.
+        st.reading_eta_secs = match (log.front(), log.len()) {
+            (Some((first, _)), n) if n >= 3 && waiting > 0 => {
+                let secs = first.elapsed().as_secs_f64().max(60.0);
+                (waiting as f64 * secs / n as f64) as u64
+            }
+            _ => 0,
+        };
+        drop(log);
+        st.pdfs_unread = snap.unread;
+        let walk_complete = snap.walk_complete;
+        st.index.first_walk = walk_complete == 0;
+        st.index.last_complete = walk_complete;
+        if st.index.phase.is_empty() {
+            st.index.phase = "starting".into();
+        }
+        if st.index.roots.is_empty() {
+            st.index.roots = snap.roots;
+        }
+        let mins = self.settings.read().unwrap().name_rescan_minutes.max(15) as i64;
+        st.index.next_walk = if st.index.pass_started == 0 && walk_complete > 0 { walk_complete + mins * 60 } else { 0 };
+        st.scopes = snap.scopes;
+        if st.index.first_walk && st.reader_state == "waiting" {
+            st.reader_note = format!("Reading starts when the file list is complete ({} files found so far).", fmt_count(all));
+        }
         st.cache = self.cache.lock().unwrap().clone();
         st.server = self.office.lock().unwrap().status.clone();
-        let fails = store.failures(50)?.into_iter().map(|(path, reason)| Failed { path, reason }).collect();
-        Ok((st, fails))
+        Ok((st, snap.fails))
+    }
+
+    /// Each reading folder with its PDF counts and anything that stops it.
+    fn scope_progress(&self, store: &Store, first_walk: bool) -> Vec<ScopeProgress> {
+        let chosen = {
+            let s = self.settings.read().unwrap();
+            s.index_roots.clone().unwrap_or_else(|| s.content_scopes.clone())
+        };
+        let drives = self.drives.read().unwrap().clone();
+        let roots = self.status.lock().unwrap().index.roots.clone();
+        chosen
+            .iter()
+            .map(|folder| {
+                let unc = norm_dir(&drives.to_unc(folder.trim()));
+                let letter_unmapped = folder.len() >= 2 && folder.as_bytes()[1] == b':' && drives.drives.iter().all(|d| !d.letter.eq_ignore_ascii_case(&folder[..2]));
+                let (pdfs, read, waiting, failed) = store.scope_counts(&unc).unwrap_or_default();
+                let lower = unc.to_lowercase();
+                let offline = roots.iter().any(|r| r.state == "offline" && lower.starts_with(r.root.trim_end_matches('\\').to_lowercase().as_str()));
+                let note = if letter_unmapped {
+                    "not mapped"
+                } else if offline {
+                    "offline"
+                } else if pdfs == 0 && first_walk {
+                    "not indexed yet"
+                } else {
+                    "ok"
+                };
+                ScopeProgress { folder: folder.clone(), unc: if letter_unmapped { String::new() } else { unc }, pdfs, read, waiting, failed, note: note.into() }
+            })
+            .collect()
     }
 
     /// Re-check the shared cache every 2 minutes, and at once after settings change.
@@ -336,16 +569,26 @@ impl Engine {
                 !excluded.iter().any(|x| *x == letter || (!unc.is_empty() && *x == unc))
             })
             .map(|d| d.root())
-            .collect()
+            // Two letters for one share (or for aliases of it): walk it once.
+            .fold(Vec::<String>::new(), |mut out, r| {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&r)) {
+                    out.push(r);
+                }
+                out
+            })
     }
 
-    /// Folders whose PDFs this engine reads.
+    /// Folders whose PDFs this engine reads, as the network paths the index
+    /// stores: a mapped letter (`Z:\`) becomes its share
+    /// (`\\server\Project`), or no PDF under it would ever be queued.
     fn read_scopes(&self) -> Vec<String> {
         let s = self.settings.read().unwrap();
-        match &s.index_roots {
+        let drives = self.drives.read().unwrap();
+        let chosen = match &s.index_roots {
             Some(r) => r.clone(),
             None => s.content_scopes.clone(),
-        }
+        };
+        resolve_scopes(&chosen, &drives)
     }
 
     fn office_roots(&self) -> Vec<String> {
@@ -355,15 +598,30 @@ impl Engine {
 
     /// Record one folder listing. Returns how many PDFs were queued.
     fn ingest(&self, store: &Store, dir: &str, entries: &[Entry], pass: i64, scopes: &[String], office: &[String]) -> Result<usize> {
-        store.conn.execute_batch("BEGIN")?;
+        // IMMEDIATE takes the write lock up front (waiting for it if need
+        // be): a deferred transaction that reads first fails at once with
+        // "database is locked" when another write slipped in meanwhile.
+        store.conn.execute_batch("BEGIN IMMEDIATE")?;
         let r = (|| -> Result<usize> {
             let parent = Path::new(dir).parent().map(|p| norm_dir(&p.to_string_lossy()));
-            store.touch_dir(dir, parent.as_deref().filter(|p| *p != dir), pass)?;
             let mut queued = 0;
-            for e in entries {
+            // What the index already holds here: an unchanged file is not
+            // written at all, so a walk of an unchanged drive writes almost
+            // nothing (stamping every row each walk wrote gigabytes).
+            let mut known = store.dir_files(dir)?;
+            let mut known_dirs: HashMap<String, String> = store.dir_children(dir)?.into_iter().collect();
+            let open = |s: i64| matches!(s, state::WAITING | state::UNREAD | state::OFFICE);
+            for (i, e) in entries.iter().enumerate() {
+                // A folder of many thousand files is written in parts, so the
+                // reader and the app are not locked out of the index meanwhile.
+                if i > 0 && i % 2000 == 0 {
+                    store.conn.execute_batch("COMMIT; BEGIN IMMEDIATE")?;
+                }
                 let path = join(dir, &e.name);
                 if e.is_dir {
-                    store.touch_dir(&path, Some(dir), pass)?;
+                    if known_dirs.remove(&path.to_lowercase()).is_none() {
+                        store.touch_dir(&path, Some(dir), pass)?;
+                    }
                     continue;
                 }
                 let wanted = if !is_pdf(&e.name) {
@@ -378,12 +636,32 @@ impl Engine {
                         state::UNREAD
                     }
                 };
+                if let Some((_, size, mtime, st)) = known.remove(&e.name.to_lowercase())
+                    && size == e.size
+                    && mtime == e.mtime
+                    && st != state::GONE
+                    && (st == wanted || !(open(st) && open(wanted)))
+                {
+                    continue;
+                }
                 let (_, changed) = store.upsert_file(&path, dir, &e.name, e.size, e.mtime, pass, wanted)?;
                 if changed && wanted == state::WAITING {
                     queued += 1;
                 }
             }
-            store.reconcile_dir(dir, pass, now())?;
+            // Marked listed only with its last part: a walk stopped half-way
+            // through lists the folder again.
+            store.mark_listed(dir, parent.as_deref().filter(|p| *p != dir), pass)?;
+            // Whatever the listing no longer shows was deleted or moved.
+            let t = now();
+            for (id, _, _, st) in known.into_values() {
+                if st != state::GONE {
+                    store.delete_file(id, t)?;
+                }
+            }
+            for gone in known_dirs.into_values() {
+                store.delete_tree(&gone, t)?;
+            }
             Ok(queued)
         })();
         match r {
@@ -403,8 +681,35 @@ impl Engine {
     fn indexer_loop(self: Arc<Self>) {
         crate::sys::enter_background_mode();
         let mut last_full: Option<Instant> = None;
+        let mut last_map: Option<Vec<(String, Option<String>)>> = None;
+        let mut retired: HashSet<String> = HashSet::new();
         while !self.shutdown.load(Ordering::SeqCst) {
-            *self.drives.write().unwrap() = DriveMap::current();
+            let t = Instant::now();
+            let mut map = DriveMap::current();
+            for (alias, kept) in map.merge_aliases(sleuth_core::paths::host_address) {
+                if retired.insert(alias.to_lowercase()) {
+                    info!("{alias} is the same share as {kept}: walked once, as {kept}");
+                    // Paths stored under the other name would show every
+                    // file twice; their readings stay a week for the copies.
+                    if let Ok(store) = self.open_store()
+                        && let Err(e) = store.forget_tree(&alias, now())
+                    {
+                        warn!("forget {alias}: {e:#}");
+                    }
+                }
+            }
+            if t.elapsed() > Duration::from_secs(5) {
+                info!("listing the drives took {} s", t.elapsed().as_secs());
+            }
+            let key: Vec<(String, Option<String>)> = map.drives.iter().map(|d| (d.letter.clone(), d.unc.clone())).collect();
+            *self.drives.write().unwrap() = map;
+            // At start and whenever a drive is mapped differently: reading
+            // folders given by letter point at another share now. This also
+            // repairs indexes made before letters were translated.
+            if last_map.as_ref() != Some(&key) {
+                self.reapply_scopes();
+                last_map = Some(key);
+            }
             let mins = self.settings.read().unwrap().name_rescan_minutes.max(15) as u64;
             let due = self.full_walk.swap(false, Ordering::SeqCst) || last_full.is_none_or(|t| t.elapsed() >= Duration::from_secs(mins * 60));
             // A bug in one pass must not stop indexing for the rest of the session.
@@ -535,12 +840,14 @@ impl Engine {
             _ => now(),
         };
         store.set_meta("pass", &format!("{pass}|running"))?;
+        self.begin_progress(pass, roots, store);
         let cfg = WalkConfig {
-            per_server: 2,
-            local_threads: 2,
+            per_server: s.listings_per_server.clamp(1, 16) as usize,
+            local_threads: 4,
             listing_timeout: Duration::from_secs(s.listing_timeout_secs.max(5) as u64),
             excluded: s.excluded.iter().map(|x| x.to_lowercase()).collect(),
             background: true,
+            first: scopes.iter().map(|x| x.to_lowercase()).collect(),
         };
         let (tx, rx) = std::sync::mpsc::sync_channel::<WalkEvent>(256);
         let resume_store = Mutex::new(self.open_store()?);
@@ -553,12 +860,31 @@ impl Engine {
                 let store = &*sink_store.lock().unwrap();
                 let mut since_wake = 0usize;
                 let mut since_bump = Instant::now();
+                let mut since_checkpoint = Instant::now();
                 for ev in rx {
+                    self.note_progress(&ev);
                     match ev {
-                        WalkEvent::Listed { dir, entries, .. } => match self.ingest(store, &dir, &entries, pass, scopes, office) {
-                            Ok(q) => since_wake += q,
-                            Err(e) => warn!("index {dir}: {e:#}"),
-                        },
+                        WalkEvent::Listed { root, dir, entries } => {
+                            // The index can be busy for a moment (the reader,
+                            // a search); a listing is never dropped for that.
+                            let mut result = self.ingest(store, &dir, &entries, pass, scopes, office);
+                            for attempt in 1..=4 {
+                                if result.is_ok() || self.shutdown.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_secs(attempt * 2));
+                                result = self.ingest(store, &dir, &entries, pass, scopes, office);
+                            }
+                            match result {
+                                Ok(q) => since_wake += q,
+                                Err(e) => {
+                                    // Not marked listed: the next walk lists it again.
+                                    warn!("index {dir}: {e:#}");
+                                    let _ = store.set_root_scan(&root, "partial", None, &format!("{dir}: not saved ({e})"));
+                                    self.note_progress(&WalkEvent::Skipped { root, dir, reason: format!("not saved: {e}") });
+                                }
+                            }
+                        }
                         WalkEvent::Skipped { root, dir, reason } => {
                             info!("skipped {dir}: {reason}");
                             let _ = store.set_root_scan(&root, "partial", None, &format!("{dir}: {reason}"));
@@ -581,6 +907,14 @@ impl Engine {
                         self.changed();
                         since_bump = Instant::now();
                     }
+                    // Readers (status counts, searches, the reader) keep the
+                    // automatic checkpoint from finishing, and the write-ahead
+                    // log then grows by gigabytes during a first walk.
+                    if since_checkpoint.elapsed() > Duration::from_secs(60) {
+                        self.checkpoint(store);
+                        since_checkpoint = Instant::now();
+                    }
+                    self.hold_while_log_full(store);
                 }
                 if since_wake > 0 {
                     self.reader_signal.raise();
@@ -592,10 +926,160 @@ impl Engine {
             });
             drop(tx);
         });
+        let completed = completed.into_inner().unwrap();
         if !self.shutdown.load(Ordering::SeqCst) {
             store.set_meta("pass", &format!("{pass}|done"))?;
+            // The first walk counts as finished once every reachable root
+            // was listed to the end; offline roots do not hold reading back.
+            store.set_meta("walk_complete", &now().to_string())?;
+            info!("name index: walk finished, {} of {} roots complete", completed.len(), roots.len());
         }
-        Ok(completed.into_inner().unwrap())
+        self.end_progress();
+        self.reader_signal.raise();
+        Ok(completed)
+    }
+
+    /// Fold the write-ahead log back into the index. A program that keeps
+    /// the index open in a long read stops this; say so instead of letting
+    /// the log grow unnoticed until the disk is full.
+    /// True when the log was folded back completely.
+    fn checkpoint(&self, store: &Store) -> bool {
+        let r = store.conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)));
+        let wal = self.wal_bytes();
+        match r {
+            Ok((0, _, _)) => return true,
+            Ok((_, log, done)) if wal > 512 * 1024 * 1024 => {
+                warn!("index log not folded back ({done} of {log} pages): {} MB; another program may hold the index open", wal / 1_048_576);
+                store.event(now(), "warn", &format!("The index's temporary log is {} MB and cannot be folded back while another program holds the index open.", wal / 1_048_576));
+            }
+            Ok(_) => {}
+            Err(e) => warn!("index checkpoint: {e:#}"),
+        }
+        false
+    }
+
+    fn wal_bytes(&self) -> u64 {
+        std::fs::metadata(self.db_path.with_extension("db-wal")).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Stop writing while the log is over its limit until it is folded back:
+    /// readers finish within seconds, and a full disk is far worse than a
+    /// short pause in the walk.
+    fn hold_while_log_full(&self, store: &Store) {
+        let mut waited = 0;
+        while self.wal_bytes() > WAL_LIMIT && !self.shutdown.load(Ordering::SeqCst) {
+            if self.checkpoint(store) {
+                break;
+            }
+            if waited == 0 {
+                info!("index log over {} MB: pausing the walk until it is folded back", WAL_LIMIT / 1_048_576);
+            }
+            waited += 1;
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+
+    /// Reset the walk progress shown in the status bar.
+    fn begin_progress(&self, pass: i64, roots: &[String], store: &Store) {
+        let drives = self.drives.read().unwrap().clone();
+        let known: HashMap<String, i64> = store.root_scans().unwrap_or_default().into_iter().map(|(r, _, ok, _)| (r.to_lowercase(), ok)).collect();
+        let mut st = self.status.lock().unwrap();
+        let p = &mut st.index;
+        p.phase = "walking".into();
+        p.pass_started = pass;
+        p.folders_listed = 0;
+        p.folders_pending = roots.len() as u64;
+        p.files_seen = 0;
+        p.roots = roots
+            .iter()
+            .map(|r| IndexRoot {
+                root: r.clone(),
+                display: root_display(r, &drives),
+                state: "waiting".into(),
+                last_ok: known.get(&r.to_lowercase()).copied().unwrap_or(0),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    fn note_progress(&self, ev: &WalkEvent) {
+        let mut st = self.status.lock().unwrap();
+        let p = &mut st.index;
+        let find = |p: &mut IndexProgress, root: &str| p.roots.iter().position(|r| r.root.eq_ignore_ascii_case(root));
+        match ev {
+            WalkEvent::Listed { root, entries, .. } => {
+                let dirs = entries.iter().filter(|e| e.is_dir).count() as u64;
+                let files = entries.len() as u64 - dirs;
+                p.folders_listed += 1;
+                p.folders_pending = (p.folders_pending + dirs).saturating_sub(1);
+                p.files_seen += files;
+                if let Some(i) = find(p, root) {
+                    let r = &mut p.roots[i];
+                    r.state = "walking".into();
+                    r.folders += 1;
+                    r.files += files;
+                }
+            }
+            WalkEvent::Skipped { root, dir, reason } => {
+                p.folders_pending = p.folders_pending.saturating_sub(1);
+                if let Some(i) = find(p, root) {
+                    let r = &mut p.roots[i];
+                    r.skipped += 1;
+                    r.note = format!("{} skipped, e.g. {dir}: {reason}", r.skipped);
+                }
+            }
+            WalkEvent::RootOffline { root, reason } => {
+                p.folders_pending = p.folders_pending.saturating_sub(1);
+                if let Some(i) = find(p, root) {
+                    let r = &mut p.roots[i];
+                    r.state = "offline".into();
+                    r.note = reason.clone();
+                }
+            }
+            WalkEvent::RootDone { root } => {
+                if let Some(i) = find(p, root) {
+                    let r = &mut p.roots[i];
+                    r.state = if r.skipped > 0 { "partial".into() } else { "done".into() };
+                    r.last_ok = now();
+                }
+            }
+        }
+    }
+
+    /// True when every drive holding a reading folder was listed to the end
+    /// in the running walk, so its PDFs are all queued.
+    fn reading_roots_listed(&self) -> bool {
+        let scopes = self.read_scopes();
+        let st = self.status.lock().unwrap();
+        if st.index.phase != "walking" {
+            return false;
+        }
+        scopes.iter().all(|sc| {
+            let lower = sc.to_lowercase();
+            let holder = st.index.roots.iter().find(|r| {
+                let root = r.root.trim_end_matches('\\').to_lowercase();
+                lower == root || lower.starts_with(&format!("{root}\\"))
+            });
+            // Offline is not listed: its PDFs are not all queued yet.
+            holder.is_none_or(|r| matches!(r.state.as_str(), "done" | "partial"))
+        })
+    }
+
+    fn end_progress(&self) {
+        let mut st = self.status.lock().unwrap();
+        let p = &mut st.index;
+        p.phase = "up to date".into();
+        p.pass_started = 0;
+        p.folders_pending = 0;
+        for r in &mut p.roots {
+            // Cancelled or never reached (shutdown) roots keep their old date.
+            if r.state == "waiting" || r.state == "walking" {
+                r.state = "partial".into();
+                if r.note.is_empty() {
+                    r.note = "walk stopped before the end".into();
+                }
+            }
+        }
     }
 
     // ---- office server ----------------------------------------------------
@@ -666,11 +1150,16 @@ impl Engine {
     fn reapply_scopes(&self) {
         let scopes = self.read_scopes();
         let office = self.office_roots();
-        if let Ok(store) = self.open_store()
-            && store.apply_scopes(&scopes, &office).is_ok()
-        {
-            self.changed();
-            self.reader_signal.raise();
+        let t = Instant::now();
+        let r = self.open_store().and_then(|store| store.apply_scopes(&scopes, &office));
+        match r {
+            Ok(()) => {
+                info!("reading folders applied in {} ms: {}", t.elapsed().as_millis(), scopes.join(", "));
+                self.changed();
+                self.reader_signal.raise();
+                self.stats_signal.raise();
+            }
+            Err(e) => warn!("reading folders not applied: {e:#}"),
         }
     }
 
@@ -736,6 +1225,7 @@ impl Engine {
         };
         let mut ocr: Option<Reader> = None;
         let mut last_used = Instant::now();
+        let mut last_checkpoint = Instant::now();
         let mut meter = CpuMeter::default();
         let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
         meter.others_percent();
@@ -744,24 +1234,36 @@ impl Engine {
             let s = self.settings.read().unwrap().clone();
             if !self.server_mode && on_battery() {
                 self.set_reader_state("paused: on battery", None);
+                self.set_reader_note("Reading is paused while the PC runs on battery.");
                 self.reader_signal.wait(Duration::from_secs(60));
                 continue;
             }
             let idle = if self.server_mode { u64::MAX } else { idle_seconds() };
             let others = meter.others_percent();
-            if !self.server_mode && others > s.busy_cpu_percent as f32 && idle < 120 {
-                self.set_reader_state("paused: PC busy", None);
-                self.reader_signal.wait(Duration::from_secs(5));
-                continue;
-            }
-            let job = match store.claim_next(now(), &owner) {
+            // A busy PC slows reading to one thread; it never stops it, or a
+            // PC that is always busy would never read anything.
+            let busy = !self.server_mode && others > s.busy_cpu_percent as f32 && idle < 120;
+            // File names first: during the first walk, only files someone
+            // asked for (a search, an open) are read until the drives holding
+            // the reading folders are listed to the end.
+            let first_walk = store.get_meta("walk_complete").ok().flatten().is_none() && !self.reading_roots_listed();
+            let claimed = if first_walk { store.claim_urgent(now(), &owner) } else { store.claim_next(now(), &owner) };
+            let job = match claimed {
                 Ok(Some(j)) => j,
+                Ok(None) if first_walk => {
+                    let found = self.status.lock().unwrap().index.files_seen;
+                    self.set_reader_state("waiting", None);
+                    self.set_reader_note(&format!("Reading starts when the file list is complete ({} files found so far).", fmt_count(found)));
+                    self.reader_signal.wait(Duration::from_secs(10));
+                    continue;
+                }
                 Ok(None) => {
                     // Idle: parse read drawings again if the rules changed (no OCR).
                     if self.rederive_some(&mut store) {
                         continue;
                     }
                     self.set_reader_state("idle", None);
+                    self.set_reader_note("");
                     if ocr.is_some() && last_used.elapsed() > Duration::from_secs(120) {
                         ocr = None; // free the model memory
                         self.status.lock().unwrap().ocr_model.clear();
@@ -776,10 +1278,29 @@ impl Engine {
                 }
             };
             // Use most of the CPU when nobody is at the PC, half otherwise.
-            let threads = if idle > 300 { cores.saturating_sub(1).max(1) } else { (cores / 2).max(1) };
+            let threads = if busy {
+                1
+            } else if idle > 300 {
+                cores.saturating_sub(1).max(1)
+            } else {
+                (cores / 2).max(1)
+            };
             self.set_reader_state("reading", Some(job.path.clone()));
+            self.set_reader_note(&if busy {
+                format!("Reading slowly on one thread: other programs use {others:.0}% of the CPU.")
+            } else if threads + 1 >= cores && others > s.busy_cpu_percent as f32 {
+                format!("Nobody is using the PC: reading on {threads} threads alongside other programs ({others:.0}% of the CPU).")
+            } else if threads + 1 >= cores {
+                "Reading at full speed while the PC is not in use.".to_string()
+            } else {
+                format!("Reading on {threads} of {cores} threads.")
+            });
             let result = self.read_one(&mut store, &job.path, job.id, &s, &mut ocr, threads);
             last_used = Instant::now();
+            if last_checkpoint.elapsed() > Duration::from_secs(60) {
+                self.checkpoint(&store);
+                last_checkpoint = Instant::now();
+            }
             match result {
                 Ok(Outcome::Read(pages)) => {
                     self.pages_read.lock().unwrap().push_back((Instant::now(), pages));
@@ -787,6 +1308,7 @@ impl Engine {
                     self.notify_waiters(&store, &job.path);
                 }
                 Ok(Outcome::Reused) => {
+                    self.pages_read.lock().unwrap().push_back((Instant::now(), 0));
                     self.changed();
                     self.notify_waiters(&store, &job.path);
                 }
@@ -794,6 +1316,13 @@ impl Engine {
                 Err(e) if self.shutdown.load(Ordering::SeqCst) => {
                     let _ = store.release(job.id);
                     info!("stopped while reading {}: {e:#}", job.path);
+                }
+                Err(e) if index_busy(&e) => {
+                    // Not the file's fault: give it back and try again soon,
+                    // without using up its retries.
+                    let _ = store.release(job.id);
+                    info!("index busy while reading {}; trying again", job.path);
+                    self.reader_signal.wait(Duration::from_secs(5));
                 }
                 Err(e) if is_transient(&e) => {
                     let reason = friendly(&e);
@@ -1009,8 +1538,7 @@ impl Engine {
         }
         let q = parse_search(query);
         let drives = self.drives.read().unwrap().clone();
-        let store = self.open_store()?;
-        let hits = Arc::new(search_index(&store, &q, roots, RESULT_CAP, &drives)?);
+        let hits = Arc::new(self.with_search_store(|store| search_index(store, &q, roots, RESULT_CAP, &drives))?);
         let mut mem = self.results.lock().unwrap();
         mem.retain(|(k, g, _)| *g == generation && *k != key);
         mem.push_back((key, generation, Arc::clone(&hits)));
@@ -1018,6 +1546,31 @@ impl Engine {
             mem.pop_front();
         }
         Ok(hits)
+    }
+
+    /// Run `f` on the long-lived search connection, opened on first use with
+    /// a large page cache and a memory map so repeated searches do not read
+    /// the disk again. A search running at the same moment gets its own
+    /// connection instead of waiting. Afterwards every cached statement is
+    /// finalized, so no read transaction stays open between searches (an
+    /// open one would stop WAL checkpoints and let the WAL grow); after an
+    /// error the connection is dropped and reopened next time.
+    fn with_search_store<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        let Ok(mut slot) = self.search_store.try_lock() else {
+            return f(&self.open_store()?);
+        };
+        if slot.is_none() {
+            let s = self.open_store()?;
+            s.conn.execute_batch("PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456;")?;
+            *slot = Some(s);
+        }
+        let Some(store) = slot.as_ref() else { unreachable!() };
+        let r = f(store);
+        store.conn.flush_prepared_statement_cache();
+        if r.is_err() || !store.conn.is_autocommit() {
+            *slot = None;
+        }
+        r
     }
 
     fn record_latency(&self, ms: u64) {
@@ -1044,9 +1597,6 @@ impl Engine {
             Some(p) => self.project_roots(p)?,
             None => roots.to_vec(),
         };
-        if offset == 0 {
-            let _ = self.open_store().and_then(|s| s.add_history(query, now()));
-        }
         // The office server's part runs alongside.
         let office = if self.office_roots_usable() { self.office.lock().unwrap().client.clone() } else { None };
         let office_job = office.map(|c| {
@@ -1080,6 +1630,17 @@ impl Engine {
         let mut reported: HashSet<String> = all.iter().map(|h| h.path.to_lowercase()).collect();
         if !page.is_empty() {
             let _ = tx.send(Envelope { id, body: Event::Hits { hits: page } });
+        }
+        // Search history is written after the results are out, on its own
+        // thread and connection: a busy index (a walk writing) can never
+        // delay or fail the search.
+        if offset == 0 {
+            let (path, query) = (self.db_path.clone(), query.to_string());
+            std::thread::spawn(move || {
+                if let Err(e) = Store::open(&path).and_then(|s| s.add_history(&query, now())) {
+                    tracing::debug!("search history not saved: {e:#}");
+                }
+            });
         }
         if let Some(job) = office_job
             && let Ok(Some(Ok((docs, n, office_more)))) = job.join()
@@ -1147,6 +1708,7 @@ impl Engine {
             listing_timeout: Duration::from_secs(s.listing_timeout_secs.max(5) as u64),
             excluded: s.excluded.iter().map(|x| x.to_lowercase()).collect(),
             background: false,
+            first: vec![],
         };
         let office = self.office_roots();
         walk_resumable(&roots, &cfg, cancel, &|_| None, &|ev| match ev {
@@ -1516,7 +2078,17 @@ impl Engine {
 /// Errors that may go away by themselves: the file could not be opened or
 /// read (network share unreachable, file locked by another program).
 fn is_transient(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some()) || format!("{e:#}").contains("cannot open file")
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some()) || format!("{e:#}").contains("cannot open file") || index_busy(e)
+}
+
+/// The index was busy (locked by a write); says nothing about the file.
+fn index_busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>(),
+            Some(rusqlite::Error::SqliteFailure(f, _)) if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+        )
+    })
 }
 
 fn friendly(e: &anyhow::Error) -> String {
@@ -1542,6 +2114,35 @@ mod tests {
         assert!(!is_pdf("Price list €.xlsx"));
         assert!(!is_pdf("€€"));
         assert!(is_pdf("Ölleitung €.pdf"));
+    }
+
+    #[test]
+    fn only_damage_rebuilds_the_index() {
+        let busy = anyhow::Error::from(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(5), Some("database is locked".into())));
+        assert!(!index_is_damaged(&busy.context("open index")));
+        let full = anyhow::Error::from(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(13), None));
+        assert!(!index_is_damaged(&full));
+        let corrupt = anyhow::Error::from(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(11), None));
+        assert!(index_is_damaged(&corrupt.context("migrate")));
+        let not_db = anyhow::Error::from(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(26), None));
+        assert!(index_is_damaged(&not_db));
+        assert!(index_is_damaged(&anyhow!("index was made by a newer Sleuth; it will be rebuilt")));
+    }
+
+    #[test]
+    fn reading_folders_by_letter_become_network_paths() {
+        use sleuth_core::paths::Drive;
+        let drives = DriveMap {
+            drives: vec![
+                Drive { letter: "Z:".into(), kind: DriveKind::Network, unc: Some(r"\\10.0.0.20\Project".into()) },
+                Drive { letter: "C:".into(), kind: DriveKind::Fixed, unc: None },
+            ],
+        };
+        let chosen = vec![r"Z:\".to_string(), r"z:\J100".to_string(), r"\\10.0.0.20\Project\".to_string(), r"C:\Work".to_string(), " ".to_string()];
+        let r = resolve_scopes(&chosen, &drives);
+        assert_eq!(r, vec![r"\\10.0.0.20\Project".to_string(), r"\\10.0.0.20\Project\J100".to_string(), r"C:\Work".to_string()]);
+        // The PDFs the walk stores under the share are inside the folder.
+        assert!(under(&r"\\10.0.0.20\Project\J100\iso.pdf".to_lowercase(), &r));
     }
 
     #[test]

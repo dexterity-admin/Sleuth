@@ -56,29 +56,49 @@ function renderProjects() {
 }
 $("project").onchange = () => { renderDrives(); runSearch(false); };
 
+/** One line under a reading folder: its queue, or why nothing is read. */
+function scopeLine(sc) {
+  if (!sc) return { cls: "", text: "Counting its PDFs…" };
+  if (sc.note && sc.note !== "ok") return { cls: sc.note === "not indexed yet" ? "" : "warn", text: cap(sc.note), title: SCOPE_NOTE[sc.note] || sc.note };
+  if (!sc.pdfs) return { cls: "", text: "No PDFs found" };
+  if (!sc.waiting && sc.read >= sc.pdfs - (sc.failed || 0)) return { cls: "ok", text: `All ${fmtNum(sc.pdfs)} PDFs read` + (sc.failed ? ` · ${fmtNum(sc.failed)} failed` : "") };
+  return { cls: "run", text: `${fmtNum(sc.read)} of ${fmtNum(sc.pdfs)} read · ${fmtNum(sc.waiting)} queued` + (sc.failed ? ` · ${fmtNum(sc.failed)} failed` : "") };
+}
+let scopesSig = "";
 function renderScopes() {
   const box = $("scopes");
-  box.replaceChildren();
   const scopes = state.settings?.content_scopes || [];
-  if (!scopes.length) box.append(el("div", "none", "None yet. Add the project folders whose PDFs should be read."));
-  for (const s of scopes) {
+  const known = state.lastStatus?.status?.scopes;
+  const find = (s) => (Array.isArray(known) ? known.find((x) => String(x.folder).toLowerCase() === s.toLowerCase()) : undefined);
+  const lines = scopes.map((s) => (Array.isArray(known) ? scopeLine(find(s)) : null));
+  // Rebuilt only when something changed, so a click on × is never lost to a refresh.
+  const sig = JSON.stringify([scopes, lines]);
+  if (sig === scopesSig) return;
+  scopesSig = sig;
+  box.replaceChildren();
+  if (!scopes.length) box.append(el("div", "none", "None yet. Add the project folders whose PDFs should be read. Elsewhere, PDFs are found by file name only."));
+  scopes.forEach((s, i) => {
     const row = el("div", "scope");
     const t = el("span", null, s); t.title = s;
     const x = el("button", "icon", "×"); x.title = "Stop reading this folder"; x.setAttribute("aria-label", "Remove " + s);
-    x.onclick = async () => { await saveSettings({ ...state.settings, content_scopes: scopes.filter((v) => v !== s) }); };
+    x.onclick = async () => { await saveSettings({ ...state.settings, content_scopes: scopes.filter((v) => v !== s) }); loadStatus(); };
     row.append(t, x); box.append(row);
-  }
+    const ln = lines[i];
+    if (ln) { const d = el("div", "scope-state " + ln.cls, ln.text); if (ln.title) d.title = ln.title; box.append(d); }
+  });
 }
-$("addScope").onclick = async () => {
+async function addReadingFolder() {
   const p = await invoke("pick_folder");
   if (!p) return;
   const scopes = state.settings.content_scopes || [];
-  if (!scopes.some((s) => s.toLowerCase() === p.toLowerCase())) {
-    await saveSettings({ ...state.settings, content_scopes: [...scopes, p] });
-    await call({ req: "rescan_now" });
-    toast("Added. Its PDFs will be read in the background.");
-  }
-};
+  if (scopes.some((s) => s.toLowerCase() === p.toLowerCase())) { toast(`${p} is already being read`); return; }
+  await saveSettings({ ...state.settings, content_scopes: [...scopes, p] });
+  await call({ req: "rescan_now" });
+  toast(`${p} added. Counting its PDFs…`);
+  watchScope(p);
+  loadStatus();
+}
+$("addScope").onclick = () => addReadingFolder().catch((e) => toast(String(e)));
 
 // ---------- searching ----------
 async function runSearch(deep, append) {
@@ -321,6 +341,7 @@ function refreshView() {
   renderRows();
   renderEmpty();
   updateSearchStatus();
+  if (typeof updateWalkBanner === "function") updateWalkBanner();
 }
 function renderRows() {
   const box = $("rows"), spacer = $("spacer");
@@ -378,19 +399,64 @@ function renderEmpty() {
   box.replaceChildren();
   if (state.view.length) { box.hidden = true; return; }
   box.hidden = false;
+  const st = state.lastStatus?.status;
+  const p = progressModel(st);
   if (!state.query) {
-    box.append(el("h2", null, "Find any tag, in any drawing, on any drive"));
-    box.append(el("p", null, "Type a tag number, document number or any text printed on a drawing. Press ? next to the box for OR, rev:, dwg:, type: and name:."));
-    const p = el("p", "tags", '10"-P-1001-A1B   ·   PSV-1203 OR PSV-1204   ·   rev:C dwg:ISO-1001');
-    box.append(p);
-    if (!(state.settings?.content_scopes || []).length) box.append(el("p", null, "To search inside PDFs, add your project folders under “Folders being read” on the left."));
+    const ready = st && !p.walking && p.readDone && p.scopeCount && !p.scopeProblems.length;
+    if (!st || ready) {
+      box.append(el("h2", null, "Find any tag, in any drawing, on any drive"));
+      box.append(el("p", null, "Type a tag number, document number or any text printed on a drawing. Press ? next to the box for OR, rev:, dwg:, type: and name:."));
+      box.append(el("p", "tags", '10"-P-1001-A1B   ·   PSV-1203 OR PSV-1204   ·   rev:C dwg:ISO-1001'));
+      if (st) box.append(welcomeCard(p, true));
+      return;
+    }
+    box.append(el("h2", null, p.firstWalk || p.phase === "starting" ? "Welcome. Sleuth is getting ready" : "Sleuth is working in the background"));
+    box.append(el("p", null, "You can search now. Results fill in as the two stages below progress; nothing needs to stay open for it."));
+    box.append(welcomeCard(p, false));
+    box.append(el("p", "tags", '10"-P-1001-A1B   ·   PSV-1203 OR PSV-1204   ·   rev:C dwg:ISO-1001'));
     return;
   }
   if (state.deepRunning) { box.append(el("p", null, "Searching the drives…")); return; }
-  box.append(el("h2", null, "Nothing found yet"));
-  box.append(el("p", null, state.lastDone && state.lastDone.total === 0 && state.hits.size === 0
-    ? "Not in the files read so far. Deep search walks the drives and reads any PDFs it finds that have not been read."
-    : "Some results are hidden by the filters on the left."));
+  const none = state.lastDone && state.lastDone.total === 0 && state.hits.size === 0;
+  if (!state.lastDone && !none) { box.append(el("p", null, "Searching…")); return; }
+  box.append(el("h2", null, none ? "No results" : "Nothing to show"));
+  if (!none) { box.append(el("p", null, "Some results are hidden by the filters on the left.")); return; }
+  if (p.ix && p.walking && p.firstWalk) {
+    box.append(el("p", null, `Sleuth is still finding files (stage 1 of 2, ${plural(p.ix.files_seen || p.s.files_indexed, "file")} listed so far), so this may simply not be listed yet. Try again when the file list is complete, or use Deep search to walk the drives now.`));
+  } else if (p.ix && p.walking) {
+    box.append(el("p", null, `Not in the index. Sleuth is checking the drives for new files right now; anything added since ${fmtAgo(p.ix.last_complete)} may not be listed yet.`));
+  } else {
+    box.append(el("p", null, "Not in the files read so far. Deep search walks the drives and reads any PDFs it finds that have not been read."));
+  }
+  if (!p.scopeCount) box.append(el("p", null, "Text inside PDFs is searched only in your reading folders, and none is chosen yet: add one under “Folders being read” on the left."));
+  else if (p.waiting > 0) box.append(el("p", null, `Text inside PDFs is searched only in PDFs already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far. File names are searched everywhere.`));
+}
+/** The two stages with live numbers, for the start page. */
+function welcomeCard(p, compact) {
+  const card = el("div", "welcome" + (compact ? " compact" : ""));
+  const f = stageFind(p), r = stageRead(p);
+  const step = (n, name, st, help) => {
+    const d = el("div", "wstep " + st.cls);
+    const head = el("div", "wstep-head");
+    head.append(el("span", "st-dot"), el("b", null, `${n}. ${name}`));
+    d.append(head, el("div", "wstep-text", st.text));
+    const trk = el("div", "st-trk"); const fill = el("div", "st-fill" + (st.bar === null ? " moving" : ""));
+    if (st.bar !== null) fill.style.width = Math.round(st.bar * 100) + "%";
+    trk.append(fill); d.append(trk);
+    if (help && !compact) d.append(el("div", "wstep-help", help));
+    return d;
+  };
+  card.append(step(1, "Finding files", f, "Sleuth lists every folder on every drive, so any file can be found by its name. The first listing of large network drives can take several hours; after that only changes are checked."));
+  const helpRead = p.scopeCount
+    ? "PDFs in your reading folders are opened and their text is read (scanned drawings by OCR), so tags printed on the drawings can be found. PDFs anywhere else are found by file name only."
+    : "Nothing is read yet: choose the project folders whose drawings you search, and Sleuth reads the text printed on them.";
+  card.append(step(2, "Reading PDFs", r, helpRead));
+  const act = el("div", "wact");
+  if (!p.scopeCount) { const b = el("button", "small primary", "Add a reading folder"); b.type = "button"; b.onclick = () => addReadingFolder().catch((e) => toast(String(e))); act.append(b); }
+  const more = el("button", "small", "See details"); more.type = "button"; more.onclick = () => showIndexing();
+  act.append(more);
+  card.append(act);
+  return card;
 }
 $("rows").addEventListener("scroll", () => renderRows());
 window.addEventListener("resize", () => renderRows());
@@ -624,4 +690,7 @@ function openRelated(it, from) {
   pvViewer.load({ path: it.path, name: it.name, page: it.page || 1, query: doc.query, tag: doc.tag, office: isOffice(from) });
 }
 
-viewHooks.search = { show() { updateSearchStatus(); renderRows(); } };
+viewHooks.search = {
+  show() { updateSearchStatus(); renderRows(); updateWalkBanner(); },
+  hide() { $("walkBanner").hidden = true; },
+};

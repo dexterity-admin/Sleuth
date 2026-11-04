@@ -23,6 +23,27 @@
 <p align="center"><img src="docs/images/v1/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line list; on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial with the reason" width="100%"></p>
 <p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth 1.0 still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
 
+## New in 1.0.1: indexing you can watch
+
+1.0.0 could leave a new install with nothing to search: reading folders chosen by drive letter (`Z:\`) were never read, and the walk of each drive skipped most subfolders. 1.0.1 fixes both and shows what Sleuth is doing at every moment. An existing index is repaired when you install it.
+
+<p align="center"><img src="docs/images/v101/welcome.png" alt="New install: the welcome card shows stage 1, Finding files (folders listed, files found, running time), and stage 2, Reading PDFs (waiting for the file list), with the reading folders and their state in the sidebar" width="100%"></p>
+<p align="center"><sub>A new install says what happens next and how far it has got. The status strip at the bottom stays visible everywhere.</sub></p>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/v101/monitor-walking.png" alt="Monitor during the first listing: each drive with its state (done, listing folders, waiting its turn, offline), folders and files; reading folders with a note when a drive letter is not mapped"><br><sub><b>Stage 1, finding files:</b> every drive with its progress, and why a drive or reading folder needs attention.</sub></td>
+    <td width="50%"><img src="docs/images/v101/monitor-reading.png" alt="Monitor while reading: PDFs read of total in each reading folder, waiting, failed, pages per hour and time left"><br><sub><b>Stage 2, reading PDFs:</b> read of total per reading folder, speed and time left.</sub></td>
+  </tr>
+</table>
+
+| | |
+|---|---|
+| **The whole drive is listed** | The first listing of the office drives finds over 1.5 million files, where 1.0.0 stopped at 150,000. A listing stopped half-way resumes where it was; a short network drop is retried instead of skipping a drive for hours. |
+| **Reading folders first** | Folders you chose for reading are listed first, and their PDFs are read as soon as their drives are listed. A busy PC reads slowly instead of not at all. |
+| **File names like Everything** | Any length (`FS`, `_`, `&`), `*` and `?`, several words across name and folder, a pasted full path, exact names first, upper and lower case in any alphabet. |
+| **Robust index** | Never thrown away because it was busy; its temporary log stays small; one share reached by name and by IP address is listed once. |
+
 ## New in 1.0
 
 | | |

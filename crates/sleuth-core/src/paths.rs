@@ -99,6 +99,52 @@ impl DriveMap {
     pub fn current() -> DriveMap {
         DriveMap::default()
     }
+
+    /// Give one network path to drives that reach the same share by
+    /// different names (`\\Docsrv-1\X` and `\\10.0.0.54\x`), so the
+    /// share is walked once and every path to it is stored one way.
+    /// `address` turns a host name into its IP address. Returns the merged
+    /// `(alias, kept)` paths; the first drive letter's form is kept.
+    pub fn merge_aliases(&mut self, address: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new(); // (ip\share, unc)
+        let mut merged = Vec::new();
+        for d in &mut self.drives {
+            let Some(unc) = d.unc.clone() else { continue };
+            let Some(rest) = unc.trim_end_matches('\\').strip_prefix("\\\\") else { continue };
+            let mut parts = rest.splitn(2, '\\');
+            let (host, share) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            if host.is_empty() || share.is_empty() {
+                continue;
+            }
+            let Some(ip) = address(host) else { continue };
+            let key = format!("{}\\{}", ip, share.to_lowercase());
+            match seen.iter().find(|(k, _)| *k == key) {
+                Some((_, kept)) if !kept.eq_ignore_ascii_case(unc.trim_end_matches('\\')) => {
+                    merged.push((unc.trim_end_matches('\\').to_string(), kept.clone()));
+                    d.unc = Some(kept.clone());
+                }
+                Some(_) => {}
+                None => seen.push((key, unc.trim_end_matches('\\').to_string())),
+            }
+        }
+        merged
+    }
+}
+
+/// IPv4 address of a host, or the host itself when it already is one.
+/// Gives up after two seconds: a dead name server must not hold the walk.
+pub fn host_address(host: &str) -> Option<String> {
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Some(host.to_string());
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let h = host.to_string();
+    std::thread::spawn(move || {
+        use std::net::ToSocketAddrs;
+        let ip = (h.as_str(), 445).to_socket_addrs().ok().and_then(|mut a| a.find(|x| x.is_ipv4())).map(|a| a.ip().to_string());
+        let _ = tx.send(ip);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten()
 }
 
 #[cfg(windows)]
@@ -156,6 +202,32 @@ mod win {
 mod tests {
     use super::*;
 
+    #[test]
+    fn one_share_by_name_and_by_address_is_one_root() {
+        let net = |l: &str, u: &str| Drive { letter: l.into(), kind: DriveKind::Network, unc: Some(u.into()) };
+        let mut m = DriveMap {
+            drives: vec![
+                net("P:", r"\\Docsrv-1\DOCS-LATEST"),
+                net("T:", r"\\10.0.0.54\docs-latest"),
+                net("Y:", r"\\Docsrv-1\p20002"),
+                net("Z:", r"\\10.0.0.20\Project"),
+                net("Q:", r"\\gone-host\x"),
+            ],
+        };
+        let address = |h: &str| match h.to_lowercase().as_str() {
+            "docsrv-1" => Some("10.0.0.54".to_string()),
+            "gone-host" => None,
+            ip => Some(ip.to_string()),
+        };
+        let merged = m.merge_aliases(address);
+        assert_eq!(merged, vec![(r"\\10.0.0.54\docs-latest".to_string(), r"\\Docsrv-1\DOCS-LATEST".to_string())]);
+        assert_eq!(m.to_unc(r"T:\00_DOCS\a.pdf"), r"\\Docsrv-1\DOCS-LATEST\00_DOCS\a.pdf");
+        // Another share on the same server stays apart.
+        assert_eq!(m.to_unc(r"Y:\a"), r"\\Docsrv-1\p20002\a");
+        assert_eq!(m.to_unc(r"Q:\a"), r"\\gone-host\x\a");
+        assert_eq!(host_address("10.0.0.9").as_deref(), Some("10.0.0.9"));
+    }
+
     fn map() -> DriveMap {
         DriveMap {
             drives: vec![
@@ -178,7 +250,7 @@ mod tests {
 
     #[test]
     fn unmapped_share_stays_unc() {
-        assert_eq!(map().to_display(r"\\pdsserver-1\p14414\a.pdf"), r"\\pdsserver-1\p14414\a.pdf");
+        assert_eq!(map().to_display(r"\\docsrv-1\p20002\a.pdf"), r"\\docsrv-1\p20002\a.pdf");
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! Turning index matches into one result row per file, ranked and explained.
 //!
-//! Ranking, best first:
+//! Files whose name is exactly what was typed come first, then files whose
+//! name (or path) holds every word as typed or with other separators, then
+//! the rest (as Everything shows names before contents). Then, best first:
 //! 1. exact text as typed, standing on its own
 //! 2. the same letters and digits with other separators
 //! 3. look-alike characters or a low-confidence reading (verify)
@@ -30,7 +32,8 @@ pub fn search_index(store: &Store, q: &SearchQuery, roots: &[String], cap: usize
     scope.dwg = q.filters.dwg.clone();
     scope.disc = q.filters.disc.clone();
     let mut best: HashMap<i64, (Candidate, u32)> = HashMap::new();
-    let groups: Vec<Vec<Term>> = q.groups.iter().filter(|g| !g.is_empty()).cloned().collect();
+    // A pasted `T:\folder\file.pdf` is stored under the share's UNC path.
+    let groups: Vec<Vec<Term>> = q.groups.iter().filter(|g| !g.is_empty()).map(|g| g.iter().map(|t| to_unc_term(t, drives)).collect()).collect();
     if groups.is_empty() {
         // Only filters (`rev:B dwg:ISO-1001`): list the files they select.
         if q.filters.is_empty() {
@@ -65,8 +68,12 @@ pub fn search_index(store: &Store, q: &SearchQuery, roots: &[String], cap: usize
         }
     }
     let mut hits = Vec::new();
+    // Drawing details for every PDF at once: a query per row is a disk read
+    // per row, which on a hard disk made common words take a minute.
+    let pdf_ids: Vec<i64> = best.iter().filter(|(_, (c, _))| c.source != TextSource::FileName || c.text.to_lowercase().ends_with(".pdf")).map(|(id, _)| *id).collect();
+    let mut metas = store.metadata_many(&pdf_ids)?;
     for (id, (c, n)) in best {
-        let Some(f) = store.file_by_id(id)? else { continue };
+        let Some(f) = store.file_quick(id)? else { continue };
         if !q.filters.name.is_empty() && !q.filters.name.iter().all(|t| t.classify(&f.name, 1.0).is_some()) {
             continue;
         }
@@ -77,7 +84,7 @@ pub fn search_index(store: &Store, q: &SearchQuery, roots: &[String], cap: usize
         {
             continue;
         }
-        let meta = store.metadata(id)?;
+        let meta = metas.remove(&id).unwrap_or_default();
         hits.push(Hit {
             display_path: drives.to_display(&f.path),
             path: f.path,
@@ -97,9 +104,39 @@ pub fn search_index(store: &Store, q: &SearchQuery, roots: &[String], cap: usize
             revision: meta.revision,
         });
     }
-    hits.sort_by(|a, b| rank(a).cmp(&rank(b)).then(b.confidence.total_cmp(&a.confidence)).then(b.modified.cmp(&a.modified)).then(a.path.cmp(&b.path)));
+    let tiers: HashMap<i64, u8> = hits.iter().filter_map(|h| h.doc_id.map(|id| (id, name_tier(&groups, &h.name, &h.path)))).collect();
+    let tier = |h: &Hit| h.doc_id.and_then(|id| tiers.get(&id).copied()).unwrap_or(2);
+    hits.sort_by(|a, b| tier(a).cmp(&tier(b)).then(rank(a).cmp(&rank(b))).then(b.confidence.total_cmp(&a.confidence)).then(b.modified.cmp(&a.modified)).then(a.path.cmp(&b.path)));
     hits.truncate(cap);
     Ok(hits)
+}
+
+/// A term written with a mapped drive letter, as the UNC path the index
+/// stores.
+fn to_unc_term(t: &Term, drives: &DriveMap) -> Term {
+    if !t.is_path() || t.raw.starts_with("\\\\") {
+        return t.clone();
+    }
+    let unc = drives.to_unc(&t.raw);
+    if unc == t.raw { t.clone() } else { Term::new(&unc).unwrap_or_else(|| t.clone()) }
+}
+
+/// How a file's name answers the query, before any other ranking: 0 the
+/// name (or path) is exactly what was typed, 1 every word of a group is in
+/// the name or path as typed or with other separators, 2 otherwise. So a
+/// file found by its name is never buried under text matches inside
+/// thousands of drawings, as in Everything.
+fn name_tier(groups: &[Vec<Term>], name: &str, path: &str) -> u8 {
+    let mut tier = 2;
+    for g in groups {
+        if g.len() == 1 && g[0].is_whole_name(name, path) {
+            return 0;
+        }
+        if g.iter().all(|t| t.explain_name(name, path).is_some_and(|d| d.class <= MatchClass::SeparatorsIgnored)) {
+            tier = 1;
+        }
+    }
+    tier
 }
 
 /// Files matching every term of one group: best candidate and matching
@@ -111,7 +148,12 @@ fn search_group(store: &Store, terms: &[Term], scope: &Scope, category: Option<&
     for t in terms {
         let mut m: HashMap<i64, (Candidate, u32)> = HashMap::new();
         let found = match category {
+            // `_` alone is never part of a tag.
+            Some(_) if t.is_punctuation() => Vec::new(),
             Some(cat) => store.search_tags(t, cat, scope, PER_TERM)?,
+            // A path is never inside a drawing's text; punctuation alone is
+            // searched in names only (as Everything does).
+            None if t.is_path() || t.is_punctuation() => store.search_names(t, scope, PER_TERM)?,
             None => store.search_lines(t, scope, PER_TERM)?.into_iter().chain(store.search_names(t, scope, PER_TERM)?).collect(),
         };
         for c in found {
@@ -143,6 +185,19 @@ fn search_group(store: &Store, terms: &[Term], scope: &Scope, category: Option<&
             c.class = worst.class;
         }
         out.insert(id, (c, n));
+    }
+    // Several words: also every word in the file name or folder path, found
+    // from the most specific word so no per-word limit drops the file.
+    if category.is_none() && terms.len() > 1 {
+        for c in store.search_names_all(terms, scope, PER_TERM)? {
+            match out.get_mut(&c.file_id) {
+                Some((b, _)) if better(&c, b) => *b = c,
+                Some(_) => {}
+                None => {
+                    out.insert(c.file_id, (c, 1));
+                }
+            }
+        }
     }
     Ok(out)
 }
@@ -230,6 +285,77 @@ mod tests {
         assert_eq!(order, vec![("a.pdf", MatchClass::Exact), ("b.pdf", MatchClass::Uncertain), ("c.pdf", MatchClass::Partial)]);
         let both = search_index(&s, &parse_search("PSV-1203 OR PSV-1204"), &[], 10, &DriveMap::default()).unwrap();
         assert_eq!(both.iter().filter(|h| h.class == MatchClass::Exact).count(), 2);
+    }
+
+    /// Names only (nothing read yet), as on the user's PC.
+    fn names_only(paths: &[&str]) -> Store {
+        let s = Store::open_in_memory().unwrap();
+        for p in paths {
+            let (dir, name) = p.rsplit_once('\\').unwrap();
+            s.touch_dir(dir, None, 1).unwrap();
+            let st = if name.to_lowercase().ends_with(".pdf") { state::UNREAD } else { state::NOT_PDF };
+            s.upsert_file(p, dir, name, 1, 1, 1, st).unwrap();
+        }
+        s
+    }
+
+    const SHARE: &str = r"\\10.0.0.54\docs-latest";
+
+    fn t_drive() -> DriveMap {
+        use sleuth_core::paths::{Drive, DriveKind};
+        DriveMap { drives: vec![Drive { letter: "T:".into(), kind: DriveKind::Network, unc: Some(SHARE.into()) }] }
+    }
+
+    fn names_of(s: &Store, q: &str) -> Vec<String> {
+        search_index(s, &parse_search(q), &[], 100, &t_drive()).unwrap().into_iter().map(|h| h.name).collect()
+    }
+
+    #[test]
+    fn user_name_queries_find_every_file_type() {
+        let iso = format!(r"{SHARE}\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf");
+        let iso2 = format!(r"{SHARE}\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\ISOMETRIC ISSUANCE_26-FEB-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf");
+        let s = names_only(&[
+            r"D:\lots\FSK_Batch-1.zip",
+            r"D:\lots\FSK_Batch-12.zip",
+            r"D:\FSK As-Built request_18-Sep-2026.xlsx",
+            r"D:\cad\FS-101.dwg",
+            r"\\10.0.0.20\Project\P20002-14-01-63-1636\MAIN DOC\P20002-14-01-63-1636-REV.2.xlsx",
+            r"\\10.0.0.20\Project\x\ISO-1636.pdf",
+            iso.as_str(),
+            iso2.as_str(),
+            r"C:\x\notes.txt",
+        ]);
+        assert_eq!(names_of(&s, "FSK_Batch-1")[0], "FSK_Batch-1.zip");
+        assert_eq!(names_of(&s, "FSK").len(), 3);
+        assert_eq!(names_of(&s, "FS").len(), 4);
+        assert_eq!(names_of(&s, "1636").len(), 2);
+        assert_eq!(names_of(&s, "*1636")[0], "ISO-1636.pdf");
+        assert_eq!(names_of(&s, "PSV").len(), 2);
+        assert_eq!(names_of(&s, "zip").len(), 2);
+        // a path pasted with its mapped drive letter and spaces
+        let hits = search_index(&s, &parse_search(r"T:\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf"), &[], 10, &t_drive()).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].path, iso);
+        assert_eq!(hits[0].display_path, r"T:\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf");
+        // quoted, too; and a piece of a path
+        assert_eq!(names_of(&s, r#""T:\00_DOCUMENTS\Isometrics\Rev-1\26-02-2024\14-01-15-2632\14-01-15-2632_PSV-2809-01_HOLD.pdf""#).len(), 1);
+        assert_eq!(names_of(&s, r"2632\14-01-15-2632_PSV").len(), 2);
+        // several words: AND across name and folder path
+        assert_eq!(names_of(&s, "ISSUANCE PSV-2809 hold").len(), 1);
+        assert_eq!(names_of(&s, "FSK zip").len(), 2);
+        assert!(names_of(&s, "FSK dwg").is_empty());
+    }
+
+    #[test]
+    fn exact_name_ranks_before_text_inside_drawings() {
+        let mut files: Vec<(String, &str, f32)> = (0..30).map(|i| (format!(r"\\fs\p\iso{i}.pdf"), "NOTE: SEE PSV-2809 FOR SETTINGS", 1.0)).collect();
+        files.push((r"\\fs\p\PSV-2809.pdf".into(), "GENERAL ARRANGEMENT", 1.0));
+        let refs: Vec<(&str, &str, f32)> = files.iter().map(|(p, t, c)| (p.as_str(), *t, *c)).collect();
+        let s = store_with(&refs);
+        let hits = search_index(&s, &parse_search("PSV-2809"), &[], 100, &DriveMap::default()).unwrap();
+        assert_eq!(hits.len(), 31);
+        assert_eq!(hits[0].name, "PSV-2809.pdf");
+        assert_eq!(hits[0].source, TextSource::FileName);
     }
 
     #[test]

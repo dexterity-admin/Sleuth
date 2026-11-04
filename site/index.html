@@ -316,7 +316,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="bar">
     <a class="cell brand" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
     <span class="cell hide-s">DWG SLH-001</span>
-    <span class="cell hide-s">REV 1.0.0</span>
+    <span class="cell hide-s">REV 1.0.1</span>
     <span class="grow"></span>
     <a class="cell hide-s" href="#try">Try it</a>
     <a class="cell hide-s" href="#revisions">Revisions</a>
@@ -337,7 +337,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
-    <div class="facts">v1.0.0 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
+    <div class="facts">v1.0.1 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
@@ -478,6 +478,9 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       </ul>
     </div>
     <div class="thumbs reveal" id="thumbs">
+      <button type="button" data-img="v101-welcome" data-cap="New in 1.0.1: a new install says what happens next, stage by stage, and how far it has got"><img src="assets/screens/v101-welcome-1400.webp" alt="" loading="lazy"><span>First start</span></button>
+      <button type="button" data-img="v101-walking" data-cap="New in 1.0.1: every drive being listed, with folders, files and why one is offline; a reading folder whose letter is not mapped is flagged"><img src="assets/screens/v101-walking-1400.webp" alt="" loading="lazy"><span>Finding files</span></button>
+      <button type="button" data-img="v101-monitor" data-cap="New in 1.0.1: PDFs read of total per reading folder, speed and time left"><img src="assets/screens/v101-monitor-1400.webp" alt="" loading="lazy"><span>Reading PDFs</span></button>
       <button type="button" data-img="v1-partial" data-cap="New in 1.0: a pipe crosses the 4&quot;, so only -P-1002-A1B was read. Found, marked, and labelled Partial with the reason"><img src="assets/screens/v1-partial-1400.webp" alt="" loading="lazy"><span>Partial, explained</span></button>
       <button type="button" data-img="v1-tags" data-cap="New in 1.0: every tag, its documents, places and lowest confidence"><img src="assets/screens/v1-tags-1400.webp" alt="" loading="lazy"><span>Tags</span></button>
       <button type="button" data-img="v1-revisions" data-cap="New in 1.0: rev A against rev B, the changed tag marked on both sheets"><img src="assets/screens/v1-revisions-1400.webp" alt="" loading="lazy"><span>Revisions</span></button>
@@ -560,10 +563,10 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <h2 class="reveal">Questions, answered.</h2>
     <div class="rfi reveal" style="margin-top:30px">
       <details><summary><span class="no">RFI-001</span><span class="qq">Windows says it "protected your PC". Is that safe?</span><span class="st">CLOSED</span></summary><div class="a">The installer isn't code-signed, so Windows warns on the first install. Click <b>More info</b>, then <b>Run anyway</b>. Updates install from inside Sleuth and don't show this.</div></details>
-      <details><summary><span class="no">RFI-002</span><span class="qq">Will it slow my PC down while I'm drafting?</span><span class="st">CLOSED</span></summary><div class="a">Reading runs at low priority and pauses while other programs use more than 60% of the CPU, or while you're on battery. It uses more of the CPU only after nobody has touched the PC for five minutes.</div></details>
-      <details><summary><span class="no">RFI-003</span><span class="qq">How long before my project is searchable?</span><span class="st">CLOSED</span></summary><div class="a">File names are searchable straight away. A PDF with a text layer is read in seconds. A scanned A1 or A3 sheet takes about a minute on an office PC, unless a colleague's PC already read it, in which case it comes from the shared cache at once.</div></details>
+      <details><summary><span class="no">RFI-002</span><span class="qq">Will it slow my PC down while I'm drafting?</span><span class="st">CLOSED</span></summary><div class="a">Reading runs at low priority on half the processor. While other programs keep the CPU busy it slows to a single thread instead of stopping, so the reading still gets done; on battery it pauses. It uses more of the CPU only after nobody has touched the PC for five minutes.</div></details>
+      <details><summary><span class="no">RFI-003</span><span class="qq">How long before my project is searchable?</span><span class="st">CLOSED</span></summary><div class="a">Sleuth works in two stages, both shown in the status strip at the bottom. <b>Finding files</b> lists every folder of every drive; names become searchable as it goes, and the first listing of large office shares can take an hour or more. <b>Reading PDFs</b> starts as soon as the drives holding your reading folders are listed (they are listed first) and shows how many are read and the time left. A PDF with a text layer is read in seconds; a scanned sheet takes about 20 seconds, unless a colleague's PC already read it.</div></details>
       <details><summary><span class="no">RFI-004</span><span class="qq">How sure is "found"?</span><span class="st">CLOSED</span></summary><div class="a">Every result shows how it matched and where the text came from. Uncertain OCR is labelled <b>Verify</b> and is never reported as exact. The preview always rings the spot, so you can check it in a second.</div></details>
-      <details><summary><span class="no">RFI-005</span><span class="qq">What if a drive is offline or a folder is locked?</span><span class="st">CLOSED</span></summary><div class="a">An offline share is skipped within four seconds. A folder that doesn't answer in 20 seconds is skipped and listed as "not searched", with the reason. A network error while reading is retried up to five times before a file is listed as unreadable.</div></details>
+      <details><summary><span class="no">RFI-005</span><span class="qq">What if a drive is offline or a folder is locked?</span><span class="st">CLOSED</span></summary><div class="a">A share that doesn't answer is asked three times before it is marked offline, and the Monitor page says so. A folder that fails to list gets a second try later in the same listing; one that still doesn't answer is shown as partly listed, with the reason, and tried again on the next check. A network error while reading is retried up to five times before a file is listed as unreadable.</div></details>
       <details><summary><span class="no">RFI-006</span><span class="qq">Does it search DWG or Word files?</span><span class="st">CLOSED</span></summary><div class="a">Version 1.0 reads inside PDFs, and finds any file type by name.</div></details>
       <details><summary><span class="no">RFI-007</span><span class="qq">Does Sleuth use AI?</span><span class="st">CLOSED</span></summary><div class="a">No. There is no language model, chat or generated summary anywhere. Tags and title-block details are found by fixed, editable rules, and every value shows the text it was read from. The OCR models are fixed; a correction you type is stored as a checked reading and never changes them.</div></details>
       <details><summary><span class="no">RFI-008</span><span class="qq">Do we need a server?</span><span class="st">CLOSED</span></summary><div class="a">No. Every PC indexes and reads its own drives. IT can add the optional office server, which reads the shared project folders once for everyone; if it is offline, each PC keeps searching on its own and says so.</div></details>
@@ -588,7 +591,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <div class="issue reveal">
       <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
-        <span class="t2">REV 1.0.0 · 56 MB · WIN 10/11</span>
+        <span class="t2">REV 1.0.1 · 56 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
       </a>
       <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.5 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
@@ -603,7 +606,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="big"><span class="k">Title</span><span class="v">Sleuth · drawing search</span></div>
       <div><span class="k">Client</span><span class="v">Dexterity Design Services</span></div>
       <div><span class="k">Dwg no.</span><span class="v mono">SLH-001</span></div>
-      <div><span class="k">Rev</span><span class="v mono">1.0.0</span></div>
+      <div><span class="k">Rev</span><span class="v mono">1.0.1</span></div>
       <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6</span></div>
       <div><span class="k">Source</span><span class="v"><a href="https://github.com/dexterity-admin/Sleuth">GitHub</a></span></div>
       <div><span class="k">Sheet</span><span class="v mono">1 of 1</span></div>
@@ -611,6 +614,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <table class="reg revs" aria-label="Revisions">
       <thead><tr><th>Rev</th><th>Date</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td>1.0.1</td><td>04 Nov 2026</td><td>Reading folders chosen by drive letter are read. Every folder of every drive is listed, reading folders first; listings resume and survive network drops. Progress shown for both stages, with time left. File names found like Everything. Index repaired on install.</td></tr>
         <tr><td>1.0.0</td><td>03 Nov 2026</td><td>Pages classified, OCR only where needed. Every match explained; partial matches never exact. Tags, revision compare, related drawings, reading checks, monitor. Projects, OR and filters, export. Optional office server. Rollback.</td></tr>
         <tr><td>0.1.1</td><td>02 Nov 2026</td><td>Tags typed with a space are found. Empty start-up banners fixed. Background reading starts with Windows from the first launch.</td></tr>
         <tr><td>0.1.0</td><td>02 Nov 2026</td><td>First issue.</td></tr>

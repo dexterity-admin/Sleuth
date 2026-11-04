@@ -79,6 +79,12 @@
     <span class="banner-actions"><button id="noticeClose" class="icon" aria-label="Dismiss">&times;</button></span>
   </div>
 
+  <div id="walkBanner" class="banner progress" hidden role="status">
+    <span class="st-dot run" aria-hidden="true"></span>
+    <span id="walkBannerText"></span>
+    <span class="banner-actions"><button id="walkBannerMore" class="small">Details</button></span>
+  </div>
+
   <!-- ===================== Search ===================== -->
   <main class="panes view" id="view-search">
     <aside class="side" aria-label="Locations and filters">
@@ -236,11 +242,22 @@
     <div id="monBody" class="monbody"></div>
   </main>
 
+  <div id="stages" class="stages" role="status" aria-label="What Sleuth is doing">
+    <button id="stage1" class="stage idle" type="button">
+      <span class="st-dot" aria-hidden="true"></span><span class="st-name">1 · Finding files</span><span class="st-text">Connecting to the background reader…</span>
+      <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
+    </button>
+    <button id="stage2" class="stage idle" type="button">
+      <span class="st-dot" aria-hidden="true"></span><span class="st-name">2 · Reading PDFs</span><span class="st-text"></span>
+      <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
+    </button>
+  </div>
+
   <footer class="statusbar">
     <span id="sbCount">Ready</span>
     <span id="sbSearch"></span>
+    <span class="grow"></span>
     <button id="sbServer" class="srvbadge" hidden title="Office server"></button>
-    <button id="sbReader" class="linkish" title="Index status"></button>
   </footer>
 </div>
 
@@ -348,6 +365,7 @@
       </label>
       <div class="row-inline"><button type="button" id="s-fieldRulesCopy" class="small">Copy the built-in rules here to edit</button><button type="button" id="s-fieldRulesReset" class="small">Reset to built-in</button></div>
     </details>
+    <div id="s-indexState" class="idx-now" aria-live="polite"></div>
     <p id="s-error" class="error" hidden></p>
     <div class="dlg-actions">
       <button type="button" id="s-rescanNow">Refresh index now</button>
@@ -356,14 +374,6 @@
       <button type="button" id="s-save" class="primary">Save</button>
     </div>
   </form>
-</dialog>
-
-<dialog id="statusDlg">
-  <h2>Index status</h2>
-  <div id="stGrid" class="stats"></div>
-  <h3>Could not be read</h3>
-  <div id="stFailed" class="failed"></div>
-  <div class="dlg-actions"><span class="grow"></span><button id="stClose">Close</button></div>
 </dialog>
 
 <dialog id="confirmDlg">

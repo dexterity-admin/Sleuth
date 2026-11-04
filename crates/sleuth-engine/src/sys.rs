@@ -4,7 +4,7 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::FILETIME;
 #[cfg(windows)]
-use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetSystemTimes, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetSystemTimes, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_BELOW_NORMAL};
 
 /// Lower this thread's CPU, I/O and memory priority (as Everything does for
 /// its monitor threads).
@@ -12,6 +12,16 @@ pub fn enter_background_mode() {
     #[cfg(windows)]
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    }
+}
+
+/// Lower only this thread's CPU priority. For folder listing: background
+/// mode also drops disk priority to the lowest, and on a busy hard disk a
+/// folder of a few thousand files then waits for minutes.
+pub fn enter_low_priority() {
+    #[cfg(windows)]
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 

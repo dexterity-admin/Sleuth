@@ -76,6 +76,134 @@ function isPdf(name) { return /\.pdf$/i.test(name); }
 function normTag(s) { return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); }
 function toast(msg) { $("sbSearch").textContent = msg; }
 function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : ""; }
+/** A duration for people: "less than a minute", "12 min", "3 h 20 min", "2 days 4 h". */
+function fmtDur(secs) {
+  secs = Math.max(0, Math.round(Number(secs) || 0));
+  if (secs < 60) return "less than a minute";
+  const m = Math.round(secs / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h < 24) return mm ? `${h} h ${mm} min` : `${h} h`;
+  const d = Math.floor(h / 24), hh = h % 24;
+  return `${d} day${d === 1 ? "" : "s"}` + (hh ? ` ${hh} h` : "");
+}
+const nowSecs = () => Math.floor(Date.now() / 1000);
+/** "just now", "12 min ago", "3 h ago"; older than a week shows the date. */
+function fmtAgo(secs) {
+  if (!secs) return "never";
+  const d = nowSecs() - secs;
+  if (d < 60) return "just now";
+  if (d > 7 * 86400) return "on " + fmtDate(secs);
+  return fmtDur(d) + " ago";
+}
+function fmtIn(secs) {
+  if (!secs) return "";
+  const d = secs - nowSecs();
+  return d < 60 ? "in a moment" : "in " + fmtDur(d);
+}
+const plural = (n, one, many) => `${fmtNum(n)} ${Number(n) === 1 ? one : (many || one + "s")}`;
+/** "Z:\ (\\server\Project)" -> "Z:\" for the short forms. */
+function shortRoot(r) { const d = r.display || r.root || ""; const i = d.indexOf(" ("); return i > 0 ? d.slice(0, i) : d; }
+
+// ---------- indexing progress ----------
+// One reading of the worker's status, shared by the status strip, the welcome
+// card, the search banner, the reading-folder list and Monitor. Every newer
+// field may be missing (an older background reader): fall back quietly.
+const ROOT_STATE = {
+  waiting: ["idle", "Waiting its turn"],
+  walking: ["run", "Listing folders"],
+  done: ["ok", "Done"],
+  partial: ["warn", "Partly listed"],
+  offline: ["off", "Offline"],
+};
+const SCOPE_NOTE = {
+  "not mapped": "This drive letter is not mapped on this PC, so nothing in it can be read. Map the drive, or remove it and add the folder by its network path.",
+  offline: "Cannot be reached right now. Reading continues when it is back.",
+  "not indexed yet": "Its files have not been listed yet (stage 1). Its PDFs are queued as soon as the listing reaches it.",
+};
+function progressModel(s) {
+  s = s || {};
+  const ix = s.index && typeof s.index === "object" && s.index.phase ? s.index : null;
+  const roots = Array.isArray(ix?.roots) ? ix.roots : [];
+  const phase = !ix ? "unknown" : ix.phase === "up to date" ? "done" : ix.phase === "starting" ? "starting" : "walking";
+  const scopes = Array.isArray(s.scopes) && s.scopes.length ? s.scopes : null;
+  const sum = (k) => scopes.reduce((a, x) => a + (Number(x[k]) || 0), 0);
+  let read, waiting, failed, total;
+  if (scopes) { read = sum("read"); waiting = sum("waiting"); failed = sum("failed"); total = sum("pdfs"); }
+  else { read = Number(s.pdfs_read) || 0; waiting = Number(s.pdfs_waiting) || 0; failed = Number(s.pdfs_failed) || 0; total = read + waiting + failed; }
+  if (total < read + waiting + failed) total = read + waiting + failed;
+  const rs = String(s.reader_state || "").toLowerCase();
+  return {
+    s, ix, roots, phase, scopes,
+    walking: phase === "walking" || phase === "starting",
+    firstWalk: !!ix?.first_walk,
+    active: roots.filter((r) => r.state === "walking").map(shortRoot),
+    offline: roots.filter((r) => r.state === "offline"),
+    partial: roots.filter((r) => r.state === "partial"),
+    scopeCount: scopes ? scopes.length : (state.settings?.content_scopes || []).length,
+    // "not indexed yet" is expected while stage 1 runs; only the others need the user.
+    scopeProblems: (scopes || []).filter((x) => x.note && x.note !== "ok" && x.note !== "not indexed yet"),
+    read, waiting, failed, total,
+    reading: rs.startsWith("reading"),
+    paused: rs.startsWith("paused"),
+    readDone: waiting === 0 && !rs.startsWith("reading"),
+  };
+}
+/** Stage 1, "Finding files": {cls, text, title, bar} (bar: null = moving, 0..1 = filled). */
+function stageFind(p) {
+  const s = p.s, ix = p.ix;
+  if (p.phase === "unknown") {
+    return { cls: "idle", text: `${plural(s.files_indexed, "file")} in the index`, title: "This background reader does not report its listing progress. Update Sleuth on this PC to see it.", bar: 1 };
+  }
+  if (p.phase === "starting") return { cls: "run", text: "Starting: getting the list of drives…", title: "", bar: null };
+  if (p.walking) {
+    const parts = [p.active.length ? `Listing ${p.active.slice(0, 3).join(", ")}${p.active.length > 3 ? ` and ${p.active.length - 3} more` : ""}` : "Listing folders"];
+    parts.push(`${plural(ix.folders_listed, "folder")} listed` + (ix.folders_pending ? `, ${fmtNum(ix.folders_pending)} still to list` : ""));
+    parts.push(`${plural(ix.files_seen, "file")} found`);
+    if (ix.pass_started) parts.push(`running ${fmtDur(nowSecs() - ix.pass_started)}`);
+    const title = (p.firstWalk ? "First listing of the drives: search results stay incomplete until it finishes." : "Checking the drives for new, moved and deleted files.") +
+      (ix.last_complete ? `\nLast complete listing ${fmtAgo(ix.last_complete)}.` : "");
+    return { cls: "run", text: parts.join(" · "), title, bar: null };
+  }
+  const warn = [];
+  if (p.offline.length) warn.push(`${plural(p.offline.length, "drive")} offline`);
+  if (p.partial.length) warn.push(`${plural(p.partial.length, "drive")} partly listed`);
+  const text = [`Up to date · ${plural(s.files_indexed, "file")}`, `checked ${fmtAgo(ix.last_complete)}`, ...warn].join(" · ");
+  return { cls: warn.length ? "warn" : "ok", text, title: ix.next_walk ? `Next check ${fmtIn(ix.next_walk)}.` : "", bar: 1 };
+}
+/** Stage 2, "Reading PDFs". */
+function stageRead(p) {
+  const s = p.s;
+  const progress = `${fmtNum(p.read)} of ${fmtNum(p.total)} read`;
+  const tail = [];
+  if (p.failed) tail.push(`${fmtNum(p.failed)} could not be read`);
+  if (p.scopeProblems.length) tail.push(`${plural(p.scopeProblems.length, "folder")} need${p.scopeProblems.length === 1 ? "s" : ""} attention`);
+  const bar = p.total ? p.read / p.total : 0;
+  const warnIf = (c) => (p.scopeProblems.length ? "warn" : c);
+  if (!p.scopeCount) {
+    return { cls: "warn", text: "No reading folders chosen: PDFs are found by file name only", title: "Add your project folders under Folders being read on the Search page so the text printed on their drawings can be searched.", bar: 0 };
+  }
+  if (p.reading) {
+    // Most useful first: the strip cuts the end off on a narrow window.
+    const parts = [progress, `${fmtNum(p.waiting)} waiting`];
+    if (s.reading_eta_secs > 0) parts.push(`about ${fmtDur(s.reading_eta_secs)} left`);
+    parts.push(...tail);
+    if (s.current_file) parts.push(`now ${baseName(s.current_file)}`);
+    if (s.pages_per_hour) parts.push(`${fmtNum(s.pages_per_hour)} pages/h`);
+    return { cls: warnIf("run"), text: parts.join(" · "), title: (s.current_file || "") + (s.reader_note ? `\n${s.reader_note}` : ""), bar };
+  }
+  if (p.waiting > 0) {
+    const why = s.reader_note || (s.reader_state ? cap(s.reader_state) : "Waiting");
+    return { cls: p.paused ? "warn" : warnIf("idle"), text: [cap(why), progress, `${fmtNum(p.waiting)} waiting`, ...tail].join(" · "), title: s.reader_note || "", bar };
+  }
+  if (!p.total) {
+    if (p.walking) return { cls: warnIf("idle"), text: [cap(s.reader_note || "waiting for the file list to finish"), "no PDFs queued yet", ...tail].join(" · "), title: "PDFs in your reading folders are queued as stage 1 lists them.", bar: 0 };
+    return { cls: "warn", text: ["No PDFs found in your reading folders", ...tail].join(" · "), title: "", bar: 0 };
+  }
+  if (p.walking) return { cls: warnIf("idle"), text: [`All ${fmtNum(p.total)} PDFs found so far read`, "more are queued as stage 1 lists folders", ...tail].join(" · "), title: "", bar: 1 };
+  return { cls: warnIf("ok"), text: [`All ${fmtNum(p.total)} PDFs in your reading folders read`, ...tail].join(" · "), title: "", bar: 1 };
+}
+
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 async function copyText(t) {
   try { await navigator.clipboard.writeText(t); toast("Copied"); }

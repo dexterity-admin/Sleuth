@@ -17,7 +17,7 @@
 //!   are not listed again (their known subfolders are walked instead).
 
 use sleuth_core::paths::server_key;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::windows::fs::MetadataExt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -26,6 +26,9 @@ use std::time::{Duration, UNIX_EPOCH};
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const ROOT_PROBE: Duration = Duration::from_secs(4);
+/// Extra probes of a network root that did not answer, and the wait between.
+const PROBE_RETRIES: usize = 2;
+const PROBE_RETRY_WAIT: Duration = Duration::from_secs(5);
 /// Timed-out listings allowed to be still waiting, per server.
 pub const MAX_STUCK: usize = 4;
 
@@ -46,8 +49,11 @@ pub struct WalkConfig {
     pub listing_timeout: Duration,
     /// Lower-case path prefixes never entered.
     pub excluded: Vec<String>,
-    /// Run listing threads in Windows background mode (low CPU and I/O priority).
+    /// Run listing threads at below-normal CPU priority (disk priority stays normal).
     pub background: bool,
+    /// Lower-case folders listed before the rest (the reading folders):
+    /// roots holding one get most listing threads until they are done.
+    pub first: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -154,10 +160,82 @@ fn is_network(p: &str) -> bool {
     p.starts_with("\\\\")
 }
 
+/// Folders to list, one stack per root so that a deep root cannot starve
+/// the other roots on the same server.
 struct Queue {
-    items: VecDeque<(String, String)>,
+    roots: Vec<RootQueue>,
+    /// Counts listings: every fourth goes to the other roots.
+    turn: usize,
+    /// Round-robin positions among first and among other roots.
+    next_first: usize,
+    next_other: usize,
     /// Folders queued or being listed.
     pending: usize,
+    /// Lower-case folders already given their second try.
+    retried: HashSet<String>,
+}
+
+struct RootQueue {
+    root: String,
+    first: bool,
+    items: VecDeque<String>,
+}
+
+impl Queue {
+    fn new(roots: &[String], first: &[String]) -> Queue {
+        let roots = roots
+            .iter()
+            .map(|r| {
+                let lower = r.trim_end_matches('\\').to_lowercase();
+                let first = first.iter().any(|f| {
+                    let f = f.trim_end_matches('\\');
+                    f == lower || f.starts_with(&format!("{lower}\\")) || lower.starts_with(&format!("{f}\\"))
+                });
+                RootQueue { root: r.clone(), first, items: VecDeque::from([r.clone()]) }
+            })
+            .collect::<Vec<_>>();
+        let pending = roots.len();
+        Queue { roots, turn: 0, next_first: 0, next_other: 0, pending, retried: HashSet::new() }
+    }
+
+    /// Three of every four listings go to roots holding a reading folder
+    /// while they have work; the rest take turns.
+    fn pop(&mut self) -> Option<(String, String)> {
+        self.turn = self.turn.wrapping_add(1);
+        let prefer_first = self.turn % 4 != 0;
+        let n = self.roots.len();
+        for pass in 0..2 {
+            let want_first = if pass == 0 { prefer_first } else { !prefer_first };
+            let cursor = if want_first { &mut self.next_first } else { &mut self.next_other };
+            for k in 0..n {
+                let i = (*cursor + k) % n;
+                let rq = &mut self.roots[i];
+                if rq.first == want_first
+                    && let Some(d) = rq.items.pop_front()
+                {
+                    *cursor = i + 1;
+                    return Some((rq.root.clone(), d));
+                }
+            }
+        }
+        None
+    }
+
+    /// Behind everything else of its root: a second try, a little later.
+    fn push_last(&mut self, root: &str, dir: String) {
+        if let Some(rq) = self.roots.iter_mut().find(|r| r.root == root) {
+            rq.items.push_back(dir);
+        }
+    }
+
+    /// Depth-first within a root keeps the queue (and memory) small.
+    fn push(&mut self, root: &str, subdirs: Vec<String>) {
+        if let Some(rq) = self.roots.iter_mut().find(|r| r.root == root) {
+            for d in subdirs.into_iter().rev() {
+                rq.items.push_front(d);
+            }
+        }
+    }
 }
 
 /// Walk all roots; `sink` receives events from many threads. Returns when
@@ -184,7 +262,16 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
     let network = roots.first().is_some_and(|r| is_network(r));
     let mut live = Vec::new();
     for r in roots {
-        let probe = list_with_timeout(r, ROOT_PROBE);
+        // A file server that drops for a few seconds must not be skipped for
+        // the whole walk (hours): ask three times before calling it offline.
+        let mut probe = list_with_timeout(r, ROOT_PROBE);
+        for _ in 0..PROBE_RETRIES {
+            if probe.is_ok() || !network || cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(PROBE_RETRY_WAIT);
+            probe = list_with_timeout(r, ROOT_PROBE);
+        }
         match probe {
             Ok(_) => live.push(r.clone()),
             Err(reason) => sink(WalkEvent::RootOffline { root: r.clone(), reason }),
@@ -193,7 +280,7 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
     if live.is_empty() {
         return;
     }
-    let q = Arc::new((Mutex::new(Queue { items: live.iter().map(|r| (r.clone(), r.clone())).collect(), pending: live.len() }), Condvar::new()));
+    let q = Arc::new((Mutex::new(Queue::new(&live, &cfg.first)), Condvar::new()));
     let remaining: Mutex<HashMap<String, usize>> = Mutex::new(live.iter().map(|r| (r.clone(), 1usize)).collect());
     let threads = if network { cfg.per_server.max(1) } else { cfg.local_threads.max(1) };
     std::thread::scope(|s| {
@@ -202,7 +289,7 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
             let remaining = &remaining;
             s.spawn(move || {
                 if cfg.background {
-                    crate::sys::enter_background_mode();
+                    crate::sys::enter_low_priority();
                 }
                 loop {
                     let next = {
@@ -213,7 +300,7 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
                                 cv.notify_all();
                                 return;
                             }
-                            if let Some(item) = g.items.pop_front() {
+                            if let Some(item) = g.pop() {
                                 break item;
                             }
                             if g.pending == 0 {
@@ -225,6 +312,7 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
                     };
                     let (root, dir) = next;
                     let mut subdirs = Vec::new();
+                    let mut retry: Option<String> = None;
                     let resumed = done(&norm_dir(&dir));
                     let listed = match resumed {
                         Some(kids) => {
@@ -250,12 +338,21 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
                             }
                             sink(WalkEvent::Listed { root: root.clone(), dir: norm_dir(&dir), entries });
                         }
-                        Some(Err(reason)) => sink(WalkEvent::Skipped { root: root.clone(), dir: dir.clone(), reason }),
+                        Some(Err(reason)) => {
+                            // A network hiccup gets one more try at the end of
+                            // this root's queue; access denied never changes.
+                            let again = is_network(&dir) && reason != "access denied" && q.0.lock().unwrap().retried.insert(dir.to_lowercase());
+                            if again {
+                                retry = Some(dir.clone());
+                            } else {
+                                sink(WalkEvent::Skipped { root: root.clone(), dir: dir.clone(), reason });
+                            }
+                        }
                     }
                     let root_finished = {
                         let mut rem = remaining.lock().unwrap();
                         let n = rem.get_mut(&root).unwrap();
-                        *n += subdirs.len();
+                        *n += subdirs.len() + retry.is_some() as usize;
                         *n -= 1;
                         *n == 0
                     };
@@ -264,11 +361,11 @@ fn walk_group(roots: &[String], cfg: &WalkConfig, cancel: &Arc<AtomicBool>, done
                     }
                     let (m, cv) = &*q;
                     let mut g = m.lock().unwrap();
-                    g.pending += subdirs.len();
+                    g.pending += subdirs.len() + retry.is_some() as usize;
                     g.pending -= 1;
-                    // Depth-first keeps the queue (and memory) small on deep trees.
-                    for d in subdirs.into_iter().rev() {
-                        g.items.push_front((root.clone(), d));
+                    g.push(&root, subdirs);
+                    if let Some(d) = retry {
+                        g.push_last(&root, d);
                     }
                     cv.notify_all();
                 }
@@ -287,6 +384,31 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     #[test]
+    fn a_deep_root_does_not_starve_the_others_and_reading_folders_go_first() {
+        let roots = vec![r"\\srv\e\".to_string(), r"\\srv\Project\".to_string(), r"\\srv\free\".to_string()];
+        let mut q = Queue::new(&roots, &[r"\\srv\project".to_string()]);
+        let mut served = HashMap::<String, usize>::new();
+        for _ in 0..400 {
+            let Some((root, dir)) = q.pop() else { break };
+            *served.entry(root.clone()).or_default() += 1;
+            // Every root is endlessly deep.
+            q.push(&root, vec![format!(r"{dir}\a"), format!(r"{dir}\b")]);
+        }
+        let n = |r: &str| served.get(r).copied().unwrap_or(0);
+        assert!(n(r"\\srv\Project\") >= 290, "reading folder first: {served:?}");
+        assert!(n(r"\\srv\e\") >= 40 && n(r"\\srv\free\") >= 40, "others still progress: {served:?}");
+        // Without reading folders the roots share evenly.
+        let mut q = Queue::new(&roots, &[]);
+        let mut served = HashMap::<String, usize>::new();
+        for _ in 0..300 {
+            let (root, dir) = q.pop().unwrap();
+            *served.entry(root.clone()).or_default() += 1;
+            q.push(&root, vec![format!(r"{dir}\a")]);
+        }
+        assert!(served.values().all(|&v| v == 100), "{served:?}");
+    }
+
+    #[test]
     fn walks_a_temp_tree_and_respects_exclusions() {
         let base = std::env::temp_dir().join(format!("dh-walk-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -301,6 +423,7 @@ mod tests {
             listing_timeout: Duration::from_secs(5),
             excluded: vec![base.join("skip").to_string_lossy().to_lowercase()],
             background: false,
+            first: vec![],
         };
         let files = Mutex::new(Vec::new());
         let done = AtomicUsize::new(0);
@@ -325,7 +448,7 @@ mod tests {
         let root = base.to_string_lossy().to_string();
         let a = base.join("a").to_string_lossy().to_string();
         let b = base.join("a").join("b").to_string_lossy().to_string();
-        let cfg = WalkConfig { per_server: 1, local_threads: 2, listing_timeout: Duration::from_secs(5), excluded: vec![], background: false };
+        let cfg = WalkConfig { per_server: 1, local_threads: 2, listing_timeout: Duration::from_secs(5), excluded: vec![], background: false, first: vec![] };
         let listed = Mutex::new(Vec::new());
         // the root and "a" were listed before the interruption
         let done = |d: &str| {
@@ -358,7 +481,7 @@ mod tests {
 
     #[test]
     fn missing_root_is_offline() {
-        let cfg = WalkConfig { per_server: 1, local_threads: 1, listing_timeout: Duration::from_secs(2), excluded: vec![], background: false };
+        let cfg = WalkConfig { per_server: 1, local_threads: 1, listing_timeout: Duration::from_secs(2), excluded: vec![], background: false, first: vec![] };
         let offline = AtomicUsize::new(0);
         walk(&[r"Q:\does\not\exist".into()], &cfg, &Arc::new(AtomicBool::new(false)), &|ev| {
             if let WalkEvent::RootOffline { .. } = ev {

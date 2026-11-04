@@ -13,3 +13,6 @@ node_modules/
 /.claude/
 /apps/desktop/src-tauri/runtime/
 /bench/corpus/
+
+# Sleuth installed into the repo folder by the installer
+/Sleuth/

@@ -7,6 +7,8 @@ param([switch]$SkipTests)
 $ErrorActionPreference = 'Continue'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+# Build output: target\ unless CARGO_TARGET_DIR moves it (e.g. to a roomier drive).
+$target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
 
 & "$PSScriptRoot\fetch-vendor.ps1"
 
@@ -19,14 +21,14 @@ cargo build --release -p sleuth-worker -p sleuth-server
 if ($LASTEXITCODE) { throw 'worker or server build failed' }
 $bin = 'apps\desktop\src-tauri\binaries'
 New-Item -ItemType Directory -Force $bin | Out-Null
-Copy-Item -Force 'target\release\sleuth-worker.exe' "$bin\sleuth-worker-x86_64-pc-windows-msvc.exe"
+Copy-Item -Force "$target\release\sleuth-worker.exe" "$bin\sleuth-worker-x86_64-pc-windows-msvc.exe"
 
 # DLLs the OCR runtime loads, shipped next to the worker so a PC without the
 # Visual C++ runtime, or with an older DirectML, still works: DirectML from the
 # ONNX Runtime build, and the Visual C++ runtime (app-local deployment).
 $runtime = 'apps\desktop\src-tauri\runtime'
 New-Item -ItemType Directory -Force $runtime | Out-Null
-Copy-Item -Force 'target\release\DirectML.dll' "$runtime\DirectML.dll"
+Copy-Item -Force "$target\release\DirectML.dll" "$runtime\DirectML.dll"
 foreach ($dll in 'msvcp140.dll', 'msvcp140_1.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   $src = Join-Path $env:SystemRoot "System32\$dll"
   if (-not (Test-Path $src)) { throw "$dll not found on the build machine" }
@@ -42,4 +44,4 @@ try {
 & "$PSScriptRoot\package-server.ps1" -Runtime $runtime
 if ($LASTEXITCODE) { throw 'server package failed' }
 
-Get-ChildItem 'target\release\bundle\nsis', 'out' -ErrorAction SilentlyContinue | Select-Object Name, Length
+Get-ChildItem "$target\release\bundle\nsis", 'out' -ErrorAction SilentlyContinue | Select-Object Name, Length

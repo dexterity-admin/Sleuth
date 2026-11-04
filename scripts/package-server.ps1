@@ -10,7 +10,8 @@ if (-not $Version) {
 $stage = Join-Path $root "out\server-stage"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force "$stage\models" | Out-Null
-Copy-Item 'target\release\sleuth-server.exe' $stage
+$target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
+Copy-Item "$target\release\sleuth-server.exe" $stage
 Copy-Item 'vendor\pdfium\bin\pdfium.dll' $stage
 Get-ChildItem $Runtime -Filter *.dll | Copy-Item -Destination $stage
 foreach ($m in 'pp-ocrv6_small_det.onnx', 'pp-ocrv6_small_rec.onnx', 'ppocrv6_dict.txt', 'pp-lcnet_x1_0_textline_ori.onnx') {

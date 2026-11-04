@@ -123,7 +123,9 @@ impl Term {
     pub fn new(text: &str) -> Option<Term> {
         let raw = text.trim().to_lowercase();
         let sep = sep_form(&raw);
-        if sep.is_empty() {
+        // `_` or `&` alone is still a file-name search (literal text, see
+        // [`Term::is_punctuation`]); only wildcards alone are not.
+        if sep.is_empty() && raw.chars().all(|c| c == '*' || c == '?') {
             return None;
         }
         let fold = fold_form(&raw);
@@ -232,6 +234,143 @@ impl Term {
         }
         out
     }
+}
+
+/// File-name and path matching, the way Everything (voidtools) does it:
+/// case-insensitive substring of the name, `*` and `?` wildcards, and a term
+/// containing `\` compared with the full path.
+impl Term {
+    /// Written with `*` or `?`.
+    pub fn has_wildcards(&self) -> bool {
+        self.raw.contains(['*', '?'])
+    }
+
+    /// Contains `\`: compared with the full path, not the name.
+    pub fn is_path(&self) -> bool {
+        self.raw.contains('\\')
+    }
+
+    /// The longest run of the term without wildcards (the whole term when it
+    /// has none); what the index is asked for.
+    pub fn literal(&self) -> &str {
+        self.raw.split(['*', '?']).max_by_key(|s| sep_form(s).chars().count()).unwrap_or("")
+    }
+
+    /// How this term matches a file. A path term (`\` in it) is compared with
+    /// `path`; any other term with `name`. Wildcards must match the whole
+    /// name or path for [`MatchClass::Exact`]; matching only a part of it is
+    /// [`MatchClass::Partial`]. Look-alike folding never applies to names.
+    pub fn explain_name(&self, name: &str, path: &str) -> Option<MatchDetail> {
+        let target = if self.is_path() { path } else { name };
+        let what = if self.is_path() { "path" } else { "name" };
+        if self.has_wildcards() {
+            let t = target.to_lowercase();
+            let stem = if self.is_path() { None } else { t.rsplit_once('.').map(|(s, _)| s.to_string()) };
+            if glob_match(&self.raw, &t) || stem.is_some_and(|s| glob_match(&self.raw, &s)) {
+                return Some(MatchDetail { class: MatchClass::Exact, why: format!("The {what} matches the pattern") });
+            }
+            if glob_match(&format!("*{}*", self.raw), &t) {
+                return Some(MatchDetail { class: MatchClass::Partial, why: format!("Part of the {what} matches the pattern") });
+            }
+            return None;
+        }
+        if self.is_literal_only() {
+            return self.literal_in(target);
+        }
+        // Typed punctuation at an end anchors the match there: `_ACTIVIT` is
+        // exact in `PLAN_ACTIVIT_A.pdf`.
+        if !self.is_path()
+            && let Some(d) = self.literal_in(target)
+            && d.class == MatchClass::Exact
+        {
+            return Some(d);
+        }
+        // `Rev-1\` and `\26-02-2024` mark folder boundaries themselves.
+        let trimmed = if self.is_path() { Term::new(self.raw.trim_matches('\\')).filter(|_| !self.raw.starts_with("\\\\")) } else { None };
+        let d = trimmed.as_ref().unwrap_or(self).explain(target, 1.0)?;
+        (d.class != MatchClass::Uncertain).then_some(d)
+    }
+
+    /// No letters or digits at all (`_`, `&`).
+    pub fn is_punctuation(&self) -> bool {
+        self.sep.is_empty()
+    }
+
+    /// Matched only as typed: punctuation alone, or fewer than three letters
+    /// and digits written with punctuation (`-1`, `_A`), where dropping the
+    /// punctuation would match almost every name.
+    pub fn is_literal_only(&self) -> bool {
+        !self.has_wildcards() && self.sep.chars().count() < 3 && self.sep != self.raw.chars().filter(|c| !c.is_whitespace()).collect::<String>()
+    }
+
+    /// [`Term::explain_name`] for [`Term::is_literal_only`] terms: the text
+    /// as typed (any case). Exact when no letter or digit continues it on a
+    /// side where the term itself ends in a letter or digit (`-1` in
+    /// `PSV-1.pdf`, not in `PSV-12.pdf`).
+    fn literal_in(&self, text: &str) -> Option<MatchDetail> {
+        let chars: Vec<char> = text.to_lowercase().chars().collect();
+        let raw: Vec<char> = self.raw.chars().collect();
+        let (first, last) = (raw.first()?.is_alphanumeric(), raw.last()?.is_alphanumeric());
+        let hits = find_all(&chars, &raw);
+        if hits.is_empty() {
+            return None;
+        }
+        let alone = hits.iter().any(|&i| {
+            let before = !first || i == 0 || !chars[i - 1].is_alphanumeric();
+            let end = i + raw.len();
+            let after = !last || end >= chars.len() || !chars[end].is_alphanumeric();
+            before && after
+        });
+        Some(if alone {
+            MatchDetail { class: MatchClass::Exact, why: "Same text as typed".into() }
+        } else {
+            MatchDetail { class: MatchClass::Partial, why: "Only inside a longer tag or word".into() }
+        })
+    }
+
+    /// The name is the term itself, with or without its extension (or, for a
+    /// path term, the path is the term).
+    pub fn is_whole_name(&self, name: &str, path: &str) -> bool {
+        if self.has_wildcards() {
+            return false;
+        }
+        if self.is_path() {
+            return path.to_lowercase().trim_end_matches('\\') == self.raw.trim_end_matches('\\');
+        }
+        let n = name.to_lowercase();
+        n == self.raw || n.rsplit_once('.').is_some_and(|(stem, _)| stem == self.raw)
+    }
+}
+
+/// Case-sensitive glob (callers lower-case both sides): `*` any run of
+/// characters, `?` exactly one character, everything else literal.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || (p[pi] != '*' && p[pi] == t[ti])) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
+/// A pasted absolute path: `T:\folder\file.pdf` or `\\server\share\...`.
+pub fn looks_like_path(s: &str) -> bool {
+    let b = s.as_bytes();
+    s.starts_with("\\\\") || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
 }
 
 /// A tag reading shorter than this is never offered as part of a tag.
@@ -365,6 +504,15 @@ impl SearchQuery {
 /// alternatives; a quoted `"OR"` is searched as text.
 pub fn parse_search(query: &str) -> SearchQuery {
     let mut q = SearchQuery::default();
+    // A pasted full path keeps its spaces: it is one term, not several words.
+    let whole = query.trim();
+    let whole = whole.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(whole);
+    if looks_like_path(whole) && !whole.contains('"') && !whole.split_whitespace().any(|w| w == "OR" || w == "|")
+        && let Some(t) = Term::new(whole)
+    {
+        q.groups.push(vec![t]);
+        return q;
+    }
     let mut group: Vec<Term> = Vec::new();
     for t in tokens(query) {
         if !t.quoted && (t.text == "OR" || t.text == "|") {
@@ -396,6 +544,14 @@ pub fn parse_search(query: &str) -> SearchQuery {
     }
     if !group.is_empty() {
         q.groups.push(group);
+    }
+    // A lone `-` or `&` between words (`PSV - 1203`, `A & B`) is spacing,
+    // not a search of its own; punctuation is searched only when nothing
+    // else was typed in that alternative.
+    for g in &mut q.groups {
+        if g.iter().any(|t| !t.is_punctuation()) {
+            g.retain(|t| !t.is_punctuation());
+        }
     }
     q
 }
@@ -489,8 +645,24 @@ mod tests {
     #[test]
     fn empty_and_punctuation_queries() {
         assert!(parse_query("   ").is_empty());
-        assert!(parse_query("-- \"\"").is_empty());
+        assert!(parse_query("\"\" * ??").is_empty());
         assert!(parse_search("  ").is_empty());
+        // punctuation alone is a (file-name) search, as in Everything
+        let t = &parse_query("_")[0];
+        assert!(t.is_punctuation() && t.is_literal_only());
+        assert_eq!(t.explain_name("a_b.pdf", "").unwrap().class, MatchClass::Exact);
+        assert!(t.explain_name("ab.pdf", "").is_none());
+        assert_eq!(parse_query("& --").len(), 2);
+        assert_eq!(parse_search("& --").groups[0].len(), 2);
+        assert_eq!(parse_search("PSV - 1203").groups[0].len(), 2, "a spaced dash is not a term");
+        // a short term with punctuation needs that punctuation
+        let t = &parse_query("-1")[0];
+        assert!(t.is_literal_only());
+        assert_eq!(t.explain_name("PSV-1.pdf", "").unwrap().class, MatchClass::Exact);
+        assert_eq!(t.explain_name("PSV-12.pdf", "").unwrap().class, MatchClass::Partial);
+        assert!(t.explain_name("PSV1.pdf", "").is_none());
+        assert!(t.explain_name("1.pdf", "").is_none());
+        assert!(!parse_query("ab")[0].is_literal_only());
     }
 
     #[test]
@@ -505,5 +677,42 @@ mod tests {
         assert_eq!(parse_search("valve or \"OR\"").groups[0].len(), 3);
         // a colon inside a tag is not a filter
         assert_eq!(parse_search("REF:1001").groups[0][0].raw, "ref:1001");
+    }
+
+    #[test]
+    fn pasted_path_is_one_term() {
+        let p = r"T:\00_DOCUMENTS\Rev-1\14-01-15-2632_PSV-2809-01_HOLD.pdf";
+        for q in [p.to_string(), format!("\"{p}\""), format!("  {p} ")] {
+            let s = parse_search(&q);
+            assert_eq!(s.groups, vec![vec![Term::new(p).unwrap()]], "{q}");
+            assert!(s.groups[0][0].is_path());
+        }
+        assert_eq!(parse_search(r"\\fs01\share\a b.pdf").groups[0].len(), 1);
+        // words that merely contain a backslash stay words
+        assert_eq!(parse_search(r"Rev-1\ PSV").groups[0].len(), 2);
+    }
+
+    #[test]
+    fn names_wildcards_and_paths() {
+        assert!(glob_match("*1636", "iso-1636"));
+        assert!(glob_match("fsk_batch-?.zip", "fsk_batch-1.zip"));
+        assert!(!glob_match("fsk_batch-?.zip", "fsk_batch-12.zip"));
+        assert!(glob_match("a*b*c", "axxbyyc") && !glob_match("a*b*c", "axxbyy"));
+        let t = one("*1636");
+        assert!(t.has_wildcards());
+        assert_eq!(t.literal(), "1636");
+        assert_eq!(t.explain_name("ISO-1636.pdf", "").unwrap().class, MatchClass::Exact);
+        assert_eq!(t.explain_name("A-1636-REV.2.xlsx", "").unwrap().class, MatchClass::Partial);
+        assert!(t.explain_name("A-1637.pdf", "").is_none());
+        let t = one("FSK_Batch-1");
+        assert!(t.is_whole_name("FSK_Batch-1.zip", "") && t.is_whole_name("fsk_batch-1", ""));
+        assert!(!t.is_whole_name("FSK_Batch-12.zip", ""));
+        assert_eq!(t.explain_name("FSK Batch 1.zip", "").unwrap().class, MatchClass::SeparatorsIgnored);
+        // names are never look-alike matches
+        assert!(one("PSV-1203").explain_name("PSV-12O3.pdf", "").is_none());
+        let t = one(r"Rev-1\26-02-2024\");
+        assert_eq!(t.explain_name("x.pdf", r"\\s\h\Rev-1\26-02-2024\x.pdf").unwrap().class, MatchClass::Exact);
+        assert!(t.explain_name("Rev-1 26-02-2024.pdf", r"C:\Rev-1 26-02-2024.pdf").is_none_or(|d| d.class != MatchClass::Exact));
+        assert!(looks_like_path(r"C:\x") && looks_like_path(r"\\srv\s") && !looks_like_path(r"PSV\x") && !looks_like_path("C:"));
     }
 }

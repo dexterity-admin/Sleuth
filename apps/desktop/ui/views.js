@@ -437,11 +437,120 @@ function table(headers, rows, cls) {
   return t;
 }
 const SERVER_LABEL = { not_configured: "Not set up (Sleuth works on its own)", connected: "Connected", offline: "Offline", degraded: "Refusing this PC", syncing: "Connected, still reading its first pass" };
+// ---------- Indexing: what Sleuth is doing, per drive and per reading folder ----------
+// Kept as one element across Monitor refreshes and redrawn from the latest
+// status (every 2 s while working), so the numbers move without Refresh.
+const monIndex = el("section", "mon-sec mon-index");
+function stateCell(cls, text) { return el("span", "pill st-" + cls, text); }
+function stageBlock(n, name, st, lines) {
+  const d = el("div", "wstep " + st.cls);
+  const head = el("div", "wstep-head");
+  head.append(el("span", "st-dot"), el("b", null, `Stage ${n}: ${name}`));
+  d.append(head, el("div", "wstep-text", st.text));
+  const trk = el("div", "st-trk"); const fill = el("div", "st-fill" + (st.bar === null ? " moving" : ""));
+  if (st.bar !== null) fill.style.width = Math.round(Math.min(1, st.bar) * 100) + "%";
+  trk.append(fill); d.append(trk);
+  const dl = el("dl", "kv");
+  for (const [k, v] of lines) if (v !== null && v !== undefined && v !== "") kvAdd(dl, k, v);
+  if (dl.childElementCount) d.append(dl);
+  return d;
+}
+function renderIndexing() {
+  const r = state.lastStatus;
+  const s = r?.status;
+  monIndex.replaceChildren(el("h3", null, "Indexing: what Sleuth is doing"));
+  if (!s) { monIndex.append(el("div", "dim", "Waiting for the background reader…")); return; }
+  const p = progressModel(s), ix = p.ix;
+  monIndex.append(el("p", "hint", "Sleuth works in two stages. Stage 1 lists every folder on every drive, so any file can be found by its name. Stage 2 reads the text of the PDFs in your reading folders, so tags printed on the drawings can be found too. Both run in the background and keep themselves up to date."));
+
+  const stages = el("div", "stagecards");
+  const f = stageFind(p), rd = stageRead(p);
+  stages.append(stageBlock(1, "Finding files", f, ix ? [
+    ["Now", p.walking ? (p.firstWalk ? "First listing of the drives" : "Checking the drives for changes") : "Up to date"],
+    ["Running for", p.walking && ix.pass_started ? fmtDur(nowSecs() - ix.pass_started) : null],
+    ["Folders listed", p.walking ? fmtNum(ix.folders_listed) + (ix.folders_pending ? ` (${fmtNum(ix.folders_pending)} found, still to list)` : "") : null],
+    ["Files found", p.walking ? fmtNum(ix.files_seen) : null],
+    ["Files in the index", fmtNum(s.files_indexed)],
+    ["Last complete listing", ix.last_complete ? `${fmtAgo(ix.last_complete)} (${fmtDateTime(ix.last_complete)})` : "Not finished yet"],
+    ["Next check", !p.walking && ix.next_walk ? fmtIn(ix.next_walk) : null],
+  ] : [["Files in the index", fmtNum(s.files_indexed)], ["Progress", "This background reader does not report listing progress. Update Sleuth on this PC to see it."]]));
+  stages.append(stageBlock(2, "Reading PDFs", rd, [
+    ["Now", s.reader_note ? cap(s.reader_note) : cap(s.reader_state || "")],
+    ["Current file", s.current_file || null],
+    [p.scopes ? "In your reading folders" : "All PDFs", p.total ? `${fmtNum(p.read)} of ${fmtNum(p.total)} PDFs read` : null],
+    ["Waiting to be read", fmtNum(p.waiting)],
+    ["Could not be read", fmtNum(p.failed)],
+    ["Speed", s.pages_per_hour ? `${fmtNum(s.pages_per_hour)} pages per hour` : null],
+    ["Time left", s.reading_eta_secs > 0 ? `about ${fmtDur(s.reading_eta_secs)}` : (p.waiting > 0 ? "Not known yet" : null)],
+  ]));
+  monIndex.append(stages);
+
+  // Per drive (stage 1).
+  monIndex.append(el("h4", null, "Drives being listed (stage 1)"));
+  if (p.roots.length) {
+    const rows = p.roots.map((x) => {
+      const [cls, label] = ROOT_STATE[x.state] || ["idle", cap(x.state || "")];
+      const name = el("span", "mono", x.display || x.root); name.title = x.root;
+      return [name, stateCell(cls, label), fmtNum(x.folders), fmtNum(x.files), x.skipped ? fmtNum(x.skipped) : "", x.last_ok ? fmtAgo(x.last_ok) : "never", x.note || ""];
+    });
+    const t = table(["Drive", "State", "Folders", "Files", "Skipped", "Last complete", "Note"], rows, "num-cols drives-table");
+    monIndex.append(t);
+    if (p.roots.some((x) => x.skipped)) monIndex.append(el("p", "hint", "Skipped folders did not answer in time or refused access. They are tried again on the next check."));
+  } else {
+    monIndex.append(el("div", "dim", ix ? "No drives reported yet." : "Not reported by this background reader. See Folders and drives below."));
+  }
+
+  // Per reading folder (stage 2).
+  monIndex.append(el("h4", null, "Reading folders (stage 2)"));
+  const chosen = state.settings?.content_scopes || [];
+  if (!p.scopeCount) {
+    monIndex.append(el("p", "warnbox", "No reading folders chosen. PDFs are found by file name only and the text printed on drawings is not searched."));
+  } else if (p.scopes) {
+    const rows = p.scopes.map((x) => {
+      const name = el("div");
+      name.append(el("span", "mono", x.folder));
+      if (x.unc && x.unc.toLowerCase() !== String(x.folder).toLowerCase()) name.append(el("div", "dim small-text mono", x.unc));
+      const prog = el("div", "scope-prog");
+      const trk = el("div", "st-trk"); const fill = el("div", "st-fill");
+      fill.style.width = (x.pdfs ? Math.round((x.read / x.pdfs) * 100) : 0) + "%";
+      trk.append(fill);
+      prog.append(trk, el("span", "small-text", x.pdfs ? `${fmtNum(x.read)} of ${fmtNum(x.pdfs)} read` : "no PDFs yet"));
+      const ln = scopeLine(x);
+      const note = x.note && x.note !== "ok" ? el("div", "scope-warn " + (x.note === "not indexed yet" ? "" : "warn"), SCOPE_NOTE[x.note] || x.note) : "";
+      return [name, prog, fmtNum(x.waiting), x.failed ? fmtNum(x.failed) : "", note || el("span", "dim", ln.text)];
+    });
+    monIndex.append(table(["Folder", "Progress", "Waiting", "Failed", "Note"], rows, "scopes-table"));
+  } else {
+    monIndex.append(table(["Folder", "Progress"], chosen.map((c) => [el("span", "mono", c), el("span", "dim", "Not reported by this background reader")]), "scopes-table"));
+  }
+  const unread = Number(s.pdfs_unread) || 0;
+  const tip = el("p", "hint");
+  tip.append(unread ? `${plural(unread, "PDF")} outside your reading folders ${unread === 1 ? "is" : "are"} found by file name only, not read. ` : "PDFs outside your reading folders are found by file name only, not read. ");
+  tip.append("To read a folder too, add it under Folders being read on the Search page. ");
+  const add = el("button", "small", "Add a reading folder"); add.type = "button";
+  add.onclick = () => addReadingFolder().catch((e) => toast(String(e)));
+  tip.append(add);
+  monIndex.append(tip);
+
+  // Files that could not be read.
+  const failed = r.failed || [];
+  const det = el("details", "failed-det");
+  det.append(el("summary", null, `Could not be read (${fmtNum(Math.max(failed.length, Number(s.pdfs_failed) || 0))})`));
+  const fbox = el("div", "failed");
+  if (!failed.length) fbox.append(el("div", "dim", "None"));
+  for (const x of failed) { const row = el("div"); const pp = el("span", "p", x.path); pp.title = x.path; row.append(pp, el("span", "r", x.reason)); fbox.append(row); }
+  det.append(fbox);
+  det.open = monIndex.dataset.failedOpen === "1";
+  det.ontoggle = () => { monIndex.dataset.failedOpen = det.open ? "1" : ""; };
+  monIndex.append(det);
+}
+
 function renderMonitor(m) {
   const s = m.status || {};
   const body = $("monBody");
   const scroll = body.scrollTop;
-  body.replaceChildren();
+  renderIndexing();
+  body.replaceChildren(monIndex);
   const g1 = el("div", "stats wide");
   g1.append(
     statCard("Files indexed", fmtNum(s.files_indexed)),
@@ -487,7 +596,7 @@ function renderMonitor(m) {
     statCard("Corrections", fmtNum(m.corrections)),
   );
   body.append(section("Index contents", g3));
-  body.append(section("Folders and drives", (m.roots || []).length
+  if (!(s.index?.roots || []).length) body.append(section("Folders and drives", (m.roots || []).length
     ? table(["Location", "State", "Last complete pass", "Note"], m.roots.map(([root, st, ok, note]) => [root, st, fmtDateTime(ok), note]))
     : el("div", "dim", "None")));
   const errs = m.rule_errors || [];
@@ -511,6 +620,10 @@ function renderMonitor(m) {
 }
 $("monRefresh").onclick = loadMonitor;
 viewHooks.monitor = {
-  show() { $("sbCount").textContent = "Monitor"; loadMonitor(); clearInterval(monTimer); monTimer = setInterval(loadMonitor, 5000); },
+  show() {
+    $("sbCount").textContent = "Monitor";
+    if (!monIndex.isConnected) $("monBody").replaceChildren(monIndex);
+    renderIndexing();
+    loadMonitor(); clearInterval(monTimer); monTimer = setInterval(loadMonitor, 5000); },
   hide() { clearInterval(monTimer); monTimer = 0; },
 };

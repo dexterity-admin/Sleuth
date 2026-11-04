@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.1
+
+Fixes the indexing problems that left 1.0.0 with nothing to search, and shows
+what Sleuth is doing at every moment. Install over 1.0.0: the index is upgraded
+and repaired in place; settings are kept.
+
+- **Reading folders chosen by drive letter now work.** `Z:\` was compared with
+  the network paths the index stores (`\\server\Project\...`), so no PDF in it
+  was ever queued for reading. Letters are now translated, and an existing
+  index is repaired when the worker starts.
+- **The file list is complete.** A walk took subfolders it had only seen as
+  already listed, so most of each drive was skipped and the walk "finished" in
+  seconds. On the office drives a first walk now finds over 1.5 million files
+  where 1.0.0 had 150,000. A walk stopped half-way resumes where it was.
+- **Reading folders are listed first, and reading starts as soon as their
+  drives are listed**, not after every drive. Until then only files you open
+  or search for are read.
+- **Drives sharing a file server take turns**: a deep share no longer starves
+  the others (one drive had listed one folder in four minutes).
+- **One share reached by two names** (a server name and its IP address) is
+  walked once and shown once, not twice.
+- **A busy PC reads slowly instead of not at all.** 1.0.0 paused reading
+  whenever other programs used much CPU, so a PC that was always busy never
+  read anything; now it reads on one thread.
+- **Short network drops are retried** (the server check three times, a failed
+  folder once more later) instead of marking a drive offline for hours.
+- **The index is never thrown away because it was busy.** Only a damaged index
+  is rebuilt; "database is locked" is waited out, and a folder listing is never
+  dropped because of it.
+- **The index's temporary log stays small.** It grew by gigabytes during a
+  walk and could fill the disk. A walk now writes only files that changed
+  (it rewrote every file of every drive each time), the log is folded back
+  every minute, and writing waits whenever it passes 512 MB. A program that
+  holds the index open is reported in Monitor.
+- **File names are searched in memory**, as Everything does: every name is
+  loaded at start (about 30 s for 2 million files) and kept up to date as
+  the walk adds and removes files. On 1.7 million files `*.zip` takes under
+  a second (42 s before), `x` 0.4 s (101 s before).
+- **Progress you can see.** A status strip shows both stages, "Finding files"
+  (folders listed, files found, per drive, running time) and "Reading PDFs"
+  (read of total in your reading folders, waiting, time left, why it waits).
+  Monitor has a table per drive and per reading folder; search says when
+  results may still be incomplete; a new install opens on a welcome card that
+  explains what happens next. Status no longer takes seconds on a big index.
+- **File-name search works like Everything**: any length (`FS`, `x`, `_`,
+  `&`), `*` and `?` wildcards, several words matched across name and folder,
+  a pasted full path (`T:\...\file.pdf`) finds that file, exact names first,
+  Unicode upper/lower case (`Обычный`), and name hits are no longer buried
+  under PDF text hits. Searches no longer wait for the history to be saved.
+
 ## 1.0.0
 
 Faster, more complete reading; search you can trust and explain; engineering

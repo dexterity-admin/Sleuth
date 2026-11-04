@@ -122,13 +122,13 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <li><b>Shares the work</b>: a drawing read on any PC in the office is not read again on yours.</li>
 </ul>
 <h3>How it works, in one paragraph</h3>
-<p>Sleuth has two parts. The <b>Sleuth window</b> is what you search in. The <b>Sleuth reader</b> is a background program that keeps a list of file names on your drives and reads PDFs in the folders you choose. It pauses when you're busy and speeds up when the PC is idle. Everything it learns is kept in an index on your PC, plus the office's shared reading cache, which is why searches are instant.</p>
+<p>Sleuth has two parts. The <b>Sleuth window</b> is what you search in. The <b>Sleuth reader</b> is a background program that keeps a list of file names on your drives and reads PDFs in the folders you choose. It slows down when you're busy and speeds up when the PC is idle. Everything it learns is kept in an index on your PC, plus the office's shared reading cache, which is why searches are instant.</p>
 <div class="eng"><b>For engineering use</b>Sleuth helps you find drawings; it does not certify them. When a result is labelled <span class="pill verify">Verify, OCR unsure</span>, or when the tag matters for a deliverable, open the page and read the tag yourself. Sleuth always shows you where to look.</div>
 
 <h2><span class="n">2</span>Installing Sleuth</h2>
 <p class="intro">Sleuth installs for your Windows account only. You don't need administrator rights, and it takes about a minute.</p>
 <ol>
-  <li>Open <b>github.com/dexterity-admin/Sleuth/releases/latest</b> and download <code>Sleuth_1.0.0_x64-setup.exe</code> (about 65 MB), or use the copy IT shared.</li>
+  <li>Open <b>github.com/dexterity-admin/Sleuth/releases/latest</b> and download <code>Sleuth_1.0.1_x64-setup.exe</code> (about 56 MB), or use the copy IT shared.</li>
   <li>Run it. Because the installer is not code-signed, Windows may show <b>"Windows protected your PC"</b>. Click <b>More info</b>, then <b>Run anyway</b>. You only see this for the first install; updates install from inside Sleuth.</li>
   <li>Click through the installer. Sleuth starts when it finishes, and adds a Start-menu entry.</li>
 </ol>
@@ -283,21 +283,22 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <h2><span class="n">9</span>Background reading and the index</h2>
 <p class="intro">The Sleuth reader works quietly in the background so searches are instant.</p>
 <h3>What the reader does</h3>
+<p>It works in two stages, both shown in the <b>status strip</b> at the bottom of the window. The strip stays visible everywhere and updates every few seconds; click either stage for the details on the Monitor page.</p>
 <ul>
-  <li><b>File names</b>: lists the files on every local and network drive, and refreshes the list every 6 hours.</li>
-  <li><b>Reading PDFs</b>: reads the PDFs in your <b>Folders being read</b>, newest first. Files you ask for (deep search, "Read this PDF now") always go first.</li>
+  <li><b>Stage 1, Finding files</b>: lists every folder on every local and network drive, so any file can be found by its name, and refreshes the list every 6 hours. Your reading folders are listed first. The strip shows the folders listed, the files found and the running time. The first listing of large office shares can take an hour or more; file names become searchable as it goes, and search says when results may still be incomplete. A listing stopped part-way (PC shut down) carries on where it was.</li>
+  <li><b>Stage 2, Reading PDFs</b>: reads the PDFs in your <b>Folders being read</b>, newest first, once the drives holding them are listed. The strip shows how many are read of the total, how many wait, and the time left. Files you ask for (deep search, "Read this PDF now") are read at once, even during stage 1.</li>
   <li><b>Changes</b>: a file that changes is read again automatically.</li>
 </ul>
 <h3>Being polite to your PC</h3>
 <ul>
-  <li>Reading pauses while other programs keep the CPU busy (above 60% by default) and while the PC runs on battery.</li>
+  <li>While other programs keep the CPU busy (above 60% by default) reading slows to one thread; it never stops, so the work still gets done. It pauses while the PC runs on battery.</li>
   <li>It uses half the CPU cores while you work, and more when nobody has touched the PC for 5 minutes.</li>
   <li>The OCR engine is unloaded from memory after 2 minutes with nothing to read.</li>
   <li>With "Keep reading in the background" on (the default), the reader keeps going after you close the window, and starts with Windows.</li>
 </ul>
 <h3>Index status</h3>
-<p>Click the reader status in the bottom-right corner to see how many files are indexed, read and waiting, and which files could not be read and why.</p>
-<figure><img src="../images/status.png" alt="The index status window"><figcaption>Files that can't be read are listed with the reason, never silently skipped.</figcaption></figure>
+<p>Click either stage in the status strip to open <b>Monitor</b>. It shows each drive (listing, done, partly listed or offline, with the reason), each reading folder with how many of its PDFs are read, and the files that could not be read and why. A reading folder given by a drive letter that is not mapped on this PC is flagged there.</p>
+<figure><img src="../images/v101/monitor-reading.png" alt="Monitor: both stages, each drive with its state, each reading folder with PDFs read of total"><figcaption>Monitor: what each stage is doing, every drive and reading folder, and files that can't be read, with the reason.</figcaption></figure>
 <table>
   <tr><th>Reason shown</th><th>Meaning</th></tr>
   <tr><td>password protected</td><td>The PDF is encrypted. Sleuth can still find it by name.</td></tr>
@@ -405,7 +406,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><th style="width:32%">Setting</th><th>What it does</th><th style="width:18%">Default</th></tr>
   <tr><td>OCR accuracy</td><td><b>Standard</b> is recommended. <b>High</b> uses a larger model, downloaded once (140 MB); it is about 3× slower and found no extra text in our tests.</td><td>Standard</td></tr>
   <tr><td>Resolution for OCR</td><td>300 dpi reads 2.5 mm text on A1/A3 sheets reliably. Use 400 dpi only for very small print; it is slower.</td><td>300 dpi</td></tr>
-  <tr><td>Pause reading while other programs use more than …</td><td>Reading waits while your PC is busy with other work.</td><td>60% CPU</td></tr>
+  <tr><td>Read slowly while other programs use more than …</td><td>Reading drops to one thread while your PC is busy with other work.</td><td>60% CPU</td></tr>
   <tr><td>Keep reading in the background</td><td>The reader keeps working when the window is closed, and starts with Windows.</td><td>On</td></tr>
   <tr><td>Shared reading cache</td><td>The office folder for shared results. Required; see section 16.</td><td><code>U:\Sleuth-cache</code></td></tr>
   <tr><td>Folders listed at once per file server</td><td>How hard deep search works each server. Raise for speed, lower if a server struggles.</td><td>4</td></tr>
@@ -434,7 +435,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>A drawing I know has the tag isn't found</td><td>Is its folder in <b>Folders being read</b>? If not, add it, or right-click the file and choose <b>Read this PDF now</b>. If you don't know where it is, use <b>Deep search</b>. Also try <b>Smart match</b> rather than Exact only.</td></tr>
   <tr><td>Results say "Verify, OCR unsure"</td><td>Open the preview and read the tag yourself. Faint, skewed or handwritten text is harder to read; the label tells you to look.</td></tr>
   <tr><td>"The shared reading cache isn't working"</td><td>Map <code>U:</code> or choose the folder IT gave you, in Settings → Shared reading cache → <b>Test</b> → <b>Save</b>.</td></tr>
-  <tr><td>Reading seems slow</td><td>Scans take about a minute per sheet. Reading pauses while you're busy and runs faster when you step away. Check the status bar: "paused: PC busy" is normal.</td></tr>
+  <tr><td>Reading seems slow</td><td>Scans take about 20 seconds per sheet. Reading slows while you're busy and runs faster when you step away. The status strip says why it waits ("Reading starts when the file list is complete", "Reading slowly: other programs use 95% of the CPU") and how long is left.</td></tr>
   <tr><td>A drive shows "Offline, skipped"</td><td>The share didn't answer. Check it in Explorer; when it's back, search again.</td></tr>
   <tr><td>"N folders not searched"</td><td>Those folders were locked or too slow. Hover to see them. Raise "Give up on a folder after" if a server is just slow.</td></tr>
   <tr><td>The window says the reader is restarting</td><td>Wait a few seconds; Sleuth restarts the reader automatically.</td></tr>
