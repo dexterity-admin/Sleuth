@@ -69,13 +69,17 @@ cargo run --release -p sleuth-engine --example bench -- .devdata/corpus --thread
 python bench/compare_dumps.py old.json new.json --show 40
 ```
 
-`--legacy` is the Sleuth 1.0 pipeline (a PDFium render per tile, 512 px overlap,
-recognition tile by tile). `--set key=value,...` changes single settings of
-either pipeline: `tile`, `overlap`, `detect`, `even_tiles`, `page_render`,
-`band_mpx`, `pool`, `early_dedupe`, `stitch`, `orient` (`always`, `vertical`,
-`never`), `rec_batch`, `rec_width`, `det_batch`, `second_opinion`, `graph_opt`,
-`mem_pattern`, `one_call` and `ort:<session entry>`. `compare_dumps.py` reports
-the lines a candidate lost, changed and gained against a baseline, in the
+`--legacy` is the Sleuth 1.0 pipeline (every region of every tile recognised,
+tile by tile, and the more confident of two overlapping readings kept). Both
+pipelines show the detector the same tiles, each rendered by itself.
+`--set key=value,...` changes single settings of either pipeline: `tile`,
+`overlap`, `detect`, `even_tiles`, `scale_all`, `page_render`, `band_mpx`,
+`pool`, `early_dedupe`, `stitch`, `keep_parts`, `orient` (`always`,
+`vertical`, `lazy`, `never`), `rec_batch`, `rec_width`, `det_batch`,
+`second_opinion`, `graph_opt`, `mem_pattern`, `one_call` and
+`ort:<session entry>`. `compare_dumps.py` reports
+the lines a candidate lost, read only in part (`short`), changed and gained
+against a baseline, in the
 matcher's own normal form (letters and digits, lower case). A speed-up is
 accepted only if it loses no tag on the corpus and what it loses on real
 drawings turns out, looked at, to be noise.

@@ -11,21 +11,23 @@
 //! recognise) instead of through `oar_ocr`'s all-in-one call, which is what
 //! makes the rest possible:
 //!
-//! - a page is rendered once (in bands, to bound memory) and tiles are cut
-//!   from it, instead of one PDFium render per tile;
 //! - text the detector finds in two tiles is recognised once, not twice;
 //! - every region is recognised by itself, at its own width, instead of in
 //!   batches of eight padded to the widest;
 //! - the orientation classifier sees vertical text and lines that read badly,
 //!   not every line;
 //! - a line cut by a tile edge is also read whole, joined from its parts;
+//! - of the lines the overlaps give twice, one is removed only for a line
+//!   that stays and holds its text;
 //! - every step is timed (see [`Timings`]).
 //!
-//! Detection itself is untouched: the same tiles, at the same resolution, as
-//! Sleuth 1.0. It can be made cheaper (larger tiles scaled down, less
-//! overlap; see [`OcrOptions`]), but every such setting was seen to lose some
-//! faint or very small text on real drawings while gaining other, so none is
-//! the default. `bench/results.md` has the measurements.
+//! Detection itself is untouched: the same tiles, rendered one by one by
+//! PDFium exactly as Sleuth 1.0 rendered them, at the same resolution, so
+//! the detector finds the same boxes. It can be made cheaper (the page
+//! rendered once, larger tiles scaled down, less overlap; see
+//! [`OcrOptions`]), but every such setting was seen to lose some faint or
+//! very small text on real drawings while gaining other, so none is the
+//! default. `bench/results.md` has the measurements.
 
 use crate::models::ModelSet;
 use crate::pdf::Doc;
@@ -60,7 +62,26 @@ pub const OVERLAP: i32 = 512;
 /// Text detection runs on the tile scaled to this side; recognition always
 /// reads the full-resolution crop.
 pub const DETECT_SIDE: u32 = 1600;
-/// Megapixels of a page held in memory at once when it is rendered in bands.
+/// By how many pixels one box may reach beyond another, along the line, and
+/// still count as lying inside it. Two tiles box the same ink a few pixels
+/// apart; a character more is wider than this.
+const COPY_SLACK: f32 = 8.0;
+
+/// How many pixels of box `a` (`x0, y0, x1, y1`), along its line (its longer
+/// side), lie outside box `b`; `None` unless the two share half of the
+/// line's height. Pixels, not a share of the box: one more character at the
+/// end of a long line is a small share of it. And along the line only, so
+/// that a box drawn a little taller than the other does not count as outside.
+fn sticks_out(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> Option<f32> {
+    let (w, h) = (a.2 - a.0, a.3 - a.1);
+    let sx = (a.2.min(b.2) - a.0.max(b.0)).max(0.0);
+    let sy = (a.3.min(b.3) - a.1.max(b.1)).max(0.0);
+    let (along, across, length, height) = if w >= h { (sx, sy, w, h.min(b.3 - b.1)) } else { (sy, sx, h, w.min(b.2 - b.0)) };
+    (across >= 0.5 * height.max(1.0)).then_some(length - along)
+}
+
+/// Megapixels of a page read together as one band: its tiles are held in
+/// memory until the band's text has been recognised.
 pub const BAND_MPX: u32 = 24;
 /// Pixels from a cut edge within which a region is suspected of being cut.
 const EDGE: f32 = 6.0;
@@ -78,8 +99,8 @@ const JOIN_MAX_RATIO: f32 = 60.0;
 const SECOND_OPINION_BELOW: f32 = 0.85;
 /// Below this, `Orient::Lazy` checks whether the line stands on its head.
 const TURN_CHECK_BELOW: f32 = 0.9;
-/// Below this, a line that two tiles found is also read from the other
-/// tile's box.
+/// Below this (or when the reading holds no letter or digit), a line that
+/// two tiles found is also read from the other tile's box.
 const SECOND_LOOK_BELOW: f32 = 0.9;
 /// Regions of a band cropped and recognised at a time.
 const CROP_SLICE: usize = 512;
@@ -129,12 +150,13 @@ pub enum Orient {
 /// Three groups of settings:
 ///
 /// - what the detector is shown (`tile`, `overlap`, `detect_side`,
-///   `even_tiles`, `scale_all`): changing these changes which text is found;
+///   `even_tiles`, `scale_all`, `page_render`): changing these changes which
+///   text is found;
 /// - how what it found is read (`pool`, `early_dedupe`, `stitch`,
 ///   `keep_parts`, `orient`, `rec_batch`, `rec_width`, `second_opinion`):
 ///   these change readings here and there;
-/// - plumbing that changes nothing that is read (`threads`, `page_render`,
-///   `band_mpx`, `det_batch`, `graph_opt`, `mem_pattern`, `ort_entries`).
+/// - plumbing that changes nothing that is read (`threads`, `band_mpx`,
+///   `det_batch`, `graph_opt`, `mem_pattern`, `ort_entries`).
 ///
 /// The first two groups are part of [`config_signature`].
 #[derive(Debug, Clone)]
@@ -146,8 +168,12 @@ pub struct OcrOptions {
     pub backend: Backend,
     /// Render a page once (in bands of at most `band_mpx` megapixels) and cut
     /// the tiles from that bitmap. `false` asks PDFium for every tile
-    /// separately, as Sleuth 1.0 did.
+    /// separately, as Sleuth 1.0 did. Off: rendering is a few per cent of the
+    /// time, and PDFium resamples a scan a little differently for a band than
+    /// for a tile, which on real drawings changed which faint text the
+    /// detector found. This does change what is read, unlike the plumbing.
     pub page_render: bool,
+    /// Megapixels of page read together as one band (see `pool`).
     pub band_mpx: u32,
     /// Cut every axis into equal tiles (as few as cover it with at least
     /// `overlap` shared) instead of full tiles and a narrow last one. Off:
@@ -159,8 +185,10 @@ pub struct OcrOptions {
     /// right and bottom, which would otherwise be detected at a finer scale
     /// than the rest of the page. Without effect at the default tile size.
     pub scale_all: bool,
-    /// Recognise the regions of a whole band together, from the band's own
-    /// pixels. `false` recognises tile by tile (Sleuth 1.0).
+    /// Detect on all tiles of a band first, then recognise the band's regions
+    /// together, each from the tile it was found in (or from the band's
+    /// bitmap with `page_render`). `false` finishes one tile before the next
+    /// is looked at (Sleuth 1.0), so that no two tiles know of each other.
     pub pool: bool,
     /// Before recognition, drop a region that another tile of the same band
     /// found on the same pixels. Needs `pool`.
@@ -168,10 +196,11 @@ pub struct OcrOptions {
     /// Join the two parts of a line that a tile edge cut, and read the line
     /// whole from the band as well. Needs `pool`.
     pub stitch: bool,
-    /// When one line found lies inside a larger one, drop the smaller only
-    /// if the larger holds its text; `false` keeps whichever of the two read
-    /// with more confidence, as Sleuth 1.0 did, which can throw away a whole
-    /// line for a fragment of it.
+    /// Of the lines the tile overlaps give twice, remove one only for a line
+    /// that stays and holds its text (or is the uncut copy of it, or the
+    /// surer reading of the same box). `false` keeps whichever of two
+    /// overlapping lines read with more confidence, as Sleuth 1.0 did, which
+    /// can throw away a whole line for a fragment of it.
     pub keep_parts: bool,
     pub orient: Orient,
     /// Text regions per recognition call. A batch is padded to its widest
@@ -211,7 +240,7 @@ impl Default for OcrOptions {
             overlap: OVERLAP,
             detect_side: DETECT_SIDE,
             backend: Backend::Cpu,
-            page_render: true,
+            page_render: false,
             band_mpx: BAND_MPX,
             even_tiles: false,
             scale_all: false,
@@ -315,7 +344,7 @@ pub fn config_signature(o: &OcrOptions) -> String {
         Orient::Never => "none",
     };
     format!(
-        "tile={}/{}/{}{};det=0.2/0.45/1.4/3000;second<{SECOND_OPINION_BELOW}{};edge={EDGE};read=2:{}{}{}{}{}/{orient}/{}/{}",
+        "tile={}/{}/{}{};det=0.2/0.45/1.4/3000;second<{SECOND_OPINION_BELOW}{};edge={EDGE};read=3:{}{}{}{}{}/{orient}/{}/{}",
         o.tile,
         o.overlap,
         o.detect_side,
@@ -415,8 +444,9 @@ struct Region {
     tile: usize,
     /// Made by [`stitch`] from the two parts of a line.
     joined: bool,
-    /// The boxes other tiles drew around the same text (see [`drop_twins`]).
-    spares: Vec<BoundingBox>,
+    /// The boxes other tiles drew around the same text, and which tile
+    /// (see [`drop_twins`]).
+    spares: Vec<(BoundingBox, usize)>,
 }
 
 const CUT_L: u8 = 1;
@@ -439,6 +469,35 @@ impl Region {
         let w = (self.x1.min(o.x1) - self.x0.max(o.x0)).max(0.0);
         let h = (self.y1.min(o.y1) - self.y0.max(o.y0)).max(0.0);
         w * h / self.area().min(o.area()).max(1.0)
+    }
+}
+
+/// Where the regions of a band are cropped from: the band's own bitmap, or
+/// the tile each region was found in, rendered by itself as Sleuth 1.0
+/// rendered it. PDFium resamples a scan a little differently for a band than
+/// for a tile, so only the second gives the detector, and the recogniser,
+/// exactly the pixels they had before.
+struct Pixels {
+    band: Option<Arc<RgbImage>>,
+    /// Images rendered by themselves and where each sits in the band: the
+    /// tiles, and the boxes of lines joined across two tiles.
+    tiles: Vec<(Arc<RgbImage>, f32, f32)>,
+}
+
+impl Pixels {
+    /// The image that holds a region of tile `n`, and where the image sits
+    /// in the band.
+    fn of(&self, n: usize) -> (&RgbImage, f32, f32) {
+        match &self.band {
+            Some(band) => (band, 0.0, 0.0),
+            None => (&self.tiles[n].0, self.tiles[n].1, self.tiles[n].2),
+        }
+    }
+
+    /// The straightened crop of a box of tile `n` (box in band coordinates).
+    fn crop(&self, quad: &BoundingBox, n: usize) -> Option<RgbImage> {
+        let (img, dx, dy) = self.of(n);
+        if dx == 0.0 && dy == 0.0 { get_rotate_crop_image(img, &quad.points).ok() } else { get_rotate_crop_image(img, &quad.translate(-dx, -dy).points).ok() }
     }
 }
 
@@ -553,7 +612,8 @@ impl OcrReader {
             .into_iter()
             .filter_map(|quad| region(quad, 0, 0.0, 0.0))
             .collect();
-        let read = self.recognise(&img, &regions, self.opts.orient, &|| false)?;
+        let pix = Pixels { band: Some(img), tiles: Vec::new() };
+        let read = self.recognise(&pix, &regions, self.opts.orient, &|| false)?;
         Ok(read.into_iter().filter(|(_, text, _)| !text.trim().is_empty()).map(|(i, text, conf)| (text.trim().to_string(), conf, [regions[i].x0, regions[i].y0, regions[i].x1, regions[i].y1])).collect())
     }
 
@@ -629,14 +689,15 @@ impl OcrReader {
             } else {
                 (cuts(ax0, ax1, tile_px, step), cuts(ay0, ay1, tile_px, step))
             };
-            if !self.opts.page_render {
+            if !self.opts.page_render && !self.opts.pool {
+                // Tile by tile, nothing shared between tiles (Sleuth 1.0).
                 for &(y, th) in &ys {
                     for &(x, tw) in &xs {
                         if cancel() {
                             bail!("cancelled");
                         }
                         let tile = timed_render(x, y, tw, th)?;
-                        self.read_canvas(&tile, x, y, &[(x, y, tw, th)], full_w, full_h, &mut found, &mut stats, cancel)?;
+                        self.read_canvas(Some(tile), x, y, &[(x, y, tw, th)], full_w, full_h, &mut found, &mut stats, &mut timed_render, cancel)?;
                     }
                 }
                 continue;
@@ -652,21 +713,23 @@ impl OcrReader {
                     bail!("cancelled");
                 }
                 let (by0, by1) = (ys[r].0, ys[e - 1].0 + ys[e - 1].1);
-                let band = timed_render(ax0, by0, ax1 - ax0, by1 - by0)?;
+                // One bitmap for the band, or every tile rendered by itself.
+                let band = if self.opts.page_render { Some(timed_render(ax0, by0, ax1 - ax0, by1 - by0)?) } else { None };
                 let tiles: Vec<(i32, i32, i32, i32)> = ys[r..e].iter().flat_map(|&(y, th)| xs.iter().map(move |&(x, tw)| (x, y, tw, th))).collect();
-                self.read_canvas(&band, ax0, by0, &tiles, full_w, full_h, &mut found, &mut stats, cancel)?;
+                self.read_canvas(band, ax0, by0, &tiles, full_w, full_h, &mut found, &mut stats, &mut timed_render, cancel)?;
                 r = e;
             }
         }
         Ok((dedupe(found, self.opts.keep_parts), stats))
     }
 
-    /// Read the tiles of one bitmap. `(cx, cy)` is where the bitmap sits on
-    /// the page; `tiles` are in page pixels and lie inside it.
+    /// Read the tiles of one band. `(cx, cy)` is where the band starts on the
+    /// page; `tiles` are in page pixels and lie inside it. With `band` the
+    /// tiles are cut from that bitmap; without, each is rendered by itself.
     #[allow(clippy::too_many_arguments)]
     fn read_canvas(
         &self,
-        canvas: &Arc<RgbImage>,
+        band: Option<Arc<RgbImage>>,
         cx: i32,
         cy: i32,
         tiles: &[(i32, i32, i32, i32)],
@@ -674,11 +737,14 @@ impl OcrReader {
         full_h: i32,
         out: &mut Vec<Found>,
         stats: &mut TileStats,
+        render: &mut dyn FnMut(i32, i32, i32, i32) -> Result<Arc<RgbImage>>,
         cancel: &dyn Fn() -> bool,
     ) -> Result<()> {
         if let Engine::OneCall(ocr) = &self.engine {
-            return self.read_tile_one_call(ocr, canvas, cx, cy, full_w, full_h, out, stats);
+            let Some(tile) = &band else { bail!("the one-call reader reads tile by tile") };
+            return self.read_tile_one_call(ocr, tile, cx, cy, full_w, full_h, out, stats);
         }
+        let mut pix = Pixels { band, tiles: Vec::new() };
         let mut regions: Vec<Region> = Vec::new();
         // Tiles waiting for detection: `(index, x, y, w, h, pixels)`.
         let mut waiting: Vec<(usize, i32, i32, i32, i32, Arc<RgbImage>)> = Vec::new();
@@ -687,9 +753,17 @@ impl OcrReader {
             if cancel() {
                 bail!("cancelled");
             }
+            let sub = match &pix.band {
+                Some(canvas) if x == cx && y == cy && tw as u32 == canvas.width() && th as u32 == canvas.height() => Arc::clone(canvas),
+                Some(canvas) => {
+                    let t = Instant::now();
+                    let sub = Arc::new(cut_rgb(canvas, (x - cx) as u32, (y - cy) as u32, tw as u32, th as u32));
+                    self.clock(|c| c.tiles += t.elapsed().as_secs_f64());
+                    sub
+                }
+                None => render(x, y, tw, th)?,
+            };
             let t = Instant::now();
-            let whole = x == cx && y == cy && tw as u32 == canvas.width() && th as u32 == canvas.height();
-            let sub = if whole { Arc::clone(canvas) } else { Arc::new(cut_rgb(canvas, (x - cx) as u32, (y - cy) as u32, tw as u32, th as u32)) };
             let blank = is_blank(&sub);
             stats.tiles += 1;
             stats.blank += blank as u32;
@@ -699,6 +773,14 @@ impl OcrReader {
                 c.tiles_blank += blank as u32;
             });
             if !blank {
+                // What the regions of this tile will be cropped from.
+                let n = match &pix.band {
+                    Some(_) => n,
+                    None => {
+                        pix.tiles.push((Arc::clone(&sub), (x - cx) as f32, (y - cy) as f32));
+                        pix.tiles.len() - 1
+                    }
+                };
                 let scale = self.detect_scale();
                 let sub = if self.opts.scale_all && scale < 1.0 {
                     let t = Instant::now();
@@ -749,8 +831,17 @@ impl OcrReader {
                 if self.opts.pool && self.opts.stitch {
                     let joined = stitch(&mut regions);
                     self.clock(|c| c.stitched += joined);
+                    if pix.band.is_none() {
+                        // A joined line lies in no one tile: render its box.
+                        for r in regions.iter_mut().filter(|r| r.joined) {
+                            let (x0, y0) = (((r.x0 as i32) - 8).max(-cx), ((r.y0 as i32) - 8).max(-cy));
+                            let (x1, y1) = (((r.x1.ceil() as i32) + 8).min(full_w - cx), ((r.y1.ceil() as i32) + 8).min(full_h - cy));
+                            pix.tiles.push((render(cx + x0, cy + y0, x1 - x0, y1 - y0)?, x0 as f32, y0 as f32));
+                            r.tile = pix.tiles.len() - 1;
+                        }
+                    }
                 }
-                self.finish(canvas, cx, cy, &regions, out, cancel)?;
+                self.finish(&pix, cx, cy, &regions, out, cancel)?;
                 regions.clear();
             }
         }
@@ -806,8 +897,8 @@ impl OcrReader {
 
     /// Recognise the regions of a bitmap, ask for second opinions, and add
     /// the lines found (in page coordinates) to `out`.
-    fn finish(&self, canvas: &Arc<RgbImage>, cx: i32, cy: i32, regions: &[Region], out: &mut Vec<Found>, cancel: &dyn Fn() -> bool) -> Result<()> {
-        for (i, text, conf) in self.recognise(canvas, regions, self.opts.orient, cancel)? {
+    fn finish(&self, pix: &Pixels, cx: i32, cy: i32, regions: &[Region], out: &mut Vec<Found>, cancel: &dyn Fn() -> bool) -> Result<()> {
+        for (i, text, conf) in self.recognise(pix, regions, self.opts.orient, cancel)? {
             let r = &regions[i];
             let text = text.trim();
             // A reading with no letter or digit (specks, hatching, symbols)
@@ -818,7 +909,8 @@ impl OcrReader {
             let mut f = Found { text: text.to_string(), conf, x0: r.x0 + cx as f32, y0: r.y0 + cy as f32, x1: r.x1 + cx as f32, y1: r.y1 + cy as f32, cut: r.cut != 0, joined: r.joined, alt: None };
             if self.opts.second_opinion && conf < SECOND_OPINION_BELOW {
                 let t = Instant::now();
-                let other = crate::winocr::read_crop(canvas, r.x0, r.y0, r.x1, r.y1);
+                let (img, dx, dy) = pix.of(r.tile);
+                let other = crate::winocr::read_crop(img, r.x0 - dx, r.y0 - dy, r.x1 - dx, r.y1 - dy);
                 self.clock(|c| {
                     c.second += t.elapsed().as_secs_f64();
                     c.second_asked += 1;
@@ -851,10 +943,10 @@ impl OcrReader {
         Ok(out)
     }
 
-    /// Crop, straighten and read regions of `canvas`: `(index into regions,
+    /// Crop, straighten and read regions of a band: `(index into regions,
     /// text, confidence)` in the order of `regions`. A region whose crop
     /// fails is left out.
-    fn recognise(&self, canvas: &Arc<RgbImage>, regions: &[Region], orient: Orient, cancel: &dyn Fn() -> bool) -> Result<Vec<(usize, String, f32)>> {
+    fn recognise(&self, pix: &Pixels, regions: &[Region], orient: Orient, cancel: &dyn Fn() -> bool) -> Result<Vec<(usize, String, f32)>> {
         if regions.is_empty() {
             return Ok(Vec::new());
         }
@@ -870,7 +962,7 @@ impl OcrReader {
             // `(region, crop, width / height)`; a crop of vertical text comes back turned.
             let mut crops: Vec<(usize, Arc<RgbImage>, f32)> = Vec::with_capacity(last - first);
             for (i, r) in regions.iter().enumerate().take(last).skip(first) {
-                if let Ok(img) = get_rotate_crop_image(canvas, &r.quad.points) {
+                if let Some(img) = pix.crop(&r.quad, r.tile) {
                     let ratio = img.width() as f32 / img.height().max(1) as f32;
                     crops.push((i, Arc::new(img), ratio));
                 }
@@ -907,10 +999,12 @@ impl OcrReader {
             // reading stays.
             let t = Instant::now();
             let mut spare: Vec<(usize, Arc<RgbImage>, f32)> = Vec::new();
+            let searchable = |text: &str| text.chars().any(char::is_alphanumeric);
             for k in 0..crops.len() {
-                if read[k].as_ref().is_some_and(|r| r.1 < SECOND_LOOK_BELOW) {
-                    for quad in &regions[crops[k].0].spares {
-                        if let Ok(img) = get_rotate_crop_image(canvas, &quad.points) {
+                // Unsure, or about to be thrown away for holding no letter or digit.
+                if read[k].as_ref().is_some_and(|r| r.1 < SECOND_LOOK_BELOW || !searchable(&r.0)) {
+                    for (quad, tile) in &regions[crops[k].0].spares {
+                        if let Some(img) = pix.crop(quad, *tile) {
                             let ratio = img.width() as f32 / img.height().max(1) as f32;
                             spare.push((k, Arc::new(img), ratio));
                         }
@@ -925,7 +1019,8 @@ impl OcrReader {
                 }
                 for (e, text, conf) in self.read_crops(rec, &spare, &all, cancel)? {
                     let k = spare[e].0;
-                    if read[k].as_ref().is_none_or(|r| conf > r.1) {
+                    // A reading with a letter or digit beats one without; else the surer one stays.
+                    if read[k].as_ref().is_none_or(|r| if searchable(&text) != searchable(&r.0) { searchable(&text) } else { conf > r.1 }) {
                         read[k] = Some((text, conf));
                     }
                 }
@@ -1423,8 +1518,9 @@ fn even_cuts(a0: i32, a1: i32, tile: i32, overlap: i32, unit: i32) -> Vec<(i32, 
 
 /// Two tiles of one band see the same pixels in their overlap, so they find
 /// the same text twice. Where two regions from different tiles cover nearly
-/// the same box, only one is recognised at first: not the one cut by a tile
-/// edge, else the larger. Both would be read from the same pixels of the
+/// the same box, and the one covers the other end to end along the line (to
+/// within [`COPY_SLACK`] pixels), only one is recognised at first: not the
+/// one cut by a tile edge, else the larger. Both would be read from the same pixels of the
 /// band. The other box is kept with it as a spare: if the line reads with
 /// low confidence it is read from the spare too and the better reading
 /// stays, which is what reading every tile's regions used to give.
@@ -1455,9 +1551,15 @@ fn drop_twins(regions: &mut Vec<Region>) -> u32 {
                 _ => a.area() < b.area(),
             };
             let (keep, lose) = if lose_i { (j, i) } else { (i, j) };
+            // The box that is read must cover the other end to end: a box
+            // that starts or stops a character apart holds other text.
+            let (k, l) = (&regions[keep], &regions[lose]);
+            if sticks_out((l.x0, l.y0, l.x1, l.y1), (k.x0, k.y0, k.x1, k.y1)).is_none_or(|px| px > COPY_SLACK) {
+                continue;
+            }
             drop[lose] = true;
             let mut spares = std::mem::take(&mut regions[lose].spares);
-            spares.push(regions[lose].quad.clone());
+            spares.push((regions[lose].quad.clone(), regions[lose].tile));
             regions[keep].spares.append(&mut spares);
             if lose_i {
                 break;
@@ -1556,26 +1658,28 @@ impl Found {
     fn overlap(&self, o: &Found) -> f32 {
         let w = (self.x1.min(o.x1) - self.x0.max(o.x0)).max(0.0);
         let h = (self.y1.min(o.y1) - self.y0.max(o.y0)).max(0.0);
-        let small = self.area().min(o.area()).max(1.0);
-        w * h / small
+        w * h / self.area().min(o.area()).max(1.0)
+    }
+    fn sticks_out(&self, o: &Found) -> Option<f32> {
+        sticks_out((self.x0, self.y0, self.x1, self.y1), (o.x0, o.y0, o.x1, o.y1))
     }
 }
 
-/// Remove regions read twice in tile overlaps. A region touching a cut edge
-/// is dropped when another tile saw the same area; otherwise it is kept so
-/// long lines that no tile holds whole are not lost. Of two readings of the
-/// same box the more confident stays.
-///
-/// With `keep_parts`, a line lying inside a clearly larger one is not taken
-/// for a second reading of it: it is dropped only when the larger line holds
-/// its text (and would be found as surely), and kept otherwise. Without it
-/// the more confident of the two stays whatever their sizes, as in Sleuth
-/// 1.0, where a fragment could displace the whole line.
-///
-/// A line joined from two parts is a guess that the parts belong together,
-/// so it never removes a part by its position alone, only by holding the
-/// part's text.
-fn dedupe(mut found: Vec<Found>, keep_parts: bool) -> Vec<Found> {
+/// Remove regions read twice in tile overlaps: Sleuth 1.0's rule
+/// ([`dedupe_by_confidence`]) or, with `keep_parts`, the careful one
+/// ([`dedupe_careful`]).
+fn dedupe(found: Vec<Found>, keep_parts: bool) -> Vec<Found> {
+    if keep_parts { dedupe_careful(found) } else { dedupe_by_confidence(found) }
+}
+
+/// Sleuth 1.0's rule. A region touching a cut edge is dropped when another
+/// tile saw the same area; otherwise it is kept so long lines that no tile
+/// holds whole are not lost. Of two overlapping readings the more confident
+/// stays whatever their sizes, so a fragment could displace the whole line;
+/// "the same area" is measured on the smaller box, so a small box inside a
+/// long cut line removed the line; and a line could go for one that then
+/// went itself.
+fn dedupe_by_confidence(mut found: Vec<Found>) -> Vec<Found> {
     let n = found.len();
     let mut drop = vec![false; n];
     for i in 0..n {
@@ -1597,17 +1701,7 @@ fn dedupe(mut found: Vec<Found>, keep_parts: bool) -> Vec<Found> {
             if drop[j] || found[i].overlap(&found[j]) < 0.6 {
                 continue;
             }
-            let same_box = found[i].area().min(found[j].area()) >= 0.7 * found[i].area().max(found[j].area());
-            let worse = if keep_parts && !same_box {
-                let (part, whole) = if found[i].area() < found[j].area() { (i, j) } else { (j, i) };
-                // Dropping the part must not turn a sure match into an unsure one.
-                let as_sure = found[whole].conf >= LOW_CONFIDENCE || found[part].conf < LOW_CONFIDENCE;
-                if as_sure && sep_form(&found[whole].text).contains(&sep_form(&found[part].text)) { part } else { continue }
-            } else if found[j].conf > found[i].conf {
-                i
-            } else {
-                j
-            };
+            let worse = if found[j].conf > found[i].conf { i } else { j };
             drop[worse] = true;
             if worse == i {
                 break;
@@ -1617,6 +1711,112 @@ fn dedupe(mut found: Vec<Found>, keep_parts: bool) -> Vec<Found> {
     let mut k = 0;
     found.retain(|_| {
         let keep = !drop[k];
+        k += 1;
+        keep
+    });
+    found
+}
+
+/// The careful rule: a line goes only for a line that stays and makes it
+/// unnecessary. One line makes another unnecessary when
+///
+/// - it holds the other's text (and would be found as surely), the two
+///   overlapping: the other is a part of it, or a second reading that says
+///   no more;
+/// - or the other is a copy cut by a tile edge that lies inside it along the
+///   line, to within [`COPY_SLACK`] pixels, and it was itself seen uncut (or
+///   is the longer piece) and read no less surely: the neighbouring tile saw
+///   the same ink and more;
+/// - or both are readings of the same box that say different things, and it
+///   covers the other end to end, is the more confident, says no less (is no
+///   shorter), and is not a cut copy standing against an uncut line.
+///
+/// Nothing else removes a line. A piece that reaches beyond the line it
+/// overlaps stays unless that line holds its text; a small box inside a long
+/// line stays unless the long line says what it says; a short reading does
+/// not remove a longer one for being a little surer; and a line joined from
+/// two parts ([`stitch`]) is a guess that the parts belong together, so it
+/// removes a part only by holding the part's text or as the surer reading of
+/// the same box, never by its position.
+///
+/// Lines are removed one after another, so a line can go for one that later
+/// goes itself. Such a line comes back unless a line that did stay makes it
+/// unnecessary: at the end every line that went has one that stayed for it.
+fn dedupe_careful(mut found: Vec<Found>) -> Vec<Found> {
+    let n = found.len();
+    let alive = {
+        let forms: Vec<(String, Option<String>)> = found.iter().map(|f| (sep_form(&f.text), f.alt.as_deref().map(sep_form))).collect();
+        // Would a search that finds `p` surely find `w` as surely?
+        let as_sure = |w: usize, p: usize| found[w].conf >= LOW_CONFIDENCE || found[p].conf < LOW_CONFIDENCE;
+        // Would everything found in `p` be found in `w`, and as surely?
+        let holds = |w: usize, p: usize| {
+            let says = |t: &str| forms[w].0.contains(t) || forms[w].1.as_deref().is_some_and(|alt| alt.contains(t));
+            as_sure(w, p) && says(&forms[p].0) && forms[p].1.as_deref().is_none_or(says)
+        };
+        // `i` is a copy cut by a tile edge, and `j` saw the same stretch of the line and more.
+        let cut_copy = |j: usize, i: usize| {
+            let (a, b) = (&found[i], &found[j]);
+            i != j && a.cut && !b.joined && as_sure(j, i) && (!b.cut || b.area() > a.area()) && a.sticks_out(b).is_some_and(|px| px <= COPY_SLACK)
+        };
+        // Does `j` make `i` unnecessary?
+        let beats = |j: usize, i: usize| {
+            if i == j {
+                return false;
+            }
+            if cut_copy(j, i) {
+                return true;
+            }
+            let (a, b) = (&found[i], &found[j]);
+            let over = a.overlap(b);
+            // A piece cut by a tile edge shares less with the line it is part of.
+            let needed = if a.cut { 0.5 } else { 0.6 };
+            if over < needed {
+                return false;
+            }
+            if holds(j, i) {
+                // Both say the same: the surer stays, then the larger, then the first.
+                return !holds(i, j) || (b.conf, b.area(), i) > (a.conf, a.area(), j);
+            }
+            let same_box = a.area().min(b.area()) >= 0.7 * a.area().max(b.area());
+            same_box
+                && over >= 0.6
+                && a.sticks_out(b).is_some_and(|px| px <= COPY_SLACK)
+                && !holds(i, j)
+                && (!b.cut || a.cut)
+                && forms[j].0.chars().count() >= forms[i].0.chars().count()
+                && (b.conf > a.conf || (b.conf == a.conf && j < i))
+        };
+        let mut alive = vec![true; n];
+        // Cut copies first, as in Sleuth 1.0, so that the uncut reading is the one that stays.
+        for i in 0..n {
+            if (0..n).any(|j| alive[j] && cut_copy(j, i)) {
+                alive[i] = false;
+            }
+        }
+        for _ in 0..4 {
+            let mut changed = false;
+            for i in 0..n {
+                if alive[i] && (0..n).any(|j| alive[j] && beats(j, i)) {
+                    alive[i] = false;
+                    changed = true;
+                }
+            }
+            // Back comes every line that nothing left standing makes unnecessary.
+            for i in 0..n {
+                if !alive[i] && !(0..n).any(|j| alive[j] && beats(j, i)) {
+                    alive[i] = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        alive
+    };
+    let mut k = 0;
+    found.retain(|_| {
+        let keep = alive[k];
         k += 1;
         keep
     });
@@ -1699,6 +1899,20 @@ mod tests {
         for (x, y, w, h) in [(0, 0, 13, 9), (3, 2, 5, 4), (10, 7, 3, 2), (11, 6, 9, 9), (13, 9, 2, 2)] {
             assert_eq!(cut_rgb(&img, x, y, w, h), imageops::crop_imm(&img, x, y, w, h).to_image(), "{x},{y} {w}x{h}");
         }
+    }
+
+    #[test]
+    fn a_box_is_cropped_from_its_own_tile_as_from_the_band() {
+        let band = Arc::new(RgbImage::from_fn(400, 300, |x, y| image::Rgb([(x * 7 % 251) as u8, (y * 13 % 241) as u8, ((x + y) % 256) as u8])));
+        let tile = Arc::new(cut_rgb(&band, 128, 64, 200, 150));
+        // Box in band coordinates; it lies inside the tile.
+        let quad = BoundingBox::from_coords(150.0, 90.0, 290.0, 120.0);
+        let whole = Pixels { band: Some(Arc::clone(&band)), tiles: Vec::new() };
+        let apart = Pixels { band: None, tiles: vec![(Arc::clone(&band), 0.0, 0.0), (tile, 128.0, 64.0)] };
+        let from_band = whole.crop(&quad, 1).expect("crop from the band");
+        assert_eq!((from_band.width(), from_band.height()), (140, 30));
+        assert_eq!(apart.crop(&quad, 1).expect("crop from the tile"), from_band);
+        assert_eq!(apart.crop(&quad, 0).expect("crop from a tile at the origin"), from_band);
     }
 
     #[test]
@@ -1834,6 +2048,108 @@ mod tests {
         // Read badly: the parts stay, as they did before lines were joined.
         let out = dedupe(vec![part("STUD BOLT A193", 1000.0, 1600.0), part("A193 B7 / A194 2H", 1344.0, 2000.0), whole("5TUO B0LT")], true);
         assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn the_tail_of_a_line_across_three_tiles_is_not_lost() {
+        // Three tiles each saw a piece of one long note. The join of the
+        // first two pieces read well; the join of all three read a little
+        // less surely and with one letter wrong.
+        let piece = |text: &str, x0: f32, x1: f32| f(text, x0, x1, true, 0.98);
+        let join = |text: &str, x0: f32, x1: f32, cut: bool, conf: f32| Found { joined: true, ..f(text, x0, x1, cut, conf) };
+        let lines = |all_three: &str| {
+            vec![
+                piece("7. ALL FLANGE BOLTS SH", 1800.0, 2688.0),
+                piece("OLTS SHALL BE TIGHTENED IN SEQUENCE AND CHE", 2176.0, 3776.0),
+                piece("AND CHECKED AFTER HYDROTEST.", 3264.0, 4300.0),
+                join("7. ALL FLANGE BOLTS SHALL BE TIGHTENED IN SEQUENCE AND CHE", 1800.0, 3776.0, true, 0.99),
+                join(all_three, 1800.0, 4300.0, false, 0.93),
+            ]
+        };
+        // The long join holds the tail but not the start as the shorter join
+        // read it: both joins stay, and every word is there.
+        let out = dedupe(lines("7. ALL FLANGE B0LTS SHALL BE TIGHTENED IN SEQUENCE AND CHECKED AFTER HYDROTEST."), true);
+        let mut texts: Vec<&str> = out.iter().map(|l| l.text.as_str()).collect();
+        texts.sort();
+        assert_eq!(texts, ["7. ALL FLANGE B0LTS SHALL BE TIGHTENED IN SEQUENCE AND CHECKED AFTER HYDROTEST.", "7. ALL FLANGE BOLTS SHALL BE TIGHTENED IN SEQUENCE AND CHE"]);
+        // Read right, the long join is all that is needed.
+        let out = dedupe(lines("7. ALL FLANGE BOLTS SHALL BE TIGHTENED IN SEQUENCE AND CHECKED AFTER HYDROTEST."), true);
+        assert_eq!(out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["7. ALL FLANGE BOLTS SHALL BE TIGHTENED IN SEQUENCE AND CHECKED AFTER HYDROTEST."]);
+    }
+
+    #[test]
+    fn a_line_that_went_for_one_that_went_itself_comes_back() {
+        // The word is held by the first reading of the line, which loses to a
+        // surer reading of the same box that does not hold the word.
+        let out = dedupe(vec![f("INSULATED", 100.0, 300.0, false, 0.95), f("LINE TO BE INSULATED", 0.0, 300.0, false, 0.9), f("L1NE T0 BE INSULATEO", 0.0, 305.0, false, 0.97)], true);
+        let mut texts: Vec<&str> = out.iter().map(|l| l.text.as_str()).collect();
+        texts.sort();
+        assert_eq!(texts, ["INSULATED", "L1NE T0 BE INSULATEO"]);
+    }
+
+    #[test]
+    fn a_cut_copy_does_not_win_by_confidence() {
+        // The copy cut by the tile edge is boxed a little taller and read a
+        // little more surely than the whole line.
+        let lines = || vec![f("TOS EL. 104250", 2000.0, 2400.0, false, 0.86), Found { y0: -1.0, y1: 11.0, ..f("TOS ELL", 2000.0, 2272.0, true, 0.87) }];
+        let out = dedupe(lines(), true);
+        assert_eq!(out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["TOS EL. 104250"]);
+        // But an unsure uncut reading does not remove a sure cut one.
+        let out = dedupe(vec![f("T0S EL. 1O425O", 2000.0, 2400.0, false, 0.5), f("TOS EL. 10", 2000.0, 2272.0, true, 0.95)], true);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn the_end_of_a_line_past_the_tile_edge_stays() {
+        // The line runs 40 px past the tile edge that cut its longer piece.
+        let lines = || vec![f("ALL WELDS TO BE GROUND FLUSH AND PAINT", 700.0, 1600.0, true, 0.99), f("FLUSH AND PAINTED", 1088.0, 1640.0, true, 0.99)];
+        assert_eq!(dedupe(lines(), true).len(), 2);
+        assert_eq!(dedupe(lines(), false).len(), 1, "Sleuth 1.0 dropped the shorter piece, and the end of the line with it");
+        // A stub that ends where the longer piece ends is a copy of part of it.
+        let out = dedupe(vec![f("ALL WELDS TO BE GROUND FLUSH AND PAINTED", 700.0, 1640.0, true, 0.99), f("FLU5H AND PAlNTED", 1088.0, 1643.0, true, 0.99)], true);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn boxes_that_start_apart_are_not_one_box() {
+        // Two tiles split a long note differently: each box holds words the other lacks.
+        let mut v = vec![r(0.0, 50.0, 1000.0, 80.0, 0, 0), r(150.0, 50.0, 1150.0, 80.0, 0, 1)];
+        assert_eq!(drop_twins(&mut v), 0, "both are read");
+        let lines = || vec![f("REFER NOTE 5 FOR DETAILS", 0.0, 1000.0, false, 0.9), f("NOTE 5 FOR DETAILS OF SUPPORT", 300.0, 1300.0, false, 0.95)];
+        assert_eq!(dedupe(lines(), true).len(), 2);
+        assert_eq!(dedupe(lines(), false).len(), 1, "Sleuth 1.0 kept the surer one and lost the start of the note");
+    }
+
+    #[test]
+    fn a_surer_reading_that_says_less_does_not_remove_the_longer_one() {
+        // Two uncut boxes on the same line, one stopping short.
+        let lines = || vec![f("TOS EL. 104250", 2000.0, 2400.0, false, 0.86), f("TOS ELL", 2000.0, 2290.0, false, 0.87)];
+        assert_eq!(dedupe(lines(), true).len(), 2);
+        assert_eq!(dedupe(lines(), false).iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["TOS ELL"], "Sleuth 1.0 kept the surer, shorter one");
+        // Readings of equal length: the surer stays.
+        let out = dedupe(vec![f("TOS EL. 104250", 2000.0, 2400.0, false, 0.86), f("TOS EL. 104258", 2001.0, 2399.0, false, 0.95)], true);
+        assert_eq!(out.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["TOS EL. 104258"]);
+    }
+
+    #[test]
+    fn a_small_box_inside_a_cut_line_does_not_remove_it() {
+        // A stamp line that runs on from the tile's left edge, and a number
+        // the detector also boxed inside it.
+        let lines = || vec![f("TO BE CONFIRMED BY VENDOR,", 1088.0, 1712.0, true, 0.88), f("004512", 1096.0, 1255.0, false, 0.8)];
+        assert_eq!(dedupe(lines(), true).len(), 2);
+        assert_eq!(dedupe(lines(), false).len(), 1, "Sleuth 1.0 took the small box for the uncut copy of the line");
+    }
+
+    #[test]
+    fn a_cut_piece_that_reaches_beyond_the_line_over_it_stays() {
+        // The detector ended one box mid-line; the next tile's piece lies
+        // more than half inside that box and goes on beyond it.
+        let lines = || vec![f("CHECK VALVE SWING TYPE", 1215.0, 2515.0, false, 0.99), f("SWING TYPE 300 LB RF", 2176.0, 2760.0, true, 0.99)];
+        assert_eq!(dedupe(lines(), true).len(), 2);
+        assert_eq!(dedupe(lines(), false).len(), 1, "Sleuth 1.0 dropped the piece for lying half inside the other");
+        // A piece that says nothing new goes, wherever it ends.
+        let out = dedupe(vec![f("CHECK VALVE SWING TYPE", 1215.0, 2515.0, false, 0.99), f("SWING TYPE", 2176.0, 2530.0, true, 0.99)], true);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
