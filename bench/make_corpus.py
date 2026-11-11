@@ -149,9 +149,13 @@ def faint_scan():
     return Image.eval(im.filter(ImageFilter.GaussianBlur(1.3)), lambda v: 120 + v * 135 // 255)
 
 
+SCANS = {}
+
+
 def save_img_pdf(im, name, tags):
     im.convert("RGB").save(os.path.join(OUT, name), "PDF", resolution=DPI)
     TRUTH[name] = tags
+    SCANS[name] = (im, tags)
 
 
 save_img_pdf(isometric("ISO-1001-01", '6"-P-1001-A1B', '4"-P-1002-A1B', "PSV-1203", ["ALL DIMENSIONS IN MM UNLESS STATED OTHERWISE.", "FOR LINE DATA REFER LINE LIST DOC-1001-17.", "HYDROTEST AS PER SPEC TS-400."], 0.35),
@@ -244,6 +248,158 @@ plotted("ISO-2001-01 rev A.pdf", "ISO-2001-01", "A", ['6"-P-2001-A1B', "PSV-2203
 TRUTH["ISO-2001-01 rev A.pdf"] = ['6"-P-2001-A1B', "PSV-2203", "FV-2301", "PT-5501", "HV-2401", "ISO-2001-01"]
 plotted("ISO-2001-01 rev B.pdf", "ISO-2001-01", "B", ['6"-P-2001-A1B', "PSV-2203", "FV-2302", "LT-6601", "HV-2401"])
 TRUTH["ISO-2001-01 rev B.pdf"] = ['6"-P-2001-A1B', "PSV-2203", "FV-2302", "LT-6601", "HV-2401", "ISO-2001-01"]
+
+
+def small_print():
+    """A scanned A2 general arrangement in small print: tags 1.8, 2.0 and
+    2.5 mm high spread over the whole sheet (so some sit on every tile
+    border), some vertical, some boxed, some with a leader line touching
+    them, and a schedule in 2 mm text. This is the sheet that shows whether a
+    faster setting still finds small text."""
+    dpi = 300
+    w, h = int(23.39 * dpi), int(16.54 * dpi)  # A2 landscape
+    im = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(im)
+    d.rectangle([60, 60, w - 60, h - 60], outline=0, width=6)
+    rnd = random.Random(11)
+    cap = {1.8: 30, 2.0: 33, 2.5: 41}  # Arial size in px for a capital this many mm high
+    kinds = ["PSV", "FV", "HV", "TT", "PT", "LT", "XV", "FT", "PI", "TI", "LG", "FE"]
+    tags = []
+    n = 0
+    cols, rows = 10, 7
+    cw, rh = (w - 400) // cols, (h - 1100) // rows
+    for r in range(rows):
+        for c in range(cols):
+            n += 1
+            mm = [1.8, 2.0, 2.5][n % 3]
+            f = font("arial.ttf", cap[mm])
+            if n % 5 == 0:
+                tag = f'{rnd.choice([2, 3, 4, 6, 8])}"-{rnd.choice(["P", "CW", "D", "FG"])}-{5000 + n}-{rnd.choice(["A1B", "B2A", "C3D"])}'
+            else:
+                tag = f"{kinds[n % len(kinds)]}-{5000 + n}"
+            tags.append(tag)
+            x = 200 + c * cw + rnd.randrange(0, cw - 420)
+            y = 200 + r * rh + rnd.randrange(0, rh - 120)
+            if n % 7 == 0:
+                # vertical, reading from the right-hand side of the sheet
+                tw = int(d.textlength(tag, font=f)) + 8
+                v = Image.new("L", (tw, cap[mm] + 12), 255)
+                ImageDraw.Draw(v).text((4, 2), tag, font=f, fill=0)
+                im.paste(v.rotate(90, expand=True), (x, y - 60))
+                continue
+            d.text((x, y), tag, font=f, fill=0)
+            b = d.textbbox((x, y), tag, font=f)
+            if n % 4 == 0:
+                d.rectangle([b[0] - 9, b[1] - 8, b[2] + 9, b[3] + 8], outline=0, width=3)
+            elif n % 4 == 1:
+                # leader line ending just under the tag, and an equipment outline near it
+                d.line([b[0] - 6, b[3] + 7, b[2] + 30, b[3] + 7, b[2] + 150, b[3] + 90], fill=0, width=3)
+                d.ellipse([b[2] + 130, b[3] + 70, b[2] + 190, b[3] + 130], outline=0, width=3)
+            elif n % 4 == 2:
+                d.line([b[0] - 60, (b[1] + b[3]) // 2, b[0] - 10, (b[1] + b[3]) // 2], fill=0, width=5)
+    # Schedule in 2 mm text along the bottom.
+    f = font("arial.ttf", cap[2.0])
+    sx, sy = 200, h - 820
+    d.rectangle([sx, sy, sx + 3300, sy + 700], outline=0, width=4)
+    for i in range(12):
+        n += 1
+        tag = f"NZ-{6100 + i}"
+        tags.append(tag)
+        y = sy + 14 + i * 57
+        d.line([sx, y + 46, sx + 3300, y + 46], fill=0, width=2)
+        d.text((sx + 20, y), tag, font=f, fill=0)
+        d.text((sx + 420, y), rnd.choice(['2" CL150 RF', '4" CL300 RF', '6" CL150 RF', '1" NPT']), font=f, fill=0)
+        d.text((sx + 1100, y), rnd.choice(["INLET", "OUTLET", "VENT", "DRAIN", "LEVEL GAUGE", "MANHOLE"]), font=f, fill=0)
+        d.text((sx + 1900, y), f"EL +{rnd.randrange(100000, 110000)}", font=f, fill=0)
+    d.text((w - 2300, h - 400), "DRAWING No.: GA-5001-01   REV. B   GENERAL ARRANGEMENT", font=font("arial.ttf", 44), fill=0)
+    tags.append("GA-5001-01")
+    im = im.rotate(0.3, fillcolor=255, resample=Image.BICUBIC).filter(ImageFilter.GaussianBlur(0.8))
+    px = im.load()
+    for _ in range(w * h // 900):
+        x, y = rnd.randrange(w), rnd.randrange(h)
+        px[x, y] = max(0, px[x, y] - rnd.randrange(8, 90))
+    im.convert("RGB").save(os.path.join(OUT, "GA-5001-01 small print.pdf"), "PDF", resolution=dpi)
+    TRUTH["GA-5001-01 small print.pdf"] = tags
+
+
+small_print()
+
+
+def dense_sheet():
+    """A scanned A3 isometric as full as real ones are: a bill of material of
+    30 rows, 14 notes, 50 dimensions, 20 weld numbers and 16 tags, some 250
+    pieces of text. On the other sheets finding the text is nearly all the
+    work; here reading it is half of it, as on real drawings."""
+    notes = ["ALL DIMENSIONS IN MM UNLESS STATED OTHERWISE.", "FOR LINE DATA REFER LINE LIST DOC-1001-17."]
+    im, d = sheet("PIPING ISOMETRIC & BOM", "ISO-4001-01", "B", notes)
+    rnd = random.Random(23)
+    tags = ['8"-P-4001-A1B', '6"-P-4002-A1B', '4"-CW-4003-B2A', '2"-D-4004-B2A', "PSV-4101", "PSV-4102", "FV-4201", "FV-4202",
+            "HV-4301", "HV-4302", "XV-4401", "TT-4501", "PT-4502", "LT-4503", "FT-4504", "PI-4505"]
+    # Bill of material, top right.
+    bx, by = W - 1500, 110
+    d.rectangle([bx, by, W - 60, by + 1290], outline=0, width=3)
+    f, fb = font("arial.ttf", 22), font("arialbd.ttf", 22)
+    for a, (t, x) in enumerate([("PT", 16), ("DESCRIPTION", 80), ("ITEM CODE", 980), ("QTY", 1320)]):
+        d.text((bx + x, by + 12), t, font=fb, fill=0)
+    parts = ["PIPE SMLS, ASTM A106 GR.B, SCH-40", "ELBOW 90 DEG LR BW, ASTM A234 WPB", "TEE EQUAL BW, ASTM A234 WPB", "FLANGE WN CL150 RF, ASTM A105",
+             "GASKET SPIRAL WOUND CL150 RF", "STUD BOLT A193 B7 / A194 2H", "GATE VALVE CL150 RF, API 600", "REDUCER CONC BW, ASTM A234 WPB"]
+    for i in range(30):
+        y = by + 52 + i * 41
+        d.line([bx, y - 5, W - 60, y - 5], fill=0, width=1)
+        d.text((bx + 16, y), str(i + 1), font=f, fill=0)
+        d.text((bx + 80, y), f'{parts[i % len(parts)]}, {rnd.choice([2, 3, 4, 6, 8])}"', font=f, fill=0)
+        d.text((bx + 980, y), f"{rnd.choice(['PA', 'EL', 'TE', 'FL', 'GK', 'SB', 'VG', 'RC'])}{rnd.randrange(1000, 9999)}A1B", font=f, fill=0)
+        d.text((bx + 1320, y), rnd.choice(["1", "2", "4", "8", "16", "12.4 M", "3.1 M"]), font=f, fill=0)
+    # Notes, bottom middle.
+    more = ["HYDROTEST AS PER SPEC TS-400.", "SUPPORTS PER STD DWG SD-09.", "FIELD WELDS MARKED FW TO BE VERIFIED AT SITE.", "ALL BOLTS TO STRADDLE CENTRE LINES.",
+            "PAINTING AS PER SPEC PS-120, SYSTEM A-14.", "INSULATION THICKNESS REFER LINE LIST.", "GASKETS TO BE REPLACED AFTER HYDROTEST.", "VENTS AND DRAINS AS PER STD DWG SD-11.",
+            "PIPE SUPPORT TAGS REFER SUPPORT SCHEDULE.", "ELEVATIONS ARE TO CENTRE LINE OF PIPE.", "CO-ORDINATES ARE TO PLANT GRID.", "REFER P&ID PID-0101 FOR INSTRUMENT DETAILS.",
+            "DO NOT SCALE FROM THIS DRAWING.", "THIS SHEET SUPERSEDES REVISION A."]
+    for i, t in enumerate(more):
+        d.text((1100, H - 560 + i * 34), f"{i + 3}. {t}", font=f, fill=0)
+    # The run, its tags, dimensions and weld numbers, on the left two thirds.
+    xy = pipe_run(d, [(0, 0, 0), (700, 0, 0), (700, 0, -300), (700, 600, -300), (1200, 600, -300), (1200, 600, -700)], 900, 520, 0.8)
+    spots = [(140, 150), (640, 150), (1150, 150), (140, 420), (160, 700), (160, 980), (160, 1260), (160, 1540),
+             (700, 1260), (700, 1540), (1250, 1000), (1250, 1260), (1250, 1540), (600, 980), (1150, 760), (640, 420)]
+    for (x, y), t in zip(spots, tags):
+        label(d, (x, y), t, 28, box=t[0].isalpha())
+    fd = font("arial.ttf", 24)
+    for i in range(50):
+        d.text((120 + (i % 10) * 165 + rnd.randrange(0, 50), 240 + (i // 10) * 290 + rnd.randrange(0, 40)), str(rnd.randrange(150, 4800)), font=fd, fill=0)
+    for i in range(20):
+        d.text((220 + (i % 10) * 165 + rnd.randrange(0, 40), 330 + (i // 10) * 580 + rnd.randrange(0, 30)), f"W{i + 1}", font=fd, fill=0)
+    save_img_pdf(scanify(im, 0.3), "ISO-4001-01 dense.pdf", tags + ["ISO-4001-01"])
+
+
+dense_sheet()
+
+
+def image_files():
+    """The same scans as loose image files, for the reader's image support:
+    a PNG, a JPEG, a BMP and a three-page Group 4 (fax) TIFF, in `images/`
+    with their own `truth.json`."""
+    d = os.path.join(OUT, "images")
+    os.makedirs(d, exist_ok=True)
+    truth = {}
+    names = ["ISO-1001-01.pdf", "ISO-1001-02.pdf", "PID-0101 rev C.pdf"]
+    im, tags = SCANS[names[0]]
+    im.convert("RGB").save(os.path.join(d, "ISO-1001-01.png"))
+    truth["ISO-1001-01.png"] = tags
+    im, tags = SCANS[names[1]]
+    im.save(os.path.join(d, "ISO-1001-02.jpg"), quality=85, dpi=(DPI, DPI))
+    truth["ISO-1001-02.jpg"] = tags
+    im, tags = SCANS[names[2]]
+    im.convert("RGB").save(os.path.join(d, "PID-0101 rev C.bmp"))
+    truth["PID-0101 rev C.bmp"] = tags
+    frames = [SCANS[n][0].point(lambda v: 255 if v > 150 else 0).convert("1") for n in names]
+    frames[0].save(os.path.join(d, "Scans 3 pages.tif"), save_all=True, append_images=frames[1:], compression="group4", dpi=(DPI, DPI))
+    truth["Scans 3 pages.tif"] = sorted({t for n in names for t in SCANS[n][1]})
+    with open(os.path.join(d, "truth.json"), "w", encoding="utf-8") as f:
+        json.dump(truth, f, indent=1, ensure_ascii=False)
+    print("wrote", len(truth), "image files to", d)
+
+
+image_files()
 
 with open(os.path.join(OUT, "truth.json"), "w", encoding="utf-8") as f:
     json.dump(TRUTH, f, indent=1, ensure_ascii=False)

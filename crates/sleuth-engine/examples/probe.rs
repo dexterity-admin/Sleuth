@@ -29,6 +29,7 @@ fn main() -> anyhow::Result<()> {
         overlap: env("SLEUTH_OVERLAP", sleuth_engine::ocr::OVERLAP),
         detect_side: env("SLEUTH_DET", sleuth_engine::ocr::DETECT_SIDE),
         backend: if std::env::var("SLEUTH_BACKEND").as_deref() == Ok("directml") { Backend::DirectMl } else { Backend::Cpu },
+        ..Default::default()
     };
     let r = OcrReader::build(&set, &opts)?;
     eprintln!("model {} on {} loaded in {:.1}s", r.model, opts.backend.label(), t.elapsed().as_secs_f32());

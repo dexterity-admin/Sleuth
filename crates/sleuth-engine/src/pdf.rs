@@ -175,6 +175,13 @@ impl Doc {
         Ok(img.to_rgb8())
     }
 
+    /// Load a page to render rectangles of it at `scale` pixels per point.
+    /// While it stays loaded PDFium keeps what it has decoded, so a scanned
+    /// page read in several bands is decompressed once, not once per band.
+    pub fn raster(&self, index: u32, scale: f32) -> Result<PageRaster<'_>> {
+        Ok(PageRaster { page: self.page(index)?, scale })
+    }
+
     /// Whole-page render fitted inside `max_px` on its longer side.
     pub fn render_preview(&self, index: u32, max_px: u32) -> Result<image::RgbaImage> {
         let page = self.page(index)?;
@@ -184,6 +191,57 @@ impl Doc {
         let bmp = page.render_with_config(&cfg).map_err(|e| anyhow!("{e}"))?;
         Ok(bmp.as_image().map_err(|e| anyhow!("{e}"))?.to_rgba8())
     }
+}
+
+/// One loaded page, rendered a rectangle at a time (see [`Doc::raster`]).
+pub struct PageRaster<'a> {
+    page: PdfPage<'a>,
+    scale: f32,
+}
+
+impl PageRaster<'_> {
+    /// Render a rectangle of the page; `(x, y, w, h)` are in output pixels of
+    /// the whole-page render. PDFium draws into three bytes a pixel and the
+    /// one copy taken out of it is turned into RGB in place, where
+    /// [`Doc::render_tile`] goes through four copies at four bytes a pixel.
+    pub fn render(&self, x: i32, y: i32, w: i32, h: i32) -> Result<RgbImage> {
+        let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGR).map_err(|e| anyhow!("{e}"))?;
+        let cfg = PdfRenderConfig::new()
+            .scale_page_by_factor(self.scale)
+            .set_origin(-x, -y)
+            .clear_before_rendering(true)
+            .render_annotations(true)
+            .render_form_data(true);
+        self.page.render_into_bitmap_with_config(&mut bitmap, &cfg).map_err(|e| anyhow!("{e}"))?;
+        let mut raw = bitmap.as_raw_bytes();
+        drop(bitmap);
+        let (w, h) = (w.max(0) as usize, h.max(0) as usize);
+        bgr_rows_to_rgb(&mut raw, w, h)?;
+        RgbImage::from_raw(w as u32, h as u32, raw).ok_or_else(|| anyhow!("rendered bitmap has the wrong size"))
+    }
+}
+
+/// Turn PDFium's BGR rows (each padded to a multiple of four bytes) into
+/// tightly packed RGB, in place.
+fn bgr_rows_to_rgb(raw: &mut Vec<u8>, w: usize, h: usize) -> Result<()> {
+    if h == 0 || w == 0 {
+        raw.clear();
+        return Ok(());
+    }
+    let stride = raw.len() / h;
+    if stride < w * 3 || raw.len() != stride * h {
+        return Err(anyhow!("rendered bitmap has the wrong size"));
+    }
+    for row in 0..h {
+        if stride != w * 3 {
+            raw.copy_within(row * stride..row * stride + w * 3, row * w * 3);
+        }
+        for px in raw[row * w * 3..(row + 1) * w * 3].as_chunks_mut::<3>().0 {
+            px.swap(0, 2);
+        }
+    }
+    raw.truncate(w * h * 3);
+    Ok(())
 }
 
 /// Join text-layer segments that sit on one line and touch, so a tag split
@@ -236,5 +294,18 @@ mod tests {
         ]);
         assert_eq!(merged[0].0, "10\"-P-1001-A1B");
         assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn padded_bgr_rows_become_packed_rgb() {
+        // Two pixels a row: six bytes of colour, two of padding.
+        let mut raw = vec![1, 2, 3, 4, 5, 6, 0, 0, 7, 8, 9, 10, 11, 12, 0, 0];
+        bgr_rows_to_rgb(&mut raw, 2, 2).unwrap();
+        assert_eq!(raw, vec![3, 2, 1, 6, 5, 4, 9, 8, 7, 12, 11, 10]);
+        // Four pixels a row need no padding.
+        let mut raw: Vec<u8> = (0..12).collect();
+        bgr_rows_to_rgb(&mut raw, 4, 1).unwrap();
+        assert_eq!(raw, vec![2, 1, 0, 5, 4, 3, 8, 7, 6, 11, 10, 9]);
+        assert!(bgr_rows_to_rgb(&mut vec![0; 5], 2, 1).is_err());
     }
 }

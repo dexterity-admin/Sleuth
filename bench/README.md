@@ -25,8 +25,68 @@ DirectML instead of the CPU.
 
 The corpus holds invented sheets only: scanned isometrics and a P&ID, a faded
 site scan, plotted text documents, a plotted drawing with a scanned site mark-up
-(hybrid), a plotted drawing with a small logo, and two revisions of one drawing.
-`truth.json` lists every tag each file carries.
+(hybrid), a plotted drawing with a small logo, two revisions of one drawing, a
+scanned A2 general arrangement in small print (83 tags 1.8 to 2.5 mm high,
+some vertical, boxed or touched by a leader line, spread so that some sit on
+every tile border), and a scanned isometric as full as real ones are (a bill
+of material of 30 rows, notes, dimensions, weld numbers: some 250 pieces of
+text). `truth.json` lists every tag each file carries.
+
+`images/` inside the corpus holds three of the scans again as loose image
+files (PNG, JPEG, BMP and a three-page Group 4 TIFF) with their own
+`truth.json`, for the reader's image support:
+
+```bash
+cargo run --release -p sleuth-engine --example bench -- .devdata/corpus/images
+```
+
+## Measuring the OCR pipeline
+
+Readers run as single-threaded processes, so the figure that matters is
+CPU-seconds per page on one core, and the memory of one process:
+
+```bash
+cargo run --release -p sleuth-engine --example bench -- .devdata/corpus --threads 1 --repeat 3
+```
+
+Every run ends with where the OCR time went (rendering, detection, orientation,
+recognition, second opinion) and the peak memory of the process. CPU time is
+the process's own user and kernel time; when the PC is busy, repeat and take
+the fastest pass.
+
+To compare two pipelines on the same files, give each run a `--dump` file and
+compare them line by line:
+
+```bash
+cargo run --release -p sleuth-engine --example bench -- .devdata/corpus --threads 1 --legacy --dump old.json
+```
+
+```bash
+cargo run --release -p sleuth-engine --example bench -- .devdata/corpus --threads 1 --dump new.json
+```
+
+```bash
+python bench/compare_dumps.py old.json new.json --show 40
+```
+
+`--legacy` is the Sleuth 1.0 pipeline (every region of every tile recognised,
+tile by tile, and the more confident of two overlapping readings kept). Both
+pipelines show the detector the same tiles, each rendered by itself.
+`--set key=value,...` changes single settings of either pipeline: `tile`,
+`overlap`, `detect`, `even_tiles`, `scale_all`, `page_render`, `band_mpx`,
+`pool`, `early_dedupe`, `stitch`, `keep_parts`, `orient` (`always`,
+`vertical`, `lazy`, `never`), `rec_batch`, `rec_width`, `det_batch`,
+`second_opinion`, `graph_opt`, `mem_pattern`, `one_call` and
+`ort:<session entry>`. `compare_dumps.py` reports
+the lines a candidate lost, read only in part (`short`), changed and gained
+against a baseline, in the
+matcher's own normal form (letters and digits, lower case). A speed-up is
+accepted only if it loses no tag on the corpus and what it loses on real
+drawings turns out, looked at, to be noise.
+
+`--pages LIST` reads single pages of real files (`path<TAB>page` per line) with
+whole-page OCR and prints numbers only, no file names. `--image FILE` reads one
+image file.
 
 ## Real drawings (private)
 
