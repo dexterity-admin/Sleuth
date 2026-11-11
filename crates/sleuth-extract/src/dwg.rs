@@ -857,7 +857,7 @@ pub fn read(path: &Path, dwgread: &Path, out: &mut Out) -> Result<()> {
     // LibreDWG reports success for a file that has the first bytes of a
     // drawing and nothing behind them. An empty reading is not a reading.
     if !enough && drawing.objects == 0 {
-        anyhow::bail!("damaged: LibreDWG found no objects in this drawing (version {dwg_version})");
+        anyhow::bail!("LibreDWG read nothing from this drawing (version {dwg_version}): it is damaged, or in a form LibreDWG cannot read");
     }
     out.page("model", "");
     drawing.emit(out);

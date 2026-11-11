@@ -8,9 +8,10 @@
 //!   The stats thread works that out (`scan`) together with the counts the
 //!   status bar shows.
 //! - **Who reads it**: every PC that is on shares the backlog. Each takes
-//!   the folders that fall to it first, and holds a lease on every document
-//!   from the moment it starts until its reading is published and the other
-//!   PCs have seen it, so no document is read twice.
+//!   the folders that fall to it first. The reader process takes a lease on
+//!   a document before it opens it and leaves it to run out (half an hour)
+//!   once it is read: long enough for the reading to be published and seen
+//!   by every PC, so no document is read twice.
 //! - **How hard**: the governor decides how many readers run, every pass
 //!   of the loop. A busy PC keeps the minimum; a free one doubles every
 //!   half minute.
@@ -26,8 +27,8 @@ use sleuth_core::kinds::FileKind;
 use sleuth_core::paths::root_key;
 use sleuth_core::protocol::{Failed, KindCount, ScopeProgress, SpeedMode};
 use sleuth_lanes::{CpuMeter, Event, Governor, Inputs, ProcessGroup, Spawn, Speed, Workers};
-use sleuth_office::{Acquire, Lease, Leases};
-use std::collections::{HashMap, VecDeque};
+use sleuth_office::{Acquire, Leases};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,13 +38,10 @@ use tracing::{info, warn};
 /// Readings are published once this many wait, or the oldest is this old.
 const PUBLISH_DOCS: u64 = 500;
 const PUBLISH_AFTER: Duration = Duration::from_secs(600);
-/// A document's lease: renewed while it is read and until it is published.
-const DOC_LEASE: Duration = Duration::from_secs(900);
-/// Leases are let go this long after publishing, when every PC has had time
-/// to see the new part (they look every minute).
-const SEEN_AFTER: Duration = Duration::from_secs(180);
-const FAST_TIMEOUT: Duration = Duration::from_secs(300);
-const OCR_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// How long one file may take. Generous: readers run at idle priority, so
+/// on a PC that is flat out they get very little of the processor.
+const FAST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const OCR_TIMEOUT: Duration = Duration::from_secs(90 * 60);
 /// Waiting files kept ready per lane between scans.
 const QUEUE_KEEP: usize = 3000;
 /// Memory one OCR reader needs, for the governor's memory guard.
@@ -80,16 +78,13 @@ struct Coordinator {
     group: Arc<ProcessGroup>,
     office: Work,
     own: Work,
-    /// Leases of documents being read, by path key.
-    flights: HashMap<u64, Option<Lease>>,
-    /// Leases of documents read and not yet published.
-    held: HashMap<u64, Lease>,
-    /// Leases of published documents, let go once every PC has seen them.
-    seen_soon: Vec<(Instant, Vec<Lease>)>,
+    /// Documents with a reader right now, by path key.
+    flights: HashSet<u64>,
     gov: Governor,
     meter: CpuMeter,
     init_sent: String,
-    renewed: Instant,
+    /// When moving a 1.0 index into the office index was last tried.
+    import_tried: Option<Instant>,
 }
 
 impl Engine {
@@ -298,13 +293,11 @@ impl Engine {
                 group,
                 office: self.open_work("work.db")?,
                 own: self.open_work("work-local.db")?,
-                flights: HashMap::new(),
-                held: HashMap::new(),
-                seen_soon: Vec::new(),
+                flights: HashSet::new(),
                 gov: Governor::new(),
                 meter: CpuMeter::new(),
                 init_sent: String::new(),
-                renewed: Instant::now(),
+                import_tried: None,
             })
         })();
         let mut c = match built {
@@ -317,7 +310,6 @@ impl Engine {
             }
         };
         self.pool.recover(&|p| self.presence(p));
-        self.import_old_index(&mut c);
         while !self.stopping() {
             if let Err(e) = self.reader_pass(&mut c) {
                 warn!("reader: {e:#}");
@@ -325,12 +317,8 @@ impl Engine {
             }
         }
         // Stopping: give back what is in progress, publish what is done.
-        for (_, job) in c.workers.shutdown() {
-            if let Some(Some(l)) = c.flights.remove(&path_key(&job.path)) {
-                l.release();
-            }
-        }
-        self.publish(&mut c, true);
+        c.workers.shutdown();
+        self.publish(&mut c);
     }
 
     /// One turn of the loop: decide how many readers run, feed them, save
@@ -357,6 +345,13 @@ impl Engine {
                 }
             }
         }
+        // A Sleuth 1.0 index on this PC is moved into the office index as
+        // soon as the office folder answers (and tried again hourly if that
+        // did not finish).
+        if c.import_tried.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) && self.store_dir().is_some() && self.data.join("index.db").exists() {
+            c.import_tried = Some(Instant::now());
+            self.import_old_index(c);
+        }
         let urgent = !self.urgent.lock().unwrap().is_empty();
         // File names first: until the drives holding the reading folders
         // were listed to the end once, only files someone asked for are
@@ -380,7 +375,9 @@ impl Engine {
                 cores: sleuth_lanes::cores(),
                 others_cpu: others,
                 idle_secs: sleuth_lanes::idle_seconds(),
-                free_ram_mb: sleuth_lanes::free_ram_mb(),
+                // What the readers already hold is theirs to keep: without
+                // it the limit would fall as readers start, and rise again.
+                free_ram_mb: sleuth_lanes::free_ram_mb() + c.group.working_set_mb(),
                 on_battery: sleuth_lanes::on_battery(),
                 server: self.server_mode,
                 speed,
@@ -406,27 +403,12 @@ impl Engine {
             let lane = if lane == Lane::Ocr.name() { Lane::Ocr } else { Lane::Fast };
             self.handle(c, lane, ev);
         }
-        if c.renewed.elapsed() > Duration::from_secs(300) {
-            c.renewed = Instant::now();
-            for l in c.flights.values_mut().flatten().chain(c.held.values_mut()) {
-                l.renew();
-            }
-        }
         // Publish: enough waiting, the oldest waiting long, or nothing left to do.
         let total = c.office.unpublished + c.own.unpublished;
         let oldest = [c.office.since, c.own.since].into_iter().flatten().map(|t| t.elapsed()).max().unwrap_or_default();
         if total >= PUBLISH_DOCS || oldest > PUBLISH_AFTER || (total > 0 && idle && oldest > Duration::from_secs(20)) {
-            self.publish(c, false);
+            self.publish(c);
         }
-        c.seen_soon.retain_mut(|(at, leases)| {
-            if at.elapsed() < SEEN_AFTER {
-                return true;
-            }
-            for l in leases.drain(..) {
-                l.release();
-            }
-            false
-        });
         // What the status bar says.
         let (fast_n, fast_busy) = c.workers.counts(Lane::Fast.name());
         let (ocr_n, ocr_busy) = c.workers.counts(Lane::Ocr.name());
@@ -465,7 +447,6 @@ impl Engine {
 
     /// Hand waiting files to idle readers.
     fn feed(&self, c: &mut Coordinator, backlog: bool) {
-        let leases = self.leases();
         let s = self.settings.read().unwrap().clone();
         for lane in [Lane::Fast, Lane::Ocr] {
             loop {
@@ -502,7 +483,7 @@ impl Engine {
                     None => break,
                 };
                 let key = path_key(&job.path);
-                if c.flights.contains_key(&key) {
+                if c.flights.contains(&key) {
                     continue;
                 }
                 let kind = FileKind::of(&job.path);
@@ -518,35 +499,19 @@ impl Engine {
                 if !job.urgent && self.retry.lock().unwrap().get(&key).is_some_and(|r| r.until > now()) {
                     continue;
                 }
-                // One PC reads a document: take its lease (kept from the
-                // fast lane when that found it needs OCR).
-                let lease = match c.held.remove(&key) {
-                    Some(l) => Some(l),
-                    None if is_local(&job.path) => None,
-                    None => match leases.as_ref().map(|l| l.acquire(&doc_lease(key), DOC_LEASE)) {
-                        Some(Acquire::Mine(l)) => Some(l),
-                        Some(Acquire::HeldBy(h)) => {
-                            self.defer(key, 600, 0, &format!("being read by {}", h.host));
-                            if job.urgent {
-                                self.notify_waiters(&job.path);
-                            }
-                            continue;
-                        }
-                        // The office folder is away: nothing to coordinate with.
-                        Some(Acquire::Unavailable(_)) | None => None,
-                    },
-                };
                 let timeout = if lane == Lane::Ocr { OCR_TIMEOUT } else { FAST_TIMEOUT };
                 match c.workers.submit(lane.name(), job, timeout) {
                     Ok(()) => {
-                        c.flights.insert(key, lease);
+                        c.flights.insert(key);
                     }
                     Err(job) => {
-                        if let Some(l) = lease {
-                            l.release();
-                        }
+                        // No reader is ready for it yet (they are starting).
                         if job.urgent {
                             self.urgent.lock().unwrap().push_front(job);
+                        } else {
+                            let mut q = self.queue.lock().unwrap();
+                            let list = if lane == Lane::Ocr { &mut q.ocr } else { &mut q.fast };
+                            list.push_front(Item { path: job.path, size: job.size, mtime: job.mtime });
                         }
                         break;
                     }
@@ -570,17 +535,7 @@ impl Engine {
             Event::TimedOut { job, millis } => (job, Outcome::Failed { reason: format!("reading took longer than {} minutes and was stopped", millis / 60_000), transient: false }, false),
         };
         let key = path_key(&job.path);
-        let lease = c.flights.remove(&key).flatten();
-        let keep = |c: &mut Coordinator, lease: Option<Lease>| {
-            if let Some(l) = lease {
-                c.held.insert(key, l);
-            }
-        };
-        let give_back = |lease: Option<Lease>| {
-            if let Some(l) = lease {
-                l.release();
-            }
-        };
+        c.flights.remove(&key);
         match outcome {
             Outcome::Read { hash, text } | Outcome::Reused { hash, text } => {
                 let pages = text.pages.len() as u32;
@@ -595,16 +550,13 @@ impl Engine {
                     self.cache_misses.fetch_add(1, Ordering::Relaxed);
                 }
                 let deriver = self.deriver();
-                let saved = self.save(c, &job, |store, id| store.save_read(id, &hash, &text, now(), &deriver), state::READ);
-                match saved {
+                match self.save(c, &job, |store, id| store.save_read(id, &hash, &text, now(), &deriver), state::READ) {
                     Ok(()) => {
-                        keep(c, lease);
                         self.retry.lock().unwrap().remove(&key);
                         self.pages_read.lock().unwrap().push_back((Instant::now(), pages));
                     }
                     Err(e) => {
                         warn!("could not save the reading of {}: {e:#}", job.path);
-                        give_back(lease);
                         self.defer(key, 300, 0, "could not be saved; trying again");
                     }
                 }
@@ -612,13 +564,9 @@ impl Engine {
             }
             Outcome::NeedsOcr => {
                 // Recorded for the whole office: any PC's OCR lane may take
-                // it without opening it first. This PC keeps the lease.
-                match self.save(c, &job, |store, id| store.save_needs_ocr(id, now()), state::NEEDS_OCR) {
-                    Ok(()) => keep(c, lease),
-                    Err(e) => {
-                        warn!("{}: {e:#}", job.path);
-                        give_back(lease);
-                    }
+                // it without opening it first.
+                if let Err(e) = self.save(c, &job, |store, id| store.save_needs_ocr(id, now()), state::NEEDS_OCR) {
+                    warn!("{}: {e:#}", job.path);
                 }
                 if job.urgent {
                     self.urgent.lock().unwrap().push_back(job);
@@ -627,13 +575,12 @@ impl Engine {
                 }
             }
             Outcome::HeldBy { host, until } => {
+                // Another PC has it: its reading will be in the office index.
                 self.claims_waited.fetch_add(1, Ordering::Relaxed);
-                give_back(lease);
                 self.defer(key, (until - now()).clamp(60, 900), 0, &format!("being read by {host}; its result will be shared"));
             }
             Outcome::NotHere { reason } => {
-                // Another PC may have what this one lacks; ask again tomorrow.
-                give_back(lease);
+                // Another PC may have what this one lacks; ask again later.
                 self.defer(key, 6 * 3600, 0, &reason);
                 if job.urgent {
                     self.notify_waiters(&job.path);
@@ -643,18 +590,13 @@ impl Engine {
                 let attempts = self.retry.lock().unwrap().get(&key).map(|r| r.attempts).unwrap_or(0) + 1;
                 // A crash may be the PC's (out of memory), so it gets one more go.
                 if (transient && attempts < 5) || (crashed && attempts < 2) {
-                    give_back(lease);
                     self.defer(key, 300 * (1i64 << attempts.min(6)), attempts, &reason);
                     info!("will retry {} later: {reason}", job.path);
                 } else {
                     warn!("could not read {}: {reason}", job.path);
                     self.event("warn", &format!("could not read {}: {reason}", job.path));
-                    match self.save(c, &job, |store, id| store.save_failure(id, &reason, now()), state::FAILED) {
-                        Ok(()) => keep(c, lease),
-                        Err(e) => {
-                            warn!("{}: {e:#}", job.path);
-                            give_back(lease);
-                        }
+                    if let Err(e) = self.save(c, &job, |store, id| store.save_failure(id, &reason, now()), state::FAILED) {
+                        warn!("{}: {e:#}", job.path);
                     }
                     self.retry.lock().unwrap().remove(&key);
                     self.notify_waiters(&job.path);
@@ -678,7 +620,7 @@ impl Engine {
     }
 
     /// Publish what waits in `work` as parts, then empty it.
-    fn publish(&self, c: &mut Coordinator, stopping: bool) {
+    fn publish(&self, c: &mut Coordinator) {
         let Some(store) = self.store_dir() else { return };
         let own_dir = store.join("pcs").join(root_key(&self.pc)).join("text");
         let office_dir = store.join("text");
@@ -714,15 +656,6 @@ impl Engine {
         }
         if published {
             self.pool.recover(&|p| self.presence(p));
-            let leases: Vec<Lease> = c.held.drain().map(|(_, l)| l).collect();
-            if stopping {
-                // Nobody is left to let them go later: they run out by themselves.
-                for l in leases {
-                    l.leave();
-                }
-            } else if !leases.is_empty() {
-                c.seen_soon.push((Instant::now(), leases));
-            }
             self.stats_signal.raise();
         }
     }
@@ -768,10 +701,10 @@ impl Engine {
                 moved += 1;
                 if moved.is_multiple_of(PUBLISH_DOCS) {
                     self.set_reader_note(&format!("Moving this PC's earlier readings into the office index: {} of {}.", fmt_count(done), fmt_count(total)));
-                    self.publish(c, false);
+                    self.publish(c);
                 }
             }
-            self.publish(c, false);
+            self.publish(c);
             if c.office.unpublished + c.own.unpublished > 0 {
                 anyhow::bail!("the last readings could not be published; the old index is kept for now");
             }
@@ -848,12 +781,6 @@ impl Engine {
     }
 }
 
-/// The lease name of a document: a sub-folder per first byte keeps the
-/// lease folder's listings short.
-fn doc_lease(key: u64) -> String {
-    format!("doc\\{:02x}\\{:016x}", key >> 56, key)
-}
-
 /// Whether a path is one this PC alone can open.
 #[allow(dead_code)]
 fn local_path(path: &Path) -> bool {
@@ -869,6 +796,5 @@ mod tests {
         assert_eq!(split_path(r"\\10.0.0.5\p\Iso\a.pdf"), (r"\\10.0.0.5\p\Iso".to_string(), "a.pdf".to_string()));
         assert_eq!(split_path(r"C:\a.pdf"), (r"C:\".to_string(), "a.pdf".to_string()));
         assert!(is_local(r"D:\x\y.pdf") && !is_local(r"\\srv\s\y.pdf"));
-        assert_eq!(doc_lease(0xab00_0000_0000_0001), r"doc\ab\ab00000000000001");
     }
 }

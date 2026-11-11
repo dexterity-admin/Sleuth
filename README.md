@@ -23,6 +23,18 @@
 <p align="center"><img src="docs/images/v1/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line list; on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial with the reason" width="100%"></p>
 <p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth 1.0 still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
 
+## New in 1.1: one office index, every file type
+
+| | |
+|---|---|
+| **One office index** | Kept in the shared folder (`U:\Sleuth-cache`), not on each PC: a PC keeps only settings and a few MB of work in progress. One PC lists each share for everybody; every PC that is on reads for everybody, and a document is read once for the whole office. |
+| **Every file type** | Excel, Word, PowerPoint, Outlook emails, text and CSV, AutoCAD DWG/DXF, MicroStation DGN (V7, V8 and PDS `.i01` natives) and scanned images, as well as PDF. |
+| **One row per document** | The PDF, DWG and DGN of one drawing are one result, each a click away, with the reason they belong together. |
+| **Faster reading that never gets in the way** | Documents needing no OCR are read many at a time; scans are read by separate processes at the lowest priority, ramping up while the PC is free. |
+| **Pause, resume, now** | Each stage can be paused, resumed or started at once by hand, and reading can run at full speed for an hour. |
+
+See [what is new in 1.1](CHANGELOG.md) for the details and the measured speeds.
+
 ## New in 1.0.1: indexing you can watch
 
 1.0.0 could leave a new install with nothing to search: reading folders chosen by drive letter (`Z:\`) were never read, and the walk of each drive skipped most subfolders. 1.0.1 fixes both and shows what Sleuth is doing at every moment. An existing index is repaired when you install it.

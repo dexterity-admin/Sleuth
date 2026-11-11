@@ -154,6 +154,10 @@ pub fn extract(path: &Path, kind: FileKind, tools: &Tools, limits: &Limits) -> R
                 if word { ooxml::read_docx(path, &mut out)? } else { ooxml::read_pptx(path, &mut out)? }
             } else if is_ole && encrypted_package(path) {
                 anyhow::bail!("password protected");
+            } else if !matches!(ext.as_str(), "doc" | "ppt") {
+                // A zip-based name on something that is not a zip (an
+                // editing lock file, a legacy file renamed).
+                anyhow::bail!("damaged or not the format its name says: a .{ext} file is a zip, and this is not");
             } else {
                 // The legacy binary formats (and whatever else carries the
                 // extension, such as RTF saved as .doc) go to the filter

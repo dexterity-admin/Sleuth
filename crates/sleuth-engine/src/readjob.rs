@@ -8,12 +8,19 @@
 //! A reader process holds no index and takes no decisions about the queue:
 //! it opens the file, reads it and answers. A file that crashes its reader
 //! takes only that process down; the worker records the file as unreadable.
+//!
+//! One PC reads a document. Before a reader opens a file on a share it
+//! takes the document's lease in the office store, and when the file is
+//! read it leaves the lease to run out by itself: by then the reading is
+//! published and every PC has seen it. (Releasing each lease the moment it
+//! is no longer needed cost the worker minutes of file-server calls.)
 
 use crate::accel;
 use crate::cache::{Claim, ClaimResult, SharedCache, hash_file};
 use crate::derive::Deriver;
 use crate::models;
 use crate::ocr::{Backend, OcrOptions, OcrReader, config_signature};
+use crate::pool::{doc_lease, path_key};
 use crate::reader::{ReadOptions, pipeline_fingerprint, read_pdf, read_pdf_lanes};
 use crate::text::{FileText, Line, READER_VERSION};
 use anyhow::{Result, anyhow, bail};
@@ -22,8 +29,14 @@ use sleuth_core::kinds::FileKind;
 use sleuth_core::protocol::Provenance;
 use sleuth_core::settings::Settings;
 use sleuth_extract::{Extracted, Limits, Tools};
+use sleuth_office::{Acquire, Identity, Lease, Leases};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// How long a document stays one PC's after its reader took it: longer
+/// than reading it, publishing it (every ten minutes) and the other PCs
+/// noticing (every minute) take together. Long OCR jobs renew it.
+const DOC_LEASE: Duration = Duration::from_secs(30 * 60);
 
 fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -116,14 +129,20 @@ pub struct ReaderState {
     /// DirectML failed here: this process stays on the CPU.
     cpu_only: bool,
     tools: Option<Tools>,
+    /// The lease on the document being read.
+    lease: std::cell::RefCell<Option<Lease>>,
 }
 
 impl ReaderState {
     /// Run one job. Never panics outward: a panic inside a reader library
     /// is caught and reported as a failure of that file.
     pub fn handle(&mut self, init: &Init, job: Job) -> Outcome {
+        match take_lease(init, &job.path) {
+            Ok(lease) => *self.lease.borrow_mut() = lease,
+            Err(held) => return held,
+        }
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run(init, &job)));
-        match r {
+        let outcome = match r {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => Outcome::Failed { reason: friendly(&e), transient: is_transient(&e) },
             Err(_) => {
@@ -131,7 +150,17 @@ impl ReaderState {
                 self.ocr = None;
                 Outcome::Failed { reason: "the reader crashed on this file".into(), transient: false }
             }
+        };
+        if let Some(lease) = self.lease.borrow_mut().take() {
+            match &outcome {
+                // Done with for good: nobody opens it again before its
+                // reading (or its failure) is in the office index.
+                Outcome::Read { .. } | Outcome::Reused { .. } | Outcome::Failed { transient: false, .. } => lease.leave(),
+                // Somebody else's turn, now or later.
+                _ => lease.release(),
+            }
         }
+        outcome
     }
 
     fn run(&mut self, init: &Init, job: &Job) -> Result<Outcome> {
@@ -168,7 +197,10 @@ impl ReaderState {
     fn extract(&mut self, init: &Init, path: &Path, kind: FileKind) -> Result<Outcome> {
         let hash = hash_file(path).map_err(|e| anyhow!("cannot open file: {e}"))?;
         let tools = self.tools.get_or_insert_with(Tools::find);
-        match sleuth_extract::extract(path, kind, tools, &Limits::default())? {
+        // Large AutoCAD drawings take LibreDWG minutes; the lane's own time
+        // limit is longer still.
+        let limits = Limits { timeout: Duration::from_secs(if kind == FileKind::Dwg { 600 } else { 180 }), ..Limits::default() };
+        match sleuth_extract::extract(path, kind, tools, &limits)? {
             Extracted::Text(mut text) => {
                 text.provenance = self.provenance(init, &format!("extract-{READER_VERSION}"), "", "", "", "read here");
                 Ok(Outcome::Read { hash, text: Box::new(text) })
@@ -238,6 +270,9 @@ impl ReaderState {
                     if let Some(c) = &claim {
                         c.renew();
                     }
+                    if let Some(l) = self.lease.borrow_mut().as_mut() {
+                        l.renew();
+                    }
                 }
                 false
             };
@@ -273,6 +308,22 @@ impl ReaderState {
         let has_dwg = |lines: &[Line]| deriver.has_drawing_number(lines);
         let opts = ReadOptions { dpi: s.ocr_dpi, cancel, title_block_ocr: s.ocr_missing_title_block, has_drawing_number: &has_dwg };
         read_pdf(path, Some(reader), &opts)
+    }
+}
+
+/// Take the lease of a document on a share. `Err` is the answer to give
+/// when another PC has it. Files on this PC's own disks need none, and
+/// without the office folder there is nobody to coordinate with.
+fn take_lease(init: &Init, path: &str) -> Result<Option<Lease>, Outcome> {
+    if !path.starts_with(r"\\") {
+        return Ok(None);
+    }
+    let Some(store) = &init.cache_dir else { return Ok(None) };
+    let me = Identity { host: init.pc.clone(), user: std::env::var("USERNAME").unwrap_or_default(), pid: std::process::id() };
+    match Leases::new(Path::new(store).join("leases"), me).acquire(&doc_lease(path_key(path)), DOC_LEASE) {
+        Acquire::Mine(l) => Ok(Some(l)),
+        Acquire::HeldBy(h) => Err(Outcome::HeldBy { host: h.host, until: h.until }),
+        Acquire::Unavailable(_) => Ok(None),
     }
 }
 

@@ -468,6 +468,13 @@ impl Store {
              INSERT INTO names(names) VALUES('delete-all');
              COMMIT;",
         )?;
+        // Emptied pages stay in the file until it is rebuilt; a PC is
+        // meant to keep only a few MB.
+        let pages: i64 = self.conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap_or(0);
+        let size: i64 = self.conn.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap_or(4096);
+        if pages * size > 16 * 1024 * 1024 {
+            let _ = self.conn.execute_batch("VACUUM;");
+        }
         let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         Ok(())
     }

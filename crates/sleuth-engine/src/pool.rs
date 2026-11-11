@@ -43,6 +43,13 @@ pub fn path_key(path: &str) -> u64 {
     h.finish()
 }
 
+/// The lease a reader holds on a document while it reads it, by the
+/// document's [`path_key`]: a sub-folder per first byte keeps the lease
+/// folder's listings short.
+pub fn doc_lease(key: u64) -> String {
+    format!("doc\\{:02x}\\{:016x}", key >> 56, key)
+}
+
 /// [`path_key`] for many files of the same folders: the folder's part of
 /// the key is worked out once per folder, not once per file.
 #[derive(Default)]
@@ -120,6 +127,8 @@ pub struct Part {
     rows: Vec<ReadingRow>,
     /// Set when a query failed on I/O: the part is reopened at the next refresh.
     broken: AtomicBool,
+    /// What was last written to the part's list of hidden readings.
+    hidden_sig: AtomicU64,
 }
 
 impl Part {
@@ -223,6 +232,7 @@ impl Pool {
             store: Mutex::new(store),
             rows: Vec::new(),
             broken: AtomicBool::new(false),
+            hidden_sig: AtomicU64::new(0),
         });
         self.parts.write().unwrap().push(Arc::clone(&part));
         Ok(part)
@@ -240,6 +250,7 @@ impl Pool {
             store: Mutex::new(store),
             rows: Vec::new(),
             broken: AtomicBool::new(false),
+            hidden_sig: AtomicU64::new(0),
         });
         self.parts.write().unwrap().push(Arc::clone(&part));
         part
@@ -257,6 +268,7 @@ impl Pool {
             store: Mutex::new(store),
             rows,
             broken: AtomicBool::new(false),
+            hidden_sig: AtomicU64::new(0),
         })
     }
 
@@ -337,52 +349,63 @@ impl Pool {
 
     /// Work out the current reading of every path and hide the others.
     pub fn recover(&self, presence: &dyn Fn(&str) -> Presence) {
+        use std::borrow::Cow;
         let parts = self.parts();
-        let mut all: Vec<(Arc<Part>, Vec<ReadingRow>)> = Vec::new();
-        for p in &parts {
-            let rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { p.rows.clone() };
-            all.push((Arc::clone(p), rows));
-        }
+        // A published part's rows never change; `work` is asked each time.
+        let all: Vec<(&Arc<Part>, Cow<[ReadingRow]>)> = parts.iter().map(|p| (p, if p.work { Cow::Owned(p.with(|s| s.reading_rows()).unwrap_or_default()) } else { Cow::Borrowed(p.rows.as_slice()) })).collect();
         let mut cover: HashMap<u64, Covered> = HashMap::new();
         for (p, rows) in &all {
-            for r in rows {
+            for r in rows.iter() {
                 let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at };
-                let key = path_key(&r.path);
-                match cover.get(&key) {
-                    // Newest reading wins; this PC's unpublished one on a tie.
-                    Some(old) if old.read_at > c.read_at || (old.read_at == c.read_at && !p.work) => {}
-                    _ => {
-                        cover.insert(key, c);
+                match cover.entry(path_key(&r.path)) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        // Newest reading wins; this PC's unpublished one on a tie.
+                        let old = e.get();
+                        if c.read_at > old.read_at || (c.read_at == old.read_at && p.work) {
+                            e.insert(c);
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(c);
                     }
                 }
             }
         }
         let mut superseded: HashMap<u32, HashSet<i64>> = HashMap::new();
+        let mut gone: Vec<u64> = Vec::new();
         for (p, rows) in &all {
             if p.work {
                 continue;
             }
             let mut hidden: Vec<i64> = Vec::new();
-            for r in rows {
-                let current = cover.get(&path_key(&r.path)).is_some_and(|c| c.slot == p.slot && c.id == r.id);
+            for r in rows.iter() {
+                let key = path_key(&r.path);
+                let current = cover.get(&key).is_some_and(|c| c.slot == p.slot && c.id == r.id);
                 if !current {
                     superseded.entry(p.slot).or_default().insert(r.id);
-                }
-                // Waiting for OCR is not a reading: nothing to show.
-                if !current || r.state == state::NEEDS_OCR || presence(&r.path) == Presence::Gone {
+                    hidden.push(r.id);
+                } else if presence(&r.path) == Presence::Gone {
+                    gone.push(key);
+                    hidden.push(r.id);
+                } else if r.state == state::NEEDS_OCR {
+                    // Waiting for OCR is not a reading: nothing to show.
                     hidden.push(r.id);
                 }
             }
-            if let Err(e) = p.with(|s| s.set_hidden(&hidden)) {
+            // Written to the part only when it differs from last time.
+            let sig = hidden.iter().fold(hidden.len() as u64, |a, id| a.wrapping_mul(1_000_003).wrapping_add(*id as u64));
+            if p.hidden_sig.swap(sig, Ordering::SeqCst) != sig
+                && let Err(e) = p.with(|s| s.set_hidden(&hidden))
+            {
                 warn!("part {}: {e:#}", p.name);
+                p.hidden_sig.store(u64::MAX, Ordering::SeqCst);
             }
         }
         *self.superseded.write().unwrap() = superseded;
         // A reading of a file that is gone covers nothing.
-        cover.retain(|_, c| {
-            let Some((p, rows)) = all.iter().find(|(p, _)| p.slot == c.slot) else { return false };
-            p.work || rows.iter().find(|r| r.id == c.id).is_none_or(|r| presence(&r.path) != Presence::Gone)
-        });
+        for key in gone {
+            cover.remove(&key);
+        }
         *self.cover.write().unwrap() = cover;
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
@@ -707,6 +730,11 @@ mod tests {
     }
 
     #[test]
+    fn a_document_lease_is_named_by_its_key() {
+        assert_eq!(doc_lease(0xab00_0000_0000_0001), r"doc\ab\ab00000000000001");
+    }
+
+    #[test]
     fn ids_carry_their_part() {
         let id = compose(7, 123_456);
         assert_eq!(split(id), (7, 123_456));
@@ -715,7 +743,7 @@ mod tests {
 
     #[test]
     fn merge_waits_for_enough_small_parts() {
-        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Vec::new(), broken: AtomicBool::new(false) });
+        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Vec::new(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
         let few: Vec<Arc<Part>> = (0..7).map(|_| mk(1 << 20)).collect();
         assert!(merge_candidates(&few).is_empty());
         let enough: Vec<Arc<Part>> = (0..8).map(|_| mk(1 << 20)).chain([mk(3 << 30)]).collect();

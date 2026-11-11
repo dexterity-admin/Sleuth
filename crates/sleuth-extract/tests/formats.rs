@@ -277,6 +277,10 @@ fn workbooks_that_are_something_else() {
     assert_eq!(t.page_info[0].note, "delimited text saved as a workbook");
 
     assert!(error(&s.file("junk.xlsx", &[0x13, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x07, 0x00, 0x00, 0x00])).contains("not a workbook"));
+    // an editing lock file, or any other text under a workbook name, is not a workbook
+    assert_eq!(error(&s.file("~$list.xlsx", b"\x06A. User                    ")), "damaged or not a workbook");
+    assert_eq!(error(&s.file("words.xls", b"just a few words, no cells")), "damaged or not a workbook");
+    assert_eq!(error(&s.file("tabs.xlsx", b"Tag\tSize\r\n")), "damaged or not a workbook");
     assert!(error(&s.file("cut.xlsx", b"PK\x03\x04 this is not a whole zip")).contains("damaged"));
 }
 
@@ -371,6 +375,9 @@ fn docx_paragraphs_tables_headers_notes_and_text_boxes() {
     assert_eq!(lines(&text(&s.file("spec.doc", &bytes)), 0).len(), 12);
 
     assert!(error(&s.file("no-body.docx", &zip_of(&[("_rels/.rels", &root), ("word/styles.xml", "<w:styles/>")]))).contains("no document part"));
+    // an editing lock file carries the name but is no zip; no filter is asked
+    assert_eq!(error(&s.file("~$spec.docx", b"\x06A. User                    ")), "damaged or not the format its name says: a .docx file is a zip, and this is not");
+    assert!(error(&s.file("~$deck.pptx", b"\x06A. User                    ")).contains("a .pptx file is a zip"));
 }
 
 #[test]
@@ -794,7 +801,7 @@ fn dwg_through_libredwg_when_it_is_installed() {
     // success with nothing in it, which is not handed on as an empty reading.
     let hollow = s.file("hollow.dwg", &[b"AC1015".as_slice(), &[0u8; 200]].concat());
     let e = read_with(&hollow, &tools, &Limits::default()).unwrap_err().to_string();
-    assert_eq!(e, "damaged: LibreDWG found no objects in this drawing (version 2000)");
+    assert_eq!(e, "LibreDWG read nothing from this drawing (version 2000): it is damaged, or in a form LibreDWG cannot read");
     // A drawing cut short: LibreDWG's failure, said plainly.
     let whole: &[u8] = include_bytes!("fixtures/sample.dwg");
     let cut = s.file("cut.dwg", &whole[..2500]);

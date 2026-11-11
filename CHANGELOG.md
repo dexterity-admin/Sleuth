@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.1.0
+
+One office index instead of one per PC, every PC reading for everyone, and
+every common file type read inside. Install over 1.0.x: each PC moves the
+readings it already has into the office index and then deletes its old
+index (5 to 6 GB on a busy PC); settings are kept.
+
+- **One office index in the shared folder** (default `U:\Sleuth-cache`).
+  Nothing large stays on a PC: its own disk holds settings and a few MB of
+  work in progress. The index is made of files that are written once and
+  never changed, so several PCs can add to it at the same time over the
+  network without a database server and without damaging it.
+- **One PC lists each share for the whole office**, and the others use its
+  list; it carries on from where it stopped if it is switched off. Each PC
+  still lists its own disks.
+- **Every PC that is on reads for everyone.** A document is read by one PC
+  only, and is searchable on every PC a minute or so after it is read. The
+  office server, if there is one, reads day and night.
+- **Every common file type is read inside**: Excel (`.xlsx`, `.xlsm`,
+  `.xls`, `.xlsb`, `.ods`), Word (`.docx`, `.doc`), PowerPoint (`.pptx`,
+  `.ppt`), Outlook emails (`.msg`, `.eml`), text and CSV, AutoCAD (`.dwg`,
+  `.dxf`), MicroStation (`.dgn` V7 and V8, and PDS isometric natives
+  `.i01`…), and scanned images (`.tif`, `.jpg`, `.png`, `.bmp`).
+  AutoCAD files are read with LibreDWG 0.14, which now ships with Sleuth
+  (GPLv3; licence and source link in the `libredwg` folder).
+- **One row per document**: the PDF, DWG and DGN of the same drawing show on
+  one result row, as chips that open each file, with the reason they were
+  grouped (the same drawing number and revision in the title block, or the
+  same file name beside each other). A switch shows every file on its own.
+  Results are labelled by type and can be filtered by category.
+- **Text preview for files without pages**: a spreadsheet's sheets, a
+  model's text, an email, with the matching lines marked.
+- **Reading is faster and never stops by itself.**
+  - Documents that need no OCR (plotted PDFs and every type above but
+    images) are read many at a time: {FAST_RATE}.
+  - Scanned pages are read by separate reader processes at the lowest
+    processor priority, so the PC stays as quick as before. The number of
+    readers starts at the minimum while the PC is in use and doubles every
+    30 seconds while it is free.
+  - OCR itself does about a third less work on dense drawings ({OCR_GAIN})
+    and needs {OCR_MEM} instead of 1.8 GB per reader, with the same text
+    found.
+  - A file that crashes or hangs its reader costs that file, not the reader.
+- **You control both stages.** Pause and resume finding files and reading,
+  start either at once (**Find files now**, **Read now**), choose **Full
+  speed for 1 hour** or **Gentle**, and list one drive again from Monitor.
+  A pause lasts until you resume it, across restarts, on this PC only.
+- **Monitor shows the office**: every PC that is reading, what it does and
+  how fast, the office's time left, and counts by file type.
+- **Fixed:** the Settings label said reading pauses when other programs use
+  the processor; it slows to the minimum and never stops.
+
 ## 1.0.2
 
 Updates now find you. Install over 1.0.1 (or 1.0.0); settings and index are kept.

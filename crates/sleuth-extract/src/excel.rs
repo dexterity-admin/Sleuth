@@ -83,6 +83,25 @@ fn plain_error(e: impl std::fmt::Display) -> anyhow::Error {
     if s.to_lowercase().contains("password") { anyhow::anyhow!("password protected") } else { anyhow::anyhow!("damaged or not a workbook: {s}") }
 }
 
+/// calamine refuses a whole .xlsx / .xlsm workbook that holds one sheet of
+/// a type it does not know (an Excel 4 macro sheet). Where Office's text
+/// filter is installed the cells are still read through it, as one page
+/// and not row by row, and the note says so.
+fn unknown_sheet_type(path: &Path, out: &mut Out, e: impl std::fmt::Display) -> Result<()> {
+    let said = e.to_string();
+    if !said.contains("Unrecognized sheet") {
+        return Err(plain_error(said));
+    }
+    match crate::ifilter::ifilter_text(path, out.deadline()) {
+        Ok(Some(lines)) => {
+            out.filter_page("sheet", &lines);
+            out.note("all sheets together, through the Windows text filter (the workbook has a sheet type the reader does not know); rows are not kept together");
+            Ok(())
+        }
+        _ => anyhow::bail!("the workbook has a sheet type the reader does not know ({said})"),
+    }
+}
+
 /// What a sheet that is not a grid of cells is called in its note.
 fn kind_note(t: SheetType) -> Option<&'static str> {
     match t {
@@ -194,7 +213,10 @@ pub fn read(path: &Path, ext: &str, out: &mut Out) -> Result<()> {
         return match ext {
             "xlsb" => ranges(Xlsb::new(open()?).map_err(plain_error)?, out),
             "ods" => ranges(Ods::new(open()?).map_err(plain_error)?, out),
-            "xlsx" | "xlsm" => xlsx(Xlsx::new(open()?).map_err(plain_error)?, out),
+            "xlsx" | "xlsm" => match Xlsx::new(open()?) {
+                Ok(wb) => xlsx(wb, out),
+                Err(e) => unknown_sheet_type(path, out, e),
+            },
             // A zip under another name (.xls is common): whichever it is.
             _ => match Xlsx::new(open()?) {
                 Ok(wb) => xlsx(wb, out),
@@ -202,14 +224,19 @@ pub fn read(path: &Path, ext: &str, out: &mut Out) -> Result<()> {
                     Ok(wb) => ranges(wb, out),
                     Err(_) => match Ods::new(open()?) {
                         Ok(wb) => ranges(wb, out),
-                        Err(_) => Err(plain_error(first)),
+                        Err(_) => unknown_sheet_type(path, out, first),
                     },
                 },
             },
         };
     }
-    // Reports exported as a web page or as delimited text and named .xls.
+    // Reports exported as a web page or as tab-delimited text and named
+    // .xls. Nothing else is taken for a workbook: a file with zero bytes in
+    // it, or under one of the zip-based names, is not one of those.
     let bytes = std::fs::read(path).with_context(|| "cannot read the file")?;
+    if ext != "xls" || bytes.contains(&0) {
+        anyhow::bail!("damaged or not a workbook");
+    }
     let text = crate::plain::decode(&bytes).map_err(|_| anyhow::anyhow!("damaged or not a workbook"))?;
     let start = text.trim_start();
     if start.starts_with('<') {
@@ -226,6 +253,9 @@ pub fn read(path: &Path, ext: &str, out: &mut Out) -> Result<()> {
             }
             return Ok(());
         }
+        anyhow::bail!("damaged or not a workbook");
+    }
+    if !text.contains('\t') {
         anyhow::bail!("damaged or not a workbook");
     }
     out.page("sheet", "");
