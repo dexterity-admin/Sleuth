@@ -36,7 +36,11 @@ use tracing::{info, warn};
 /// runtime starts (changing the environment is not thread-safe).
 pub fn use_data_dir(data: &Path) {
     // SAFETY: called from `main` (or a test) before other threads exist.
-    unsafe { std::env::set_var("SLEUTH_DATA_DIR", data) };
+    unsafe {
+        std::env::set_var("SLEUTH_DATA_DIR", data);
+        // The server may keep the office index on its own disk.
+        std::env::set_var("SLEUTH_LOCAL_STORE", "1");
+    }
 }
 
 fn check_data_dir(data: &Path) -> Result<()> {
@@ -150,7 +154,7 @@ async fn watch_config(state: Arc<AppState>) {
             let engine = Arc::clone(&state.engine);
             let r = tokio::task::spawn_blocking(move || {
                 engine.set_settings(b)?;
-                engine.rescan_now();
+                engine.rescan_now(None);
                 anyhow::Ok(())
             })
             .await;

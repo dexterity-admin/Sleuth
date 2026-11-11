@@ -17,6 +17,9 @@ Get-ChildItem $Runtime -Filter *.dll | Copy-Item -Destination $stage
 foreach ($m in 'pp-ocrv6_small_det.onnx', 'pp-ocrv6_small_rec.onnx', 'ppocrv6_dict.txt', 'pp-lcnet_x1_0_textline_ori.onnx') {
   Copy-Item "vendor\models\$m" "$stage\models\$m"
 }
+# LibreDWG (GPLv3, unmodified, run as a separate program) reads AutoCAD files.
+New-Item -ItemType Directory -Force "$stage\libredwg" | Out-Null
+Copy-Item 'vendor\libredwg\*' "$stage\libredwg"
 Copy-Item 'docs\SERVER.md' "$stage\README.md"
 $zip = Join-Path $root "out\Sleuth-Server_${Version}_x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

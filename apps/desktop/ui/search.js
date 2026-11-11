@@ -58,10 +58,10 @@ $("project").onchange = () => { renderDrives(); runSearch(false); };
 
 /** One line under a reading folder: its queue, or why nothing is read. */
 function scopeLine(sc) {
-  if (!sc) return { cls: "", text: "Counting its PDFs…" };
+  if (!sc) return { cls: "", text: "Counting its documents…" };
   if (sc.note && sc.note !== "ok") return { cls: sc.note === "not indexed yet" ? "" : "warn", text: cap(sc.note), title: SCOPE_NOTE[sc.note] || sc.note };
-  if (!sc.pdfs) return { cls: "", text: "No PDFs found" };
-  if (!sc.waiting && sc.read >= sc.pdfs - (sc.failed || 0)) return { cls: "ok", text: `All ${fmtNum(sc.pdfs)} PDFs read` + (sc.failed ? ` · ${fmtNum(sc.failed)} failed` : "") };
+  if (!sc.pdfs) return { cls: "", text: "No documents found" };
+  if (!sc.waiting && sc.read >= sc.pdfs - (sc.failed || 0)) return { cls: "ok", text: `All ${fmtNum(sc.pdfs)} documents read` + (sc.failed ? ` · ${fmtNum(sc.failed)} failed` : "") };
   return { cls: "run", text: `${fmtNum(sc.read)} of ${fmtNum(sc.pdfs)} read · ${fmtNum(sc.waiting)} queued` + (sc.failed ? ` · ${fmtNum(sc.failed)} failed` : "") };
 }
 let scopesSig = "";
@@ -76,7 +76,7 @@ function renderScopes() {
   if (sig === scopesSig) return;
   scopesSig = sig;
   box.replaceChildren();
-  if (!scopes.length) box.append(el("div", "none", "None yet. Add the project folders whose PDFs should be read. Elsewhere, PDFs are found by file name only."));
+  if (!scopes.length) box.append(el("div", "none", "None yet. Add the project folders whose drawings and documents should be read. Elsewhere, files are found by file name only."));
   scopes.forEach((s, i) => {
     const row = el("div", "scope");
     const t = el("span", null, s); t.title = s;
@@ -94,7 +94,7 @@ async function addReadingFolder() {
   if (scopes.some((s) => s.toLowerCase() === p.toLowerCase())) { toast(`${p} is already being read`); return; }
   await saveSettings({ ...state.settings, content_scopes: [...scopes, p] });
   await call({ req: "rescan_now" });
-  toast(`${p} added. Counting its PDFs…`);
+  toast(`${p} added. Counting its documents…`);
   watchScope(p);
   loadStatus();
 }
@@ -148,7 +148,10 @@ $("q").addEventListener("keydown", (e) => {
 });
 $("clearQ").onclick = () => { $("q").value = ""; runSearch(false); $("q").focus(); };
 $("mode").onchange = () => refreshView();
-for (const id of ["f-exact", "f-sep", "f-unc", "f-partial", "f-content", "f-names"]) $(id).onchange = () => refreshView();
+for (const id of ["f-exact", "f-sep", "f-unc", "f-partial", "f-content", "f-names", ...CATEGORIES.map(([c]) => "f-c-" + c)]) $(id).onchange = () => refreshView();
+// "One row per document": remembered on this PC.
+$("f-fold").checked = lsGet("sleuth.oneRow") !== "0";
+$("f-fold").onchange = () => { lsSet("sleuth.oneRow", $("f-fold").checked ? "1" : "0"); refreshView(); };
 $("deep").onclick = () => {
   if (state.deepRunning) { call({ req: "cancel", search_id: state.searchId }).catch(() => {}); setDeepRunning(false); toast("Deep search stopped"); return; }
   if (!$("q").value.trim()) { $("q").focus(); toast("Type what to look for first"); return; }
@@ -222,10 +225,11 @@ function renderProgress(roots) {
 function updateSearchStatus() {
   if (state.view_ !== "search") return;
   const n = state.view.length;
-  $("sbCount").textContent = state.query ? `${n.toLocaleString()} result${n === 1 ? "" : "s"}${state.page.more ? " (more available)" : ""}` : "Ready";
+  const folded = state.folded ? ` (${fmtNum(state.folded)} other file type${state.folded === 1 ? "" : "s"} folded)` : "";
+  $("sbCount").textContent = state.query ? `${n.toLocaleString()} result${n === 1 ? "" : "s"}${folded}${state.page.more ? " (more available)" : ""}` : "Ready";
   if (state.deepRunning) toast("Deep search running…");
   else if (state.page.loadingMore) toast("Loading more…");
-  else if (state.lastDone) toast(`Finished in ${(state.lastDone.millis / 1000).toFixed(1)} s` + (state.queued ? ` · ${state.queued} PDFs still being read` : ""));
+  else if (state.lastDone) toast(`Finished in ${(state.lastDone.millis / 1000).toFixed(1)} s` + (state.queued ? ` · ${state.queued} documents still being read` : ""));
 }
 
 // ---------- recent and pinned searches ----------
@@ -311,6 +315,8 @@ function keep(h) {
   if (h.class === "partial" && !$("f-partial").checked) return false;
   if (h.source === "file_name" && !$("f-names").checked) return false;
   if (h.source !== "file_name" && !$("f-content").checked) return false;
+  // Types (1.1): a hit without a category comes from an older reader and is always kept.
+  if (h.category && $("f-c-" + h.category)?.checked === false) return false;
   return true;
 }
 function sortValue(h, k) {
@@ -332,6 +338,17 @@ function refreshView() {
     if (va < vb) return -dir; if (va > vb) return dir;
     return b.modified - a.modified;
   });
+  // One row per document: a file that is another type of a row already shown
+  // (the DWG of a PDF above it) is folded into that row, which carries it as a chip.
+  state.folded = 0;
+  if (newReader() && $("f-fold").checked) {
+    const shown = new Set();
+    state.view = state.view.filter((h) => {
+      if (shown.has(h.path.toLowerCase())) { state.folded++; return false; }
+      for (const t of h.twins || []) shown.add(t.path.toLowerCase());
+      return true;
+    });
+  }
   state.sel = selKey ? state.view.findIndex((h) => hitKey(h) === selKey) : -1;
   $("spacer").style.height = (state.view.length + (state.page.more ? 1 : 0)) * ROW_H + "px";
   for (const b of document.querySelectorAll(".thead button")) {
@@ -365,7 +382,7 @@ function moreRow(i) {
 }
 function matchTitle(hit) {
   let t = hit.why ? hit.why + "\n" : "";
-  t += SOURCE_LABEL[hit.source] || hit.source;
+  t += sourceLabel(hit);
   if (hit.source === "ocr") t += ` · confidence ${pct(hit.confidence)}`;
   if (hit.hits > 1) t += ` · ${hit.hits} matching lines`;
   return t;
@@ -376,10 +393,14 @@ function rowEl(hit, i) {
   r.setAttribute("role", "row");
   r.title = matchTitle(hit);
   const nm = el("div", "nm");
-  const ext = extOf(hit.name);
-  nm.append(el("span", "ext" + (ext === "PDF" ? " pdf" : ""), ext || "FILE"));
+  const kind = kindLabel(hit);
+  const ext = el("span", "ext" + (kind === "PDF" ? " pdf" : ""), kind);
+  if (hit.kind === "other") ext.title = "Not read inside: found by its file name";
+  nm.append(ext);
   if (hit.origin === "office") { const o = el("span", "origin", "Office"); o.title = "From the office server's index"; nm.append(o); }
-  nm.append(el("span", null, hit.name));
+  nm.append(el("span", "nm-t", hit.name));
+  // The same document saved as other file types (keyboard: the same chips are in the preview).
+  for (const t of hit.twins || []) { const c = twinChip(t, () => pickTwin(t, i)); c.tabIndex = -1; nm.append(c); }
   const folder = el("div", "dim", folderOf(hit.display_path)); folder.title = hit.display_path;
   const found = el("div", "mono", hit.source === "file_name" ? "" : hit.found);
   const pg = el("div", "num", hit.page ? String(hit.page) : "");
@@ -394,6 +415,20 @@ function rowEl(hit, i) {
   r.oncontextmenu = (ev) => { ev.preventDefault(); select(i); showMenu(ev.clientX, ev.clientY); };
   return r;
 }
+/** Another file type of the same document, as a small button: click to see it, double-click to open it. */
+function twinChip(t, onPick) {
+  const b = el("button", "twin", kindLabel(t)); b.type = "button";
+  b.title = `${t.name}\n${cap(t.why || "")}\nClick to see it, double-click to open it`;
+  b.setAttribute("aria-label", `${kindLabel(t)}: ${t.name}`);
+  b.onclick = (e) => { e.stopPropagation(); onPick(); };
+  b.ondblclick = (e) => { e.stopPropagation(); openFile(t.display_path); };
+  return b;
+}
+/** Go to the twin's own row when it has one; otherwise show it in the preview of row `i`. */
+function pickTwin(t, i) {
+  const j = state.view.findIndex((h) => h.path.toLowerCase() === t.path.toLowerCase());
+  if (j >= 0) select(j); else select(i, t);
+}
 function renderEmpty() {
   const box = $("empty");
   box.replaceChildren();
@@ -404,8 +439,8 @@ function renderEmpty() {
   if (!state.query) {
     const ready = st && !p.walking && p.readDone && p.scopeCount && !p.scopeProblems.length;
     if (!st || ready) {
-      box.append(el("h2", null, "Find any tag, in any drawing, on any drive"));
-      box.append(el("p", null, "Type a tag number, document number or any text printed on a drawing. Press ? next to the box for OR, rev:, dwg:, type: and name:."));
+      box.append(el("h2", null, "Find any tag, in any drawing or document, on any drive"));
+      box.append(el("p", null, "Type a tag number, document number or any text in a drawing, spreadsheet, document or email. Press ? next to the box for OR, rev:, dwg:, type: and name:."));
       box.append(el("p", "tags", '10"-P-1001-A1B   ·   PSV-1203 OR PSV-1204   ·   rev:C dwg:ISO-1001'));
       if (st) box.append(welcomeCard(p, true));
       return;
@@ -426,10 +461,10 @@ function renderEmpty() {
   } else if (p.ix && p.walking) {
     box.append(el("p", null, `Not in the index. Sleuth is checking the drives for new files right now; anything added since ${fmtAgo(p.ix.last_complete)} may not be listed yet.`));
   } else {
-    box.append(el("p", null, "Not in the files read so far. Deep search walks the drives and reads any PDFs it finds that have not been read."));
+    box.append(el("p", null, "Not in the files read so far. Deep search walks the drives and reads any documents it finds that have not been read."));
   }
-  if (!p.scopeCount) box.append(el("p", null, "Text inside PDFs is searched only in your reading folders, and none is chosen yet: add one under “Folders being read” on the left."));
-  else if (p.waiting > 0) box.append(el("p", null, `Text inside PDFs is searched only in PDFs already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far. File names are searched everywhere.`));
+  if (!p.scopeCount) box.append(el("p", null, "Text inside documents is searched only in your reading folders, and none is chosen yet: add one under “Folders being read” on the left."));
+  else if (p.waiting > 0) box.append(el("p", null, `Text inside documents is searched only in documents already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far. File names are searched everywhere.`));
 }
 /** The two stages with live numbers, for the start page. */
 function welcomeCard(p, compact) {
@@ -438,7 +473,7 @@ function welcomeCard(p, compact) {
   const step = (n, name, st, help) => {
     const d = el("div", "wstep " + st.cls);
     const head = el("div", "wstep-head");
-    head.append(el("span", "st-dot"), el("b", null, `${n}. ${name}`));
+    head.append(el("span", "st-dot"), el("b", null, `${n}. ${name}`), stateWord(st));
     d.append(head, el("div", "wstep-text", st.text));
     const trk = el("div", "st-trk"); const fill = el("div", "st-fill" + (st.bar === null ? " moving" : ""));
     if (st.bar !== null) fill.style.width = Math.round(st.bar * 100) + "%";
@@ -446,11 +481,11 @@ function welcomeCard(p, compact) {
     if (help && !compact) d.append(el("div", "wstep-help", help));
     return d;
   };
-  card.append(step(1, "Finding files", f, "Sleuth lists every folder on every drive, so any file can be found by its name. The first listing of large network drives can take several hours; after that only changes are checked."));
+  card.append(step(1, "Finding files", f, "Every folder on every drive is listed, so any file can be found by its name. One PC at a time lists each network drive for the whole office, and each PC lists its own disks. The first listing of a large network drive can take several hours; after that only changes are checked."));
   const helpRead = p.scopeCount
-    ? "PDFs in your reading folders are opened and their text is read (scanned drawings by OCR), so tags printed on the drawings can be found. PDFs anywhere else are found by file name only."
-    : "Nothing is read yet: choose the project folders whose drawings you search, and Sleuth reads the text printed on them.";
-  card.append(step(2, "Reading PDFs", r, helpRead));
+    ? "The files in your reading folders are opened and their text is read, so tags and text inside them can be found: PDFs, Excel, Word, PowerPoint, emails, text files, AutoCAD and MicroStation drawings, and scanned pages and images by OCR. Every PC that is on reads and shares the work in one office index. Files anywhere else are found by file name only."
+    : "Nothing is read yet: choose the project folders whose drawings and documents you search, and Sleuth reads the text inside them.";
+  card.append(step(2, "Reading documents", r, helpRead));
   const act = el("div", "wact");
   if (!p.scopeCount) { const b = el("button", "small primary", "Add a reading folder"); b.type = "button"; b.onclick = () => addReadingFolder().catch((e) => toast(String(e))); act.append(b); }
   const more = el("button", "small", "See details"); more.type = "button"; more.onclick = () => showIndexing();
@@ -463,7 +498,8 @@ window.addEventListener("resize", () => renderRows());
 for (const b of document.querySelectorAll(".thead button")) {
   b.onclick = () => { state.asc = state.sortKey === b.dataset.k ? !state.asc : true; state.sortKey = b.dataset.k; refreshView(); };
 }
-function select(i) {
+/** Select row `i`; with `twin`, preview that other file type of it instead of the row's own file. */
+function select(i, twin) {
   if (i < 0 || i >= state.view.length) return;
   state.sel = i;
   const box = $("rows");
@@ -471,7 +507,7 @@ function select(i) {
   if (y < box.scrollTop) box.scrollTop = y;
   else if (y + ROW_H > box.scrollTop + box.clientHeight) box.scrollTop = y + ROW_H - box.clientHeight;
   renderRows();
-  showPreview(state.view[i]);
+  if (twin) showTwin(state.view[i], twin); else showPreview(state.view[i]);
 }
 function move(d) { select(Math.min(state.view.length - 1, Math.max(0, state.sel + d))); }
 $("rows").addEventListener("keydown", (e) => {
@@ -486,7 +522,7 @@ $("rows").addEventListener("keydown", (e) => {
 function showMenu(x, y) {
   const m = $("ctx");
   const h = state.view[state.sel];
-  m.querySelector('[data-act="read"]').hidden = !(h && isPdf(h.name) && h.origin !== "office");
+  m.querySelector('[data-act="read"]').hidden = !(h && h.origin !== "office" && (isPdf(h.name) || (newReader() && readsAsText(h))));
   m.querySelector('[data-act="check"]').hidden = !(h && isPdf(h.name) && h.origin !== "office");
   m.hidden = false;
   m.style.left = Math.min(x, innerWidth - 300) + "px";
@@ -534,9 +570,30 @@ function exportResults(fmt) {
 
 // ---------- preview ----------
 const pvViewer = new Viewer($("pvViewer"));
+const pvText = new TextViewer($("pvText"));
 const pv = { hit: null, doc: null, tab: "page", detailsFor: null, relatedFor: null };
-function clearPreview() { pv.hit = null; pv.doc = null; pvViewer.clear(); $("pvBody").hidden = true; $("pvEmpty").hidden = false; }
+function clearPreview() { pv.hit = null; pv.doc = null; pvViewer.clear(); pvText.clear(); $("pvBody").hidden = true; $("pvEmpty").hidden = false; }
 function isOffice(h) { return h?.origin === "office"; }
+/** Show a file in the preview: its page image (a PDF), or the text read from it (every other type read inside). */
+function loadPreviewDoc(d) {
+  const text = newReader() && readsAsText(d);
+  $("pvViewer").hidden = text; $("pvText").hidden = !text;
+  const bar = $("pvKind");
+  bar.replaceChildren();
+  if (text) {
+    const open = el("button", "small", `Open in ${OPEN_IN[d.kind] || "the default program"}`); open.type = "button";
+    open.onclick = () => openFile(d.display_path);
+    bar.append(open);
+    const pdf = (d.twins || []).find((t) => t.kind === "pdf");
+    if (pdf && pv.hit) {
+      const b = el("button", "small", "Show the PDF page"); b.type = "button"; b.title = `${pdf.name}\n${cap(pdf.why || "")}`;
+      b.onclick = () => showTwin(pv.hit, pdf);
+      bar.append(b);
+    }
+    pvViewer.clear(); pvText.load(d);
+  } else { pvText.clear(); pvViewer.load(d); }
+  bar.hidden = !bar.childElementCount;
+}
 
 function showPreview(hit) {
   pv.hit = hit; pv.doc = hit; pv.detailsFor = null; pv.relatedFor = null;
@@ -550,15 +607,37 @@ function showPreview(hit) {
   const match = el("span"); match.append(el("span", "pill " + CLASS_PILL[hit.class], CLASS_LABEL[hit.class]));
   add("Match", match);
   if (hit.why) add("Why", hit.why);
-  add("Read from", (SOURCE_LABEL[hit.source] || hit.source) + (hit.source === "ocr" ? ` · confidence ${pct(hit.confidence)}` : ""));
+  add("Read from", sourceLabel(hit) + (hit.source === "ocr" ? ` · confidence ${pct(hit.confidence)}` : ""));
   if (hit.source === "ocr" && hit.confidence < VERIFY_BELOW) add("Check", el("span", "pill verify", "Verify on the drawing: low OCR confidence"));
   if (hit.drawing_no || hit.revision) add("Drawing · rev", `${hit.drawing_no || "–"} · ${hit.revision || "–"}`);
+  if ((hit.twins || []).length) {
+    const also = el("span", "chips");
+    for (const t of hit.twins) also.append(twinChip(t, () => showTwin(hit, t)));
+    add("Also saved as", also);
+  }
   add("Size · modified", `${fmtSize(hit.size)} · ${fmtDate(hit.modified)}`);
   add("Index", isOffice(hit) ? "Office server" : "This PC");
   $("pvOpen").onclick = () => openFile(hit.display_path);
   $("pvReveal").onclick = () => revealFile(hit.display_path);
   $("pvCopy").onclick = () => copyText(hit.display_path);
-  pvViewer.load({ path: hit.path, name: hit.name, page: hit.page, query: state.query, office: isOffice(hit) });
+  loadPreviewDoc({ path: hit.path, display_path: hit.display_path, name: hit.name, kind: hit.kind, page: hit.page, query: state.query, office: isOffice(hit), twins: hit.twins });
+  if (pv.tab !== "page") loadPreviewTab(pv.tab);
+}
+/** Preview another file type of the selected result (its DWG, DGN or PDF). */
+function showTwin(hit, t) {
+  const doc = { path: t.path, display_path: t.display_path, name: t.name, kind: t.kind, page: 1, origin: hit.origin, query: state.query };
+  pv.doc = doc; pv.detailsFor = null; pv.relatedFor = null;
+  const meta = $("pvMeta"); meta.replaceChildren();
+  const back = el("button", "linkish", "‹ Back to " + hit.name); back.type = "button";
+  back.onclick = () => { if (pv.hit) showPreview(pv.hit); };
+  kvAdd(meta, "", back);
+  kvAdd(meta, "File", t.name);
+  kvAdd(meta, "Folder", folderOf(t.display_path));
+  if (t.why) kvAdd(meta, "Matched by", cap(t.why));
+  $("pvOpen").onclick = () => openFile(t.display_path);
+  $("pvReveal").onclick = () => revealFile(t.display_path);
+  $("pvCopy").onclick = () => copyText(t.display_path);
+  loadPreviewDoc({ ...doc, office: isOffice(hit) });
   if (pv.tab !== "page") loadPreviewTab(pv.tab);
 }
 
@@ -588,7 +667,7 @@ const META_FIELDS = [
 async function loadDetails(doc) {
   const box = $("pt-details");
   box.replaceChildren(el("div", "dim", "Loading…"));
-  if (!isPdf(doc.name)) { box.replaceChildren(el("div", "dim", "Details are shown for PDFs.")); return; }
+  if (!isPdf(doc.name) && !(newReader() && readsAsText(doc))) { box.replaceChildren(el("div", "dim", newReader() ? "Details are shown for files Sleuth reads inside." : "Details are shown for PDFs.")); return; }
   let r;
   try { r = await call({ req: "doc_info", path: doc.path, office: isOffice(doc) }); }
   catch (e) { if (pv.doc === doc) box.replaceChildren(el("div", "error", String(e))); return; }
@@ -637,7 +716,8 @@ async function loadDetails(doc) {
   kvAdd(dl, "Pipeline", fp);
   box.append(dl);
 }
-const PAGE_CLASS = { searchable: "Text layer", scanned: "Scanned", hybrid: "Text + scan", vector_outlined: "Outlined vectors", sparse: "Little text", damaged: "Damaged" };
+const PAGE_CLASS = { searchable: "Text layer", scanned: "Scanned", hybrid: "Text + scan", vector_outlined: "Outlined vectors", sparse: "Little text", damaged: "Damaged",
+  sheet: "Sheet", slide: "Slide", document: "Document", email: "Email", text: "Text", model: "Drawing model", image: "Image" };
 function trow(cells, tag) {
   const tr = el("tr");
   for (const c of cells) { const td = el(tag || "td"); if (c instanceof Node) td.append(c); else td.textContent = c; tr.append(td); }
@@ -687,7 +767,7 @@ function openRelated(it, from) {
   $("pvReveal").onclick = () => revealFile(it.display_path);
   $("pvCopy").onclick = () => copyText(it.display_path);
   document.querySelector('.subtabs button[data-pt="page"]').click();
-  pvViewer.load({ path: it.path, name: it.name, page: it.page || 1, query: doc.query, tag: doc.tag, office: isOffice(from) });
+  loadPreviewDoc({ path: it.path, display_path: it.display_path, name: it.name, page: it.page || 1, query: doc.query, tag: doc.tag, office: isOffice(from) });
 }
 
 viewHooks.search = {

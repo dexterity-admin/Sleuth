@@ -129,6 +129,65 @@ impl DriveMap {
         }
         merged
     }
+
+    /// Write every mapped share with its server's IPv4 address
+    /// (see [`canonical_path`]).
+    pub fn canonicalize(&mut self, address: &dyn Fn(&str) -> Option<String>) {
+        for d in &mut self.drives {
+            if let Some(u) = &d.unc {
+                d.unc = Some(canonical_path(u, address));
+            }
+        }
+    }
+}
+
+/// A network path with its host as an IPv4 address
+/// (`\\Docsrv-1\Docs\a.pdf` -> `\\10.0.0.54\Docs\a.pdf`), so every PC
+/// writes a share the same way in the office store whatever name it mapped
+/// it by. Local paths and hosts `address` cannot resolve stay as they are.
+pub fn canonical_path(path: &str, address: &dyn Fn(&str) -> Option<String>) -> String {
+    let Some(rest) = path.strip_prefix("\\\\") else { return path.to_string() };
+    let (host, tail) = match rest.split_once('\\') {
+        Some((h, t)) => (h, Some(t)),
+        None => (rest, None),
+    };
+    if host.is_empty() {
+        return path.to_string();
+    }
+    match (address(host), tail) {
+        (Some(ip), Some(t)) => format!("\\\\{ip}\\{t}"),
+        (Some(ip), None) => format!("\\\\{ip}"),
+        (None, _) => path.to_string(),
+    }
+}
+
+/// A root as a folder name in the office store: `10.0.0.54~docs` for
+/// `\\10.0.0.54\Docs`, `local~c` for `C:\`.
+pub fn root_key(root: &str) -> String {
+    let safe = |s: &str| -> String { s.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c.to_ascii_lowercase() } else { '_' }).collect() };
+    match root.strip_prefix("\\\\") {
+        Some(rest) => {
+            let rest = rest.trim_end_matches('\\');
+            let (host, share) = rest.split_once('\\').unwrap_or((rest, ""));
+            format!("{}~{}", safe(host), safe(share))
+        }
+        None => format!("local~{}", safe(root.trim_end_matches(['\\', ':']))),
+    }
+}
+
+/// The share (`\\host\share`) or drive root (`C:\`) a path is on.
+pub fn root_of(path: &str) -> String {
+    match path.strip_prefix("\\\\") {
+        Some(rest) => {
+            let mut it = rest.splitn(3, '\\');
+            match (it.next(), it.next()) {
+                (Some(h), Some(s)) if !s.is_empty() => format!("\\\\{h}\\{s}"),
+                (Some(h), _) => format!("\\\\{h}"),
+                _ => path.to_string(),
+            }
+        }
+        None => format!("{}\\", path.chars().take(2).collect::<String>()),
+    }
 }
 
 /// IPv4 address of a host, or the host itself when it already is one.
@@ -226,6 +285,27 @@ mod tests {
         assert_eq!(m.to_unc(r"Y:\a"), r"\\Docsrv-1\p20002\a");
         assert_eq!(m.to_unc(r"Q:\a"), r"\\gone-host\x\a");
         assert_eq!(host_address("10.0.0.9").as_deref(), Some("10.0.0.9"));
+    }
+
+    #[test]
+    fn every_pc_writes_a_share_the_same_way() {
+        let address = |h: &str| match h.to_lowercase().as_str() {
+            "docsrv-1" => Some("10.0.0.54".to_string()),
+            "gone-host" => None,
+            ip => Some(ip.to_string()),
+        };
+        assert_eq!(canonical_path(r"\\Docsrv-1\Docs\J1\a.pdf", &address), r"\\10.0.0.54\Docs\J1\a.pdf");
+        assert_eq!(canonical_path(r"\\Docsrv-1", &address), r"\\10.0.0.54");
+        assert_eq!(canonical_path(r"\\gone-host\x\a", &address), r"\\gone-host\x\a");
+        assert_eq!(canonical_path(r"C:\Work\a.pdf", &address), r"C:\Work\a.pdf");
+        assert_eq!(root_key(r"\\10.0.0.54\Docs Latest\"), "10.0.0.54~docs_latest");
+        assert_eq!(root_key(r"C:\"), "local~c");
+        assert_eq!(root_of(r"\\10.0.0.54\Docs\J1\a.pdf"), r"\\10.0.0.54\Docs");
+        assert_eq!(root_of(r"d:\scans\a.pdf"), r"d:\");
+        let mut m = DriveMap { drives: vec![Drive { letter: "P:".into(), kind: DriveKind::Network, unc: Some(r"\\Docsrv-1\Docs".into()) }] };
+        m.canonicalize(&address);
+        assert_eq!(m.to_unc(r"P:\a.pdf"), r"\\10.0.0.54\Docs\a.pdf");
+        assert_eq!(m.to_display(r"\\10.0.0.54\docs\a.pdf"), r"P:\a.pdf");
     }
 
     fn map() -> DriveMap {

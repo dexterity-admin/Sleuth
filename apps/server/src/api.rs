@@ -32,7 +32,7 @@ use sleuth_core::protocol::{Event, NormBox, TextSource};
 use sleuth_core::settings::Project;
 use sleuth_engine::remote::{ApiError, Capabilities, CompareReply, DocLookup, DocReply, PageReply, SearchReply};
 use sleuth_engine::service::Engine;
-use sleuth_engine::store::{Scope, source_of};
+use sleuth_engine::store::Scope;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -212,7 +212,7 @@ fn doc_path(st: &AppState, c: &Caller, id: i64, action: &str) -> Result<String, 
 }
 
 fn is_pdf(path: &str) -> bool {
-    path.len() > 4 && path.get(path.len() - 4..).is_some_and(|e| e.eq_ignore_ascii_case(".pdf"))
+    sleuth_core::kinds::FileKind::of(path) == sleuth_core::kinds::FileKind::Pdf
 }
 
 // ---- handlers ----------------------------------------------------------------
@@ -294,10 +294,9 @@ async fn document(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInf
     let path = doc_path(&st, &c, id, "document")?;
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let store = engine.open_store()?;
-        let f = store.file_by_id(id)?.ok_or_else(|| ApiErr::not_found("no such document"))?;
-        let tags: u32 = store.conn.query_row("SELECT COUNT(*) FROM tag_occurrences WHERE file_id=?1", [id], |r| r.get(0)).map_err(anyhow::Error::from)?;
-        Ok(Json(DocReply { id, path, name: f.name, metadata: store.metadata(id)?, pages: store.page_info(id)?, provenance: store.provenance(id)?, tags }))
+        let (metadata, pages, provenance, tags) = engine.doc_detail(&path).map_err(|_| ApiErr::not_found("no such document"))?;
+        let name = path.rsplit('\\').next().unwrap_or(&path).to_string();
+        Ok(Json(DocReply { id, path, name, metadata, pages, provenance, tags }))
     })
     .await
 }
@@ -345,32 +344,11 @@ struct DocTag {
 async fn document_tags(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, uri: Uri, h: HeaderMap, id: Result<Path<String>, PathRejection>) -> Reply<Vec<DocTag>> {
     let c = caller(&st, &h, peer, &uri)?;
     let id = id_of(id)?;
-    doc_path(&st, &c, id, "document tags")?;
+    let path = doc_path(&st, &c, id, "document tags")?;
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let store = engine.open_store()?;
-        let mut q = store
-            .conn
-            .prepare(
-                "SELECT t.norm, t.category, o.raw, o.page, o.conf, o.source, o.x, o.y, o.w, o.h
-                 FROM tag_occurrences o JOIN engineering_tags t ON t.id=o.tag_id
-                 WHERE o.file_id=?1 ORDER BY o.page, o.y, o.x LIMIT 5000",
-            )
-            .map_err(anyhow::Error::from)?;
-        let rows = q
-            .query_map([id], |r| {
-                Ok(DocTag {
-                    norm: r.get(0)?,
-                    category: r.get(1)?,
-                    raw: r.get(2)?,
-                    page: r.get(3)?,
-                    conf: r.get::<_, f64>(4)? as f32,
-                    source: source_of(r.get(5)?),
-                    bbox: NormBox { x: r.get::<_, f64>(6)? as f32, y: r.get::<_, f64>(7)? as f32, w: r.get::<_, f64>(8)? as f32, h: r.get::<_, f64>(9)? as f32 },
-                })
-            })
-            .map_err(anyhow::Error::from)?;
-        Ok(Json(rows.collect::<rusqlite::Result<Vec<_>>>().map_err(anyhow::Error::from)?))
+        let rows = engine.doc_tags(&path).map_err(|_| ApiErr::not_found("no such document"))?;
+        Ok(Json(rows.into_iter().map(|(norm, category, raw, page, conf, source, bbox)| DocTag { norm, category, raw, page, conf, source, bbox }).collect()))
     })
     .await
 }
@@ -387,8 +365,7 @@ async fn related(
     let path = doc_path(&st, &c, id, "related")?;
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let drives = engine.drives.read().unwrap().clone();
-        let items = engine.open_store()?.related(&path, &sleuth_engine::store::Scope::roots(&c.roots), &drives).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
+        let items = engine.related_in(&path, &sleuth_engine::store::Scope::roots(&c.roots)).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
         // Limited in SQL to the user's folders; checked again here.
         Ok(Json(items.into_iter().filter(|r| path_allowed(&r.path, &c.roots)).collect()))
     })
@@ -414,7 +391,7 @@ async fn tags(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<So
     }
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let (tags, total) = engine.open_store()?.tags(category.as_deref(), contains.as_deref(), &Scope::roots(&roots), limit, offset)?;
+        let (tags, total) = engine.tags_in(category.as_deref(), contains.as_deref(), &Scope::roots(&roots), limit, offset)?;
         Ok(Json(TagsReply { tags, total }))
     })
     .await
@@ -440,8 +417,7 @@ async fn occurrences(
     }
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let drives = engine.drives.read().unwrap().clone();
-        let items = engine.open_store()?.occurrences(&norm, &Scope::roots(&roots), &drives)?;
+        let items = engine.occurrences_in(&norm, &Scope::roots(&roots))?;
         Ok(Json(items.into_iter().filter(|o| path_allowed(&o.path, &c.roots)).collect()))
     })
     .await
@@ -464,9 +440,7 @@ async fn revisions(
     }
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let drives = engine.drives.read().unwrap().clone();
-        let order = engine.settings.read().unwrap().revision_order;
-        let mut groups = engine.open_store()?.revision_groups(contains.as_deref(), &Scope::roots(&roots), order, limit, &drives)?;
+        let mut groups = engine.revisions_in(contains.as_deref(), &Scope::roots(&roots), limit)?;
         for g in &mut groups {
             g.docs.retain(|d| path_allowed(&d.path, &c.roots));
         }
@@ -484,9 +458,8 @@ async fn compare(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo
     let (old_path, new_path) = (doc_path(&st, &c, old, "compare")?, doc_path(&st, &c, new, "compare")?);
     let engine = Arc::clone(&st.engine);
     blocking(move || {
-        let store = engine.open_store()?;
-        let (changes, unchanged) = store.compare(&old_path, &new_path).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
-        Ok(Json(CompareReply { old: store.metadata(old)?, new: store.metadata(new)?, changes, unchanged }))
+        let (old, new, changes, unchanged) = engine.compare_paths(&old_path, &new_path).map_err(|e| ApiErr::bad(format!("{e:#}")))?;
+        Ok(Json(CompareReply { old, new, changes, unchanged }))
     })
     .await
 }
@@ -523,7 +496,7 @@ struct Started {
 async fn scan(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, uri: Uri, h: HeaderMap) -> Result<(StatusCode, Json<Started>), ApiErr> {
     let c = caller(&st, &h, peer, &uri)?;
     admin(&st, &c, "scan")?;
-    st.engine.rescan_now();
+    st.engine.rescan_now(None);
     st.audit.record(&c.name, "scan", "all project folders", "started");
     Ok((StatusCode::ACCEPTED, Json(Started { status: "started" })))
 }

@@ -37,7 +37,7 @@ pub const SCAN_IMAGE_COVERAGE: f32 = 0.3;
 pub const OUTLINED_PATHS: usize = 300;
 /// Pages at least this long on their longer side (points) are drawings with
 /// a title block (A3 and up).
-const DRAWING_SIDE_PT: f32 = 1100.0;
+pub const DRAWING_SIDE_PT: f32 = 1100.0;
 /// Where title blocks sit: the bottom-right of the sheet.
 const TITLE_BLOCK: NormBox = NormBox { x: 0.5, y: 0.62, w: 0.5, h: 0.38 };
 /// Changes how pages are classified and merged; part of the fingerprint.
@@ -107,7 +107,15 @@ pub fn pipeline_fingerprint(model: &str, model_hash: &str, ocr_config: &str, dpi
 
 /// `ocr` is created lazily by the caller; pass `None` to read text layers only.
 pub fn read_pdf(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) -> Result<FileText> {
+    read_pdf_lanes(path, ocr, opts).map(|(text, _)| text)
+}
+
+/// As [`read_pdf`], also saying whether any page wanted OCR that was not
+/// done because `ocr` is `None` (the fast lane then hands the file to the
+/// OCR lane).
+pub fn read_pdf_lanes(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) -> Result<(FileText, bool)> {
     let doc = Doc::open(path)?;
+    let mut wants_ocr = false;
     let mut out = FileText { reader_version: READER_VERSION, model: String::new(), pages: Vec::new(), page_info: Vec::new(), provenance: Provenance::default() };
     let n = doc.page_count();
     let mut damaged = 0u32;
@@ -119,12 +127,12 @@ pub fn read_pdf(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) -> Res
             Ok(x) => x,
             Err(e) => {
                 damaged += 1;
-                out.page_info.push(PageInfo { page: i + 1, class: "damaged".into(), chars: 0, image_coverage: 0.0, ocr_tiles: 0, ocr_tiles_skipped: 0, ocr_millis: 0, note: format!("{e:#}") });
+                out.page_info.push(PageInfo { page: i + 1, class: "damaged".into(), chars: 0, image_coverage: 0.0, ocr_tiles: 0, ocr_tiles_skipped: 0, ocr_millis: 0, note: format!("{e:#}"), ..Default::default() });
                 continue;
             }
         };
         let class = classify(&facts);
-        let mut info = PageInfo { page: i + 1, class: class.name().into(), chars: facts.chars as u32, image_coverage: facts.image_coverage, ocr_tiles: 0, ocr_tiles_skipped: 0, ocr_millis: 0, note: String::new() };
+        let mut info = PageInfo { page: i + 1, class: class.name().into(), chars: facts.chars as u32, image_coverage: facts.image_coverage, ocr_tiles: 0, ocr_tiles_skipped: 0, ocr_millis: 0, note: String::new(), width_pt: facts.width_pt, height_pt: facts.height_pt };
         let regions: Option<Vec<NormBox>> = match class {
             PageClass::Searchable => {
                 let drawing = facts.width_pt.max(facts.height_pt) >= DRAWING_SIDE_PT;
@@ -141,6 +149,7 @@ pub fn read_pdf(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) -> Res
             }
             PageClass::Scanned | PageClass::VectorOutlined | PageClass::Sparse => Some(Vec::new()),
         };
+        wants_ocr |= regions.is_some() && ocr.is_none();
         if let (Some(regions), Some(r)) = (regions, ocr) {
             let t = Instant::now();
             let (ocr_page, stats): (_, TileStats) = r.read_regions(&doc, i, opts.dpi, &regions, opts.cancel)?;
@@ -157,7 +166,7 @@ pub fn read_pdf(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) -> Res
     if n > 0 && damaged == n {
         anyhow::bail!("damaged or not a PDF: no page could be loaded");
     }
-    Ok(out)
+    Ok((out, wants_ocr))
 }
 
 /// An OCR line sitting on text-layer text that says the same thing (or

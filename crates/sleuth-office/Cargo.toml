@@ -1,0 +1,18 @@
+[package]
+name = "sleuth-office"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The office store's file-name catalog and leases"
+
+[dependencies]
+sleuth-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+flate2 = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

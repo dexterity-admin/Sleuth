@@ -1,8 +1,17 @@
-//! The local index: one SQLite database in `%LOCALAPPDATA%\Sleuth\index.db`.
+//! The SQLite schema of what was read, used three ways (see
+//! `docs/design/office-store.md`):
 //!
-//! - `files` / `dirs`: every file and folder seen on the indexed drives, keyed
-//!   by UNC path for network locations.
-//! - `names`: trigram full-text index over folded file names.
+//! - a **part**: a write-once file in the office store's `text` folder,
+//!   opened read-only and immutable by every PC ([`Store::open_part`]);
+//! - `work.db`: this PC's readings not yet published as a part;
+//! - `local.db`: this PC's small bookkeeping (history, events, retries).
+//!
+//! File names are not kept here any more: they live in the in-memory
+//! catalog (`sleuth-office`). `files` holds only documents that were read
+//! (or could not be).
+//!
+//! - `files`: one row per read document, keyed by canonical path.
+//! - `names`: trigram full-text index over the folded names of those.
 //! - `lines` + `lines_fts`: every line read from a PDF (text layer, OCR or a
 //!   person's correction) with its page and box, and a trigram index over the
 //!   folded text.
@@ -33,7 +42,7 @@ use std::path::{Path, PathBuf};
 /// `PRAGMA user_version`: what Sleuth 0.1 checks. Never raised again.
 pub const SCHEMA_VERSION: i64 = 1;
 /// Additive schema level in `meta.schema`.
-pub const SCHEMA_LEVEL: i64 = 4;
+pub const SCHEMA_LEVEL: i64 = 5;
 /// Removed files keep their readings this long, so a moved or renamed
 /// drawing is not read again.
 pub const GONE_KEEP_SECS: i64 = 7 * 24 * 3600;
@@ -52,12 +61,45 @@ pub mod state {
     pub const GONE: i64 = 5;
     /// Read by the office server instead of this PC.
     pub const OFFICE: i64 = 6;
+    /// Opened and found to need OCR (scanned pages): any PC's OCR lane may
+    /// take it without opening it first to find out.
+    pub const NEEDS_OCR: i64 = 7;
 }
 
 pub struct Store {
     pub conn: Connection,
-    /// The names in memory, kept in step with every file added or removed.
-    pub mem: Option<std::sync::Arc<crate::namemem::NameMem>>,
+}
+
+/// One reading as the pool needs it to know what a part covers.
+#[derive(Debug, Clone)]
+pub struct ReadingRow {
+    pub id: i64,
+    pub path: String,
+    pub size: u64,
+    pub mtime: i64,
+    /// [`state::READ`] or [`state::FAILED`].
+    pub state: i64,
+    pub read_at: i64,
+    pub error: String,
+}
+
+/// `file:` URI of a path for SQLite, so `immutable=1` can be asked for.
+/// A network path keeps its two leading slashes (`file:////host/share/x.db`).
+fn sqlite_uri(path: &Path, params: &str) -> String {
+    let p = path.to_string_lossy().replace('\\', "/");
+    let mut out = String::from("file:");
+    if p.starts_with("//") {
+        out.push_str("//");
+    } else if !p.starts_with('/') {
+        out.push('/');
+    }
+    for b in p.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b':' | b'.' | b'-' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    format!("{out}?{params}")
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +270,44 @@ pub fn source_of(code: i64) -> TextSource {
     }
 }
 
+/// How a file's name (or path, for a term with `\`) answers one term: the
+/// candidate, and whether the whole name is the text typed. Names are exact
+/// text, so look-alike folding never applies.
+pub fn name_candidate(term: &Term, file_id: i64, name: &str, path: &str) -> Option<(bool, Candidate)> {
+    let d = term.explain_name(name, path)?;
+    let whole = term.is_whole_name(name, path);
+    let why = if whole {
+        if term.is_path() { "This is the path typed".to_string() } else { "The file name is the text typed".to_string() }
+    } else {
+        format!("In the file {}: {}", if term.is_path() { "path" } else { "name" }, d.why.to_lowercase())
+    };
+    Some((whole, Candidate { file_id, page: None, text: name.to_string(), conf: 1.0, source: TextSource::FileName, bbox: None, class: d.class, why }))
+}
+
+/// A file where every term is in the name or somewhere in its folder path
+/// (`ISO 2632 HOLD`, `Rev-1 PSV-2809`).
+pub fn all_terms_candidate(terms: &[Term], file_id: i64, name: &str, path: &str) -> Option<Candidate> {
+    let dir = path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+    let mut found: Vec<MatchDetail> = Vec::new();
+    for t in terms {
+        let d = t.explain_name(name, path).or_else(|| {
+            if t.is_path() {
+                return None;
+            }
+            let d = if t.has_wildcards() {
+                glob_match(&format!("*{}*", t.raw), &dir.to_lowercase()).then(|| MatchDetail { class: MatchClass::Partial, why: "Part of the folder path matches the pattern".into() })
+            } else {
+                t.explain(dir, 1.0).filter(|d| d.class != MatchClass::Uncertain)
+            };
+            d.map(|d| MatchDetail { class: d.class, why: format!("In the folder path: {}", d.why.to_lowercase()) })
+        });
+        found.push(d?);
+    }
+    let class = found.iter().map(|d| d.class).max().unwrap_or(MatchClass::Partial);
+    let why = found.iter().map(|d| d.why.clone()).collect::<Vec<_>>().join("; ");
+    Some(Candidate { file_id, page: None, text: name.to_string(), conf: 1.0, source: TextSource::FileName, bbox: None, class, why: format!("Every word is in the file name or path: {}", why.to_lowercase()) })
+}
+
 /// Quote a string for an FTS5 phrase query.
 fn fts_phrase(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
@@ -248,15 +328,188 @@ impl Store {
         }
         let conn = Connection::open(path).with_context(|| format!("open index {}", path.display()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=15000; PRAGMA journal_size_limit=67108864;")?;
-        let mut s = Store { conn, mem: None };
+        let mut s = Store { conn };
         s.migrate(Some(path))?;
         Ok(s)
+    }
+
+    /// Open a published part. Read-only and immutable: SQLite takes no locks
+    /// and trusts that the file never changes, which is exactly what a part
+    /// is and what makes reading it from a network share safe. Readings that
+    /// were replaced since can be hidden ([`Store::set_hidden`]) without
+    /// touching the file: a temporary view stands in for `files` in every
+    /// query. A part made by a newer Sleuth is refused.
+    pub fn open_part(path: &Path) -> Result<Store> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(sqlite_uri(path, "immutable=1&mode=ro"), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .with_context(|| format!("open part {}", path.display()))?;
+        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768;")?;
+        let s = Store { conn };
+        let level: i64 = s.get_meta("schema")?.and_then(|v| v.parse().ok()).unwrap_or(1);
+        if level > SCHEMA_LEVEL {
+            anyhow::bail!("{} was made by a newer Sleuth (level {level}); update Sleuth on this PC to search it", path.display());
+        }
+        if level < 5 {
+            anyhow::bail!("{} is not a Sleuth 1.1 part (level {level})", path.display());
+        }
+        s.conn.execute_batch(
+            "CREATE TEMP TABLE hidden(id INTEGER PRIMARY KEY);
+             CREATE TEMP VIEW files AS SELECT * FROM main.files WHERE id NOT IN (SELECT id FROM temp.hidden);",
+        )?;
+        Ok(s)
+    }
+
+    /// A new database written in one go and then published (a merged part):
+    /// no journal and no syncing, because a half-written one is thrown away.
+    pub fn create_bulk(path: &Path) -> Result<Store> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _ = std::fs::remove_file(path);
+        let conn = Connection::open(path).with_context(|| format!("create {}", path.display()))?;
+        conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA cache_size=-131072; PRAGMA temp_store=MEMORY;")?;
+        let mut s = Store { conn };
+        s.migrate(None)?;
+        Ok(s)
+    }
+
+    /// Hide these readings of a part from every query (see [`Store::open_part`]).
+    pub fn set_hidden(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM temp.hidden", [])?;
+        {
+            let mut ins = tx.prepare("INSERT OR IGNORE INTO temp.hidden(id) VALUES(?1)")?;
+            for id in ids {
+                ins.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every reading held (hidden ones included): what this part covers.
+    pub fn reading_rows(&self) -> Result<Vec<ReadingRow>> {
+        let mut st = self.conn.prepare("SELECT id, path, size, mtime, read_state, COALESCE(read_at, 0), COALESCE(read_error, '') FROM main.files WHERE read_state IN (?1, ?2, ?3)")?;
+        let rows = st.query_map(params![state::READ, state::FAILED, state::NEEDS_OCR], |r| {
+            Ok(ReadingRow { id: r.get(0)?, path: r.get(1)?, size: r.get::<_, i64>(2)? as u64, mtime: r.get(3)?, state: r.get(4)?, read_at: r.get(5)?, error: r.get(6)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Copy one reading (or recorded failure) from another store, with the
+    /// corrections people made to it. Tags and title-block details are
+    /// derived again here.
+    pub fn import_reading(&mut self, src: &Store, src_id: i64, deriver: &Deriver) -> Result<i64> {
+        self.import_reading_as(src, src_id, None, deriver)
+    }
+
+    /// As [`Store::import_reading`], stored under another path (an index made
+    /// before 1.1 wrote shares by name; the office store writes addresses).
+    pub fn import_reading_as(&mut self, src: &Store, src_id: i64, path_as: Option<&str>, deriver: &Deriver) -> Result<i64> {
+        #[allow(clippy::type_complexity)]
+        let (path, dir, name, size, mtime, st, error, hash, read_at): (String, String, String, i64, i64, i64, Option<String>, Option<String>, Option<i64>) = src.conn.query_row(
+            "SELECT path, dir, name, size, mtime, read_state, read_error, hash, read_at FROM main.files WHERE id=?1",
+            [src_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)),
+        )?;
+        let (path, dir) = match path_as {
+            Some(p) => (p.to_string(), p.rsplit_once('\\').map(|(d, _)| if d.len() == 2 { format!("{d}\\") } else { d.to_string() }).unwrap_or(dir)),
+            None => (path, dir),
+        };
+        let (id, _) = self.upsert_file(&path, &dir, &name, size as u64, mtime, 0, state::WAITING)?;
+        let read_at = read_at.unwrap_or(0);
+        if st == state::NEEDS_OCR {
+            self.save_needs_ocr(id, read_at)?;
+            return Ok(id);
+        }
+        if st != state::READ {
+            self.save_failure(id, error.as_deref().unwrap_or("could not be read"), read_at)?;
+            return Ok(id);
+        }
+        let text = src.file_text(src_id)?;
+        let hash = hash.unwrap_or_default();
+        {
+            let mut st = src.conn.prepare("SELECT file_hash, page, x, y, w, h, original, original_conf, corrected, user, at, stale FROM corrections WHERE file_id=?1 ORDER BY id")?;
+            let mut rows = st.query([src_id])?;
+            self.conn.execute("DELETE FROM corrections WHERE file_id=?1", [id])?;
+            while let Some(r) = rows.next()? {
+                self.conn.execute(
+                    "INSERT INTO corrections(file_id, file_hash, page, x, y, w, h, original, original_conf, corrected, user, at, stale) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                    params![
+                        id,
+                        r.get::<_, String>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                        r.get::<_, Option<f64>>(3)?,
+                        r.get::<_, Option<f64>>(4)?,
+                        r.get::<_, Option<f64>>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, f64>(7)?,
+                        r.get::<_, String>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, i64>(10)?,
+                        r.get::<_, i64>(11)?
+                    ],
+                )?;
+            }
+        }
+        self.save_read(id, &hash, &text, read_at, deriver)?;
+        Ok(id)
+    }
+
+    /// Forget every reading (after they were published as a part).
+    pub fn clear_readings(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM files;
+             DELETE FROM engineering_tags;
+             DELETE FROM dirs;
+             INSERT INTO lines_fts(lines_fts) VALUES('delete-all');
+             INSERT INTO names(names) VALUES('delete-all');
+             COMMIT;",
+        )?;
+        let _ = self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        Ok(())
+    }
+
+    /// Readings held: (read, could not be read or waiting for OCR).
+    pub fn reading_counts(&self) -> Result<(u64, u64)> {
+        let n = |s: i64| -> Result<u64> { Ok(self.conn.query_row("SELECT COUNT(*) FROM main.files WHERE read_state=?1", [s], |r| r.get::<_, i64>(0))? as u64) };
+        Ok((n(state::READ)?, n(state::FAILED)? + n(state::NEEDS_OCR)?))
+    }
+
+    /// Record that a file was opened and needs OCR ([`state::NEEDS_OCR`]).
+    pub fn save_needs_ocr(&self, file_id: i64, now: i64) -> Result<()> {
+        self.clear_lines(file_id)?;
+        self.conn.execute("UPDATE files SET read_state=?2, read_error=NULL, read_at=?3, priority=0, lease_until=NULL WHERE id=?1", params![file_id, state::NEEDS_OCR, now])?;
+        Ok(())
+    }
+
+    /// `meta` values whose key starts with `prefix`, keyed by the rest.
+    pub fn meta_with_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare("SELECT key, value FROM meta WHERE key LIKE ?1")?;
+        let rows = st.query_map([format!("{prefix}%")], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().filter_map(|(k, v)| k.strip_prefix(prefix).map(|k| (k.to_string(), v))).collect())
+    }
+
+    /// Files by id in one query per 500 (hidden ones are left out).
+    pub fn files_by_ids(&self, ids: &[i64]) -> Result<HashMap<i64, FileRow>> {
+        let mut out = HashMap::new();
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut st = self.conn.prepare(&format!("SELECT id, path, name, size, mtime, read_state FROM files WHERE id IN ({marks})"))?;
+            for row in st.query_map(params_from_iter(chunk.iter()), file_row)? {
+                let f = row?;
+                out.insert(f.id, f);
+            }
+        }
+        Ok(out)
     }
 
     pub fn open_in_memory() -> Result<Store> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
-        let mut s = Store { conn, mem: None };
+        let mut s = Store { conn };
         s.migrate(None)?;
         Ok(s)
     }
@@ -331,6 +584,30 @@ impl Store {
         if level < 4 {
             self.upgrade_to_4()?;
         }
+        if level < 5 {
+            self.upgrade_to_5()?;
+        }
+        if level > SCHEMA_LEVEL {
+            anyhow::bail!("index was made by a newer Sleuth; it will be rebuilt");
+        }
+        Ok(())
+    }
+
+    /// Level 5 (Sleuth 1.1): the size of each page, which tells a drawing
+    /// sheet from a document page.
+    fn upgrade_to_5(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let cols: Vec<String> = {
+            let mut st = tx.prepare("PRAGMA table_info(pages)")?;
+            st.query_map([], |r| r.get::<_, String>(1))?.collect::<rusqlite::Result<_>>()?
+        };
+        for col in ["w_pt", "h_pt"] {
+            if !cols.iter().any(|c| c == col) {
+                tx.execute_batch(&format!("ALTER TABLE pages ADD COLUMN {col} REAL NOT NULL DEFAULT 0;"))?;
+            }
+        }
+        tx.execute_batch("INSERT INTO meta(key, value) VALUES('schema', '5') ON CONFLICT(key) DO UPDATE SET value='5';")?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -484,11 +761,6 @@ impl Store {
                     "UPDATE files SET size=?2, mtime=?3, seen=?4, read_state=?5, gone_at=NULL, dir=?6, name=?7 WHERE id=?1",
                     params![id, size as i64, mtime, seen, new_state, dir, name],
                 )?;
-                if (changed || ostate == state::GONE)
-                    && let Some(m) = &self.mem
-                {
-                    m.put(id, dir, name, size, mtime);
-                }
                 Ok((id, changed))
             }
             None => {
@@ -498,9 +770,6 @@ impl Store {
                 )?;
                 let id = self.conn.last_insert_rowid();
                 self.conn.execute("INSERT INTO names(rowid, fold) VALUES(?1, ?2)", params![id, fold_form(name)])?;
-                if let Some(m) = &self.mem {
-                    m.put(id, dir, name, size, mtime);
-                }
                 Ok((id, true))
             }
         }
@@ -619,9 +888,6 @@ impl Store {
     pub(crate) fn delete_file(&self, id: i64, now: i64) -> Result<()> {
         let (st, has_hash): (i64, bool) = self.conn.query_row("SELECT read_state, hash IS NOT NULL FROM files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         self.conn.execute("DELETE FROM names WHERE rowid=?1", [id])?;
-        if let Some(m) = &self.mem {
-            m.remove(id);
-        }
         if st == state::READ && has_hash {
             self.conn.execute("UPDATE files SET read_state=?2, gone_at=?3, lease_until=NULL WHERE id=?1", params![id, state::GONE, now])?;
             return Ok(());
@@ -745,15 +1011,6 @@ impl Store {
         Ok(self.conn.query_row("SELECT id, path, name, size, mtime, read_state FROM files WHERE path=?1", [path], file_row).optional()?)
     }
 
-    /// [`Store::file_by_id`] from memory when the names are loaded (no
-    /// disk read per result row); `read_state` is then not known (-1).
-    pub fn file_quick(&self, id: i64) -> Result<Option<FileRow>> {
-        if let Some(f) = self.mem.as_ref().and_then(|m| m.get(id)) {
-            return Ok(Some(FileRow { id, path: f.path, name: f.name, size: f.size, mtime: f.mtime, read_state: -1 }));
-        }
-        self.file_by_id(id)
-    }
-
     /// Title-block details of many files in one query per 500.
     pub fn metadata_many(&self, ids: &[i64]) -> Result<HashMap<i64, DrawingMeta>> {
         let mut out = HashMap::new();
@@ -779,6 +1036,37 @@ impl Store {
             for row in rows {
                 let (id, m) = row?;
                 out.insert(id, m);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Which of these files have a page of drawing size (long side at
+    /// least `min_side_pt` points; A3 is 1190).
+    pub fn drawing_sized(&self, ids: &[i64], min_side_pt: f32) -> Result<std::collections::HashSet<i64>> {
+        let mut out = std::collections::HashSet::new();
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut st = self.conn.prepare(&format!("SELECT DISTINCT file_id FROM pages WHERE file_id IN ({marks}) AND MAX(w_pt, h_pt) >= {min_side_pt}"))?;
+            for row in st.query_map(params_from_iter(chunk.iter()), |r| r.get::<_, i64>(0))? {
+                out.insert(row?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read documents whose title block gives one of these drawing numbers
+    /// (normalised): `(drawing_norm, revision_norm, path, name)`.
+    pub fn docs_by_drawing(&self, norms: &[String]) -> Result<Vec<(String, Option<String>, String, String)>> {
+        let mut out = Vec::new();
+        for chunk in norms.chunks(300) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut st = self.conn.prepare(&format!(
+                "SELECT m.drawing_norm, m.revision_norm, f.path, f.name FROM drawing_metadata m JOIN files f ON f.id=m.file_id WHERE m.drawing_norm IN ({marks}) AND f.read_state={} LIMIT 5000",
+                state::READ
+            ))?;
+            for row in st.query_map(params_from_iter(chunk.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
+                out.push(row?);
             }
         }
         Ok(out)
@@ -824,9 +1112,9 @@ impl Store {
     }
 
     pub fn page_info(&self, file_id: i64) -> Result<Vec<PageInfo>> {
-        let mut st = self.conn.prepare_cached("SELECT page, class, chars, image_coverage, ocr_tiles, ocr_skipped, ocr_ms, note FROM pages WHERE file_id=?1 ORDER BY page")?;
+        let mut st = self.conn.prepare_cached("SELECT page, class, chars, image_coverage, ocr_tiles, ocr_skipped, ocr_ms, note, w_pt, h_pt FROM pages WHERE file_id=?1 ORDER BY page")?;
         let rows = st.query_map([file_id], |r| {
-            Ok(PageInfo { page: r.get(0)?, class: r.get(1)?, chars: r.get(2)?, image_coverage: r.get::<_, f64>(3)? as f32, ocr_tiles: r.get(4)?, ocr_tiles_skipped: r.get(5)?, ocr_millis: r.get::<_, i64>(6)? as u64, note: r.get(7)? })
+            Ok(PageInfo { page: r.get(0)?, class: r.get(1)?, chars: r.get(2)?, image_coverage: r.get::<_, f64>(3)? as f32, ocr_tiles: r.get(4)?, ocr_tiles_skipped: r.get(5)?, ocr_millis: r.get::<_, i64>(6)? as u64, note: r.get(7)?, width_pt: r.get::<_, f64>(8)? as f32, height_pt: r.get::<_, f64>(9)? as f32 })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -853,9 +1141,9 @@ impl Store {
                     fts.execute(params![tx.last_insert_rowid(), fold_form(&l.text)])?;
                 }
             }
-            let mut pg = tx.prepare_cached("INSERT OR REPLACE INTO pages(file_id, page, class, chars, image_coverage, ocr_tiles, ocr_skipped, ocr_ms, note) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)")?;
+            let mut pg = tx.prepare_cached("INSERT OR REPLACE INTO pages(file_id, page, class, chars, image_coverage, ocr_tiles, ocr_skipped, ocr_ms, note, w_pt, h_pt) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)")?;
             for i in &text.page_info {
-                pg.execute(params![file_id, i.page, i.class, i.chars, i.image_coverage as f64, i.ocr_tiles, i.ocr_tiles_skipped, i.ocr_millis as i64, i.note])?;
+                pg.execute(params![file_id, i.page, i.class, i.chars, i.image_coverage as f64, i.ocr_tiles, i.ocr_tiles_skipped, i.ocr_millis as i64, i.note, i.width_pt as f64, i.height_pt as f64])?;
             }
             // Corrections recorded for this exact content apply again; for
             // other content they are kept but marked stale.
@@ -987,18 +1275,7 @@ impl Store {
     /// ([`MatchClass::SeparatorsIgnored`]).
     pub fn search_names(&self, term: &Term, scope: &Scope, limit: usize) -> Result<Vec<Candidate>> {
         let rows = self.name_candidates(term, scope, limit * 4)?;
-        let mut out: Vec<(bool, Candidate)> = Vec::new();
-        for (file_id, name, path) in rows {
-            if let Some(d) = term.explain_name(&name, &path) {
-                let whole = term.is_whole_name(&name, &path);
-                let why = if whole {
-                    if term.is_path() { "This is the path typed".to_string() } else { "The file name is the text typed".to_string() }
-                } else {
-                    format!("In the file {}: {}", if term.is_path() { "path" } else { "name" }, d.why.to_lowercase())
-                };
-                out.push((whole, Candidate { file_id, page: None, text: name, conf: 1.0, source: TextSource::FileName, bbox: None, class: d.class, why }));
-            }
-        }
+        let mut out: Vec<(bool, Candidate)> = rows.iter().filter_map(|(file_id, name, path)| name_candidate(term, *file_id, name, path)).collect();
         out.sort_by_key(|(whole, c)| (c.class, !*whole));
         out.truncate(limit);
         Ok(out.into_iter().map(|(_, c)| c).collect())
@@ -1013,41 +1290,11 @@ impl Store {
         let cap = limit * 4;
         let mut seen = std::collections::HashSet::new();
         let mut rows = Vec::new();
-        match self.mem.as_ref().filter(|m| m.serves(scope) && !terms.iter().any(|t| t.is_path())) {
-            // Every word checked against every name and folder at once.
-            Some(m) => rows = m.candidates_all(terms, scope, cap),
-            None => {
-                push_new(&mut seen, &mut rows, self.name_candidates(anchor, scope, cap)?);
-                if !anchor.is_path() {
-                    push_new(&mut seen, &mut rows, self.files_under_dirs(&anchor.raw, scope, cap)?);
-                }
-            }
+        push_new(&mut seen, &mut rows, self.name_candidates(anchor, scope, cap)?);
+        if !anchor.is_path() {
+            push_new(&mut seen, &mut rows, self.files_under_dirs(&anchor.raw, scope, cap)?);
         }
-        let mut out = Vec::new();
-        'file: for (file_id, name, path) in rows {
-            let dir = path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
-            let mut found: Vec<MatchDetail> = Vec::new();
-            for t in terms {
-                let d = t.explain_name(&name, &path).or_else(|| {
-                    if t.is_path() {
-                        return None;
-                    }
-                    let d = if t.has_wildcards() {
-                        glob_match(&format!("*{}*", t.raw), &dir.to_lowercase()).then(|| MatchDetail { class: MatchClass::Partial, why: "Part of the folder path matches the pattern".into() })
-                    } else {
-                        t.explain(dir, 1.0).filter(|d| d.class != MatchClass::Uncertain)
-                    };
-                    d.map(|d| MatchDetail { class: d.class, why: format!("In the folder path: {}", d.why.to_lowercase()) })
-                });
-                match d {
-                    Some(d) => found.push(d),
-                    None => continue 'file,
-                }
-            }
-            let class = found.iter().map(|d| d.class).max().unwrap_or(MatchClass::Partial);
-            let why = found.iter().map(|d| d.why.clone()).collect::<Vec<_>>().join("; ");
-            out.push(Candidate { file_id, page: None, text: name, conf: 1.0, source: TextSource::FileName, bbox: None, class, why: format!("Every word is in the file name or path: {}", why.to_lowercase()) });
-        }
+        let mut out: Vec<Candidate> = rows.iter().filter_map(|(file_id, name, path)| all_terms_candidate(terms, *file_id, name, path)).collect();
         out.sort_by_key(|c| c.class);
         out.truncate(limit);
         Ok(out)
@@ -1073,8 +1320,6 @@ impl Store {
                 }
                 push_new(&mut seen, &mut out, self.files_under_dirs(frag, scope, cap)?);
             }
-        } else if let Some(m) = self.mem.as_ref().filter(|m| m.serves(scope)) {
-            out = m.candidates(term, scope, cap);
         } else {
             push_new(&mut seen, &mut out, self.whole_names(term, scope, cap)?);
             push_new(&mut seen, &mut out, self.names_containing(term, scope, cap)?);

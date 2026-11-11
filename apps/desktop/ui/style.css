@@ -61,7 +61,7 @@ select, input[type=text], input[type=number], textarea { background: var(--panel
 .scopes .none { color: var(--ink-3); font-size: 12.5px; margin-bottom: 6px; }
 
 .results { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; min-height: 0; background: var(--panel); position: relative; }
-.thead, .rrow { display: grid; grid-template-columns: minmax(0, 30%) minmax(0, 24%) minmax(0, 20%) 44px 150px 96px; align-items: center; }
+.thead, .rrow { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.1fr) minmax(0, 1fr) 44px 150px 96px; align-items: center; }
 .thead { border-bottom: 1px solid var(--line); background: var(--panel); }
 .thead button { border: 0; border-radius: 0; background: none; text-align: left; padding: 7px 10px; color: var(--ink-2); font-weight: 600; font-size: 12.5px; }
 .thead button.sorted::after { content: " \25B4"; } .thead button.sorted.desc::after { content: " \25BE"; }
@@ -119,7 +119,6 @@ select, input[type=text], input[type=number], textarea { background: var(--panel
 /* indexing progress: the two-stage strip, dots and bars */
 .stages { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border-top: 1px solid var(--line); background: var(--panel-2); }
 .stage { display: grid; grid-template-columns: auto auto minmax(0, 1fr); grid-template-rows: auto 3px; align-items: center; gap: 3px 8px; border: 0; border-radius: 0; background: none; padding: 5px 12px 4px; text-align: left; font-size: 12.5px; min-width: 0; }
-.stage + .stage { border-left: 1px solid var(--line); }
 .stage:hover { background: var(--panel); }
 .st-name { font-weight: 600; white-space: nowrap; }
 .st-text { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -379,3 +378,76 @@ dialog .col textarea { width: 100%; font: 12px var(--mono); }
 details.advanced { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
 details.advanced summary { cursor: pointer; font-weight: 600; color: var(--ink-2); }
 #confirmDlg { width: min(520px, 92vw); }
+
+/* ===================== Sleuth 1.1 additions ===================== */
+/* stage strip: a control beside each stage, and a paused stage */
+.stagecell { display: flex; align-items: stretch; min-width: 0; }
+.stagecell + .stagecell { border-left: 1px solid var(--line); }
+.stagecell .stage { flex: 1; }
+.st-ctl { display: flex; align-items: center; gap: 4px; padding: 0 8px 0 2px; flex: none; }
+.st-menu { white-space: nowrap; color: var(--ink-2); }
+.st-state { margin-left: 4px; }
+.pill.st-paused { background: var(--ink-2); color: var(--panel); font-weight: 600; }
+.paused > .st-dot, .paused .wstep-head .st-dot, .idx-line.paused .st-dot { background: none; box-shadow: inset 0 0 0 2px var(--ink-2); }
+.paused .st-fill { background: var(--ink-3); }
+.stage.paused .st-text { color: var(--ink); }
+@media (max-width: 1180px) { .st-menu-t { display: none; } }
+.menu .sep { height: 1px; background: var(--line); margin: 4px 6px; }
+#stageMenu { min-width: 250px; max-width: 330px; }
+#stageMenu button { display: flex; flex-direction: column; gap: 1px; }
+#stageMenu button.pick { padding-left: 28px; position: relative; }
+#stageMenu button.pick.cur::before { content: "\2713"; position: absolute; left: 10px; top: 6px; color: var(--accent); font-weight: 600; }
+.mi-hint { font-size: 11.5px; color: var(--ink-3); white-space: normal; }
+/* the same actions as plain buttons (Monitor, Settings) */
+.stage-acts { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
+.stage-act { display: grid; grid-template-columns: 178px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 12px; color: var(--ink-2); }
+.stage-acts button.cur, .idx-acts button.cur { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.idx-acts { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 6px 14px; }
+.idx-note { color: var(--ink-3); font-size: 12px; margin-left: 14px; }
+.idx-line b, .idx-line .pill { white-space: nowrap; flex: none; }
+
+/* results: type label, the same document as other file types, type filters */
+.rrow .nm .nm-t { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.twin { font: 600 9.5px var(--mono); border: 1px dashed var(--line-2); border-radius: 3px; padding: 0 3px; color: var(--ink-2); background: none; flex: none; cursor: pointer; }
+.twin + .twin { margin-left: -4px; }
+.twin:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.kv .chips { margin-top: 0; }
+/* a narrow window (the smallest is 960 wide): slimmer side panes, no Modified column, so names stay readable */
+@media (max-width: 1100px) {
+  .panes { grid-template-columns: 190px minmax(0, 1fr) 300px; }
+  .thead, .rrow { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1.1fr) minmax(0, 1fr) 36px 124px; }
+  .thead button:nth-child(6), .rrow > div:nth-child(6) { display: none; }
+  .thead button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+}
+.side-sub { font-size: 11px; color: var(--ink-3); margin: 8px 0 2px; }
+.side label.side-switch { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+
+/* preview: the text read from a file that has no page image */
+.tv-stage:focus-visible { outline-offset: -2px; }
+.pt h4.tv-label { position: sticky; top: 0; left: 0; z-index: 1; margin: 0; padding: 5px 10px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 12.5px; text-transform: none; letter-spacing: 0; color: var(--ink); }
+.tv-lines { font: 12px/1.5 var(--mono); padding: 4px 0; min-width: max-content; tab-size: 4; }
+.tv-line { padding: 0 10px; white-space: pre; min-height: 18px; }
+.tv-line.low { color: var(--warn); }
+.tv-line.hit { background: rgba(215, 38, 43, .1); box-shadow: inset 3px 0 0 var(--red); }
+.tv-line.hit.cur { background: rgba(215, 38, 43, .22); }
+.tv-note { position: sticky; left: 0; padding: 6px 10px; font-size: 12px; color: var(--ink-2); border-top: 1px solid var(--line); }
+.tv-pending { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; color: var(--ink-2); max-width: 44ch; }
+
+/* Monitor: the office, its PCs, file types */
+.mon-wide { grid-column: 1 / -1; }
+.mon-wide h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+.mon-wide .kv { margin-bottom: 8px; }
+.office-pace { margin: 4px 0 0; font-weight: 600; }
+table.pcs-table tr.away td { color: var(--ink-3); }
+table.pcs-table td:nth-child(5), table.pcs-table th:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+table.drives-table.by td:nth-child(3) { text-align: left; }
+table.drives-table.by td:nth-child(6) { text-align: right; }
+table.drives-table.by td:last-child { text-align: right; white-space: nowrap; }
+table.kinds-table { max-width: 860px; }
+table.kinds-table td:nth-child(n+2):nth-child(-n+5), table.kinds-table th:nth-child(n+2):nth-child(-n+5) { text-align: right; }
+
+/* settings: reading speed, file types read inside */
+.kinds { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+dialog .kinds .check { margin: 3px 0; }
+dialog .row select { max-width: 62%; }
+.nowrap { white-space: nowrap; }

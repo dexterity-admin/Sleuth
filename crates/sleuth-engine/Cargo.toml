@@ -7,6 +7,9 @@ license.workspace = true
 
 [dependencies]
 sleuth-core.workspace = true
+sleuth-office.workspace = true
+sleuth-extract.workspace = true
+sleuth-lanes.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

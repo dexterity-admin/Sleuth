@@ -10,13 +10,20 @@ const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 const call = (req) => invoke("call", { req });
 
-const PROTOCOL = 2;
+const PROTOCOL = 3; // 3 = Sleuth 1.1: office index, every file type, stage controls
 const ROW_H = 30;
 const VERIFY_BELOW = 0.8; // confidence under this is always marked "verify"
 const CLASS_LABEL = { exact: "Exact", separators_ignored: "Separators ignored", uncertain: "Verify, OCR unsure", partial: "Partial, verify" };
 const CLASS_PILL = { exact: "exact", separators_ignored: "sep", uncertain: "verify", partial: "partial" };
 const CLASS_ORDER = { exact: 0, separators_ignored: 1, partial: 2, uncertain: 3 };
 const SOURCE_LABEL = { file_name: "File name", text_layer: "PDF text", ocr: "OCR", pending: "Waiting to be read", verified: "Checked by a person", metadata: "Title block" };
+// File types read inside (crates/sleuth-core/src/kinds.rs). "other" is found by name only.
+const FILE_KIND = { pdf: "PDF", excel: "Excel", word: "Word", slides: "PowerPoint", email: "Email", text: "Text", dwg: "DWG", dgn: "DGN", image: "Image" };
+const KIND_LONG = { pdf: "PDF", excel: "Excel workbooks", word: "Word documents", slides: "PowerPoint presentations", email: "Emails (.msg, .eml)", text: "Text and CSV files", dwg: "AutoCAD drawings (DWG, DXF)", dgn: "MicroStation drawings (DGN, PDS .i01)", image: "Scanned images (TIF, JPG, PNG), by OCR" };
+const OPEN_IN = { excel: "Excel", word: "Word", slides: "PowerPoint", email: "Outlook", dwg: "AutoCAD", dgn: "MicroStation" };
+const PAGE_WORD = { excel: "Sheet", slides: "Slide" };
+const CATEGORIES = [["drawing", "Drawings"], ["document", "Documents"], ["spreadsheet", "Spreadsheets"], ["email", "Emails"], ["presentation", "Presentations"], ["other", "Other files"]];
+const SPEED_LABEL = { auto: "Automatic", gentle: "Gentle (minimum only)", full: "Full speed" };
 // Copy of the built-in categories in crates/sleuth-core/src/settings.rs; the
 // list is extended with any category seen in the data or in custom rules.
 const BUILTIN_CATEGORIES = ["line", "drawing", "instrument", "valve", "equipment", "support", "weld", "spec"];
@@ -41,7 +48,12 @@ const state = {
   page: { offset: 0, more: false, deep: false, loadingMore: false },
   updateChannel: "stable",
   view_: "search",
+  proto: 0,                 // the background reader's protocol; 0 until it has answered
+  pcName: "",               // this PC as the office sees it (from Monitor)
+  folded: 0,                // rows folded into another file type of the same document
 };
+/** The 1.1 background reader: office index, every file type, stage controls. */
+function newReader() { return state.proto >= 3; }
 
 // ---------- helpers ----------
 function el(tag, cls, text) {
@@ -75,6 +87,8 @@ function extOf(name) { const i = name.lastIndexOf("."); return i > 0 ? name.slic
 function isPdf(name) { return /\.pdf$/i.test(name); }
 function normTag(s) { return String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); }
 function toast(msg) { $("sbSearch").textContent = msg; }
+function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* private mode */ } }
 function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : ""; }
 /** A duration for people: "less than a minute", "12 min", "3 h 20 min", "2 days 4 h". */
 function fmtDur(secs) {
@@ -102,6 +116,18 @@ function fmtIn(secs) {
   return d < 60 ? "in a moment" : "in " + fmtDur(d);
 }
 const plural = (n, one, many) => `${fmtNum(n)} ${Number(n) === 1 ? one : (many || one + "s")}`;
+/** "14:35" today, otherwise the date and time. */
+function fmtClock(secs) {
+  const d = new Date(secs * 1000);
+  const t = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? t : `${t} on ${fmtDate(secs)}`;
+}
+/** The type label of a result row: "Excel", "DGN"; the extension for types not read inside. */
+function kindLabel(f) { return FILE_KIND[f.kind] || extOf(f.name || "") || "FILE"; }
+/** Whether the file's text is shown as text (no page image): every read type except PDF. */
+function readsAsText(f) { return !!f.kind && f.kind !== "pdf" && f.kind !== "other"; }
+function sourceLabel(h) { return h.source === "text_layer" && readsAsText(h) ? "Text in the file" : (SOURCE_LABEL[h.source] || h.source); }
+function isThisPc(name) { return !name || (!!state.pcName && name.toLowerCase() === state.pcName.toLowerCase()); }
 /** "Z:\ (\\server\Project)" -> "Z:\" for the short forms. */
 function shortRoot(r) { const d = r.display || r.root || ""; const i = d.indexOf(" ("); return i > 0 ? d.slice(0, i) : d; }
 
@@ -119,13 +145,16 @@ const ROOT_STATE = {
 const SCOPE_NOTE = {
   "not mapped": "This drive letter is not mapped on this PC, so nothing in it can be read. Map the drive, or remove it and add the folder by its network path.",
   offline: "Cannot be reached right now. Reading continues when it is back.",
-  "not indexed yet": "Its files have not been listed yet (stage 1). Its PDFs are queued as soon as the listing reaches it.",
+  "not indexed yet": "Its files have not been listed yet (stage 1). Its documents are queued as soon as the listing reaches it.",
 };
 function progressModel(s) {
   s = s || {};
   const ix = s.index && typeof s.index === "object" && s.index.phase ? s.index : null;
   const roots = Array.isArray(ix?.roots) ? ix.roots : [];
-  const phase = !ix ? "unknown" : ix.phase === "up to date" ? "done" : ix.phase === "starting" ? "starting" : "walking";
+  // Paused by the user on this PC (1.1). "loading" = the file list is being opened.
+  const walkPaused = s.walk_paused === true || (s.walk_paused === undefined && ix?.phase === "paused");
+  const loading = !!ix && ix.phase === "loading";
+  const phase = !ix ? "unknown" : ix.phase === "up to date" || ix.phase === "paused" ? "done" : ix.phase === "starting" || loading ? "starting" : "walking";
   const scopes = Array.isArray(s.scopes) && s.scopes.length ? s.scopes : null;
   const sum = (k) => scopes.reduce((a, x) => a + (Number(x[k]) || 0), 0);
   let read, waiting, failed, total;
@@ -133,45 +162,81 @@ function progressModel(s) {
   else { read = Number(s.pdfs_read) || 0; waiting = Number(s.pdfs_waiting) || 0; failed = Number(s.pdfs_failed) || 0; total = read + waiting + failed; }
   if (total < read + waiting + failed) total = read + waiting + failed;
   const rs = String(s.reader_state || "").toLowerCase();
+  const readPaused = s.read_paused === true;
   return {
-    s, ix, roots, phase, scopes,
-    walking: phase === "walking" || phase === "starting",
+    s, ix, roots, phase, scopes, loading, walkPaused, readPaused,
+    walking: !walkPaused && (phase === "walking" || phase === "starting"),
     firstWalk: !!ix?.first_walk,
-    active: roots.filter((r) => r.state === "walking").map(shortRoot),
+    // A share is listed by one PC for the whole office: ours, or another's.
+    active: roots.filter((r) => r.state === "walking" && isThisPc(r.by)).map(shortRoot),
+    others: roots.filter((r) => r.state === "walking" && !isThisPc(r.by)),
     offline: roots.filter((r) => r.state === "offline"),
     partial: roots.filter((r) => r.state === "partial"),
     scopeCount: scopes ? scopes.length : (state.settings?.content_scopes || []).length,
     // "not indexed yet" is expected while stage 1 runs; only the others need the user.
     scopeProblems: (scopes || []).filter((x) => x.note && x.note !== "ok" && x.note !== "not indexed yet"),
     read, waiting, failed, total,
-    reading: rs.startsWith("reading"),
+    reading: rs.startsWith("reading") && !readPaused,
     paused: rs.startsWith("paused"),
     readDone: waiting === 0 && !rs.startsWith("reading"),
+    speed: SPEED_LABEL[s.speed] ? s.speed : "",
+    speedUntil: s.speed === "full" && Number(s.speed_until) > nowSecs() ? Number(s.speed_until) : 0,
   };
 }
-/** Stage 1, "Finding files": {cls, text, title, bar} (bar: null = moving, 0..1 = filled). */
+/** "Z:\ is being listed by PC-07", or "" when no other PC is listing a drive. */
+function listedElsewhere(p) {
+  const o = p.others;
+  if (!o.length) return "";
+  const pcs = [...new Set(o.map((r) => r.by))];
+  if (pcs.length > 1) return `${fmtNum(o.length)} drives are being listed by other PCs`;
+  const names = o.map(shortRoot);
+  if (names.length > 3) return `${fmtNum(names.length)} drives are being listed by ${pcs[0]}`;
+  return (names.length === 1 ? `${names[0]} is` : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} are`) + ` being listed by ${pcs[0]}`;
+}
+/** The reading speed in words, "" for automatic: "Full speed until 14:35". */
+function speedNote(p) {
+  if (p.speed === "full") return p.speedUntil ? `Full speed until ${fmtClock(p.speedUntil)}` : "Full speed";
+  return p.speed === "gentle" ? "Gentle speed" : "";
+}
+/** Stage 1, "Finding files": {cls, state, text, title, bar} (state: a word shown before the text, "Paused"; bar: null = moving, 0..1 = filled). */
 function stageFind(p) {
   const s = p.s, ix = p.ix;
+  const elsewhere = listedElsewhere(p);
+  const elsewhereTitle = elsewhere ? "One PC lists each network drive for the whole office. Its files show here as they are found." : "";
   if (p.phase === "unknown") {
     return { cls: "idle", text: `${plural(s.files_indexed, "file")} in the index`, title: "This background reader does not report its listing progress. Update Sleuth on this PC to see it.", bar: 1 };
   }
+  if (p.walkPaused) {
+    const parts = ["on this PC", `${plural(s.files_indexed, "file")} in the index`];
+    if (ix.last_complete) parts.push(`last checked ${fmtAgo(ix.last_complete)}`);
+    if (elsewhere) parts.push(elsewhere);
+    return { cls: "paused", state: "Paused", text: parts.join(" · "), title: "Finding files is paused on this PC until you resume it. Other PCs carry on.", bar: ix.last_complete ? 1 : 0 };
+  }
+  if (p.loading) return { cls: "run", text: "Opening the file list…", title: "", bar: null };
   if (p.phase === "starting") return { cls: "run", text: "Starting: getting the list of drives…", title: "", bar: null };
   if (p.walking) {
-    const parts = [p.active.length ? `Listing ${p.active.slice(0, 3).join(", ")}${p.active.length > 3 ? ` and ${p.active.length - 3} more` : ""}` : "Listing folders"];
+    const parts = [];
+    if (p.active.length) parts.push(`Listing ${p.active.slice(0, 3).join(", ")}${p.active.length > 3 ? ` and ${p.active.length - 3} more` : ""}`);
+    else if (!elsewhere) parts.push("Listing folders");
+    if (elsewhere) parts.push(elsewhere);
     parts.push(`${plural(ix.folders_listed, "folder")} listed` + (ix.folders_pending ? `, ${fmtNum(ix.folders_pending)} still to list` : ""));
     parts.push(`${plural(ix.files_seen, "file")} found`);
     if (ix.pass_started) parts.push(`running ${fmtDur(nowSecs() - ix.pass_started)}`);
     const title = (p.firstWalk ? "First listing of the drives: search results stay incomplete until it finishes." : "Checking the drives for new, moved and deleted files.") +
-      (ix.last_complete ? `\nLast complete listing ${fmtAgo(ix.last_complete)}.` : "");
+      (ix.last_complete ? `\nLast complete listing ${fmtAgo(ix.last_complete)}.` : "") + (elsewhereTitle ? `\n${elsewhereTitle}` : "");
     return { cls: "run", text: parts.join(" · "), title, bar: null };
   }
   const warn = [];
   if (p.offline.length) warn.push(`${plural(p.offline.length, "drive")} offline`);
   if (p.partial.length) warn.push(`${plural(p.partial.length, "drive")} partly listed`);
+  if (elsewhere) {
+    const text = [elsewhere, `${plural(s.files_indexed, "file")} in the index so far`, ...warn].join(" · ");
+    return { cls: "run", text, title: elsewhereTitle, bar: null };
+  }
   const text = [`Up to date · ${plural(s.files_indexed, "file")}`, `checked ${fmtAgo(ix.last_complete)}`, ...warn].join(" · ");
   return { cls: warn.length ? "warn" : "ok", text, title: ix.next_walk ? `Next check ${fmtIn(ix.next_walk)}.` : "", bar: 1 };
 }
-/** Stage 2, "Reading PDFs". */
+/** Stage 2, "Reading documents". */
 function stageRead(p) {
   const s = p.s;
   const progress = `${fmtNum(p.read)} of ${fmtNum(p.total)} read`;
@@ -181,27 +246,55 @@ function stageRead(p) {
   const bar = p.total ? p.read / p.total : 0;
   const warnIf = (c) => (p.scopeProblems.length ? "warn" : c);
   if (!p.scopeCount) {
-    return { cls: "warn", text: "No reading folders chosen: PDFs are found by file name only", title: "Add your project folders under Folders being read on the Search page so the text printed on their drawings can be searched.", bar: 0 };
+    return { cls: "warn", text: "No reading folders chosen: documents are found by file name only", title: "Add your project folders under Folders being read on the Search page so the text inside their drawings and documents can be searched.", bar: 0 };
+  }
+  if (p.readPaused) {
+    const parts = ["on this PC", progress];
+    if (p.waiting) parts.push(`${fmtNum(p.waiting)} waiting`);
+    return { cls: "paused", state: "Paused", text: [...parts, ...tail].join(" · "), title: "Reading is paused on this PC until you resume it. Other PCs carry on.", bar };
   }
   if (p.reading) {
     // Most useful first: the strip cuts the end off on a narrow window.
-    const parts = [progress, `${fmtNum(p.waiting)} waiting`];
-    if (s.reading_eta_secs > 0) parts.push(`about ${fmtDur(s.reading_eta_secs)} left`);
+    const parts = [progress];
+    const speed = speedNote(p);
+    if (speed) parts.push(speed);
+    if (s.ocr_waiting > 0) parts.push(`${fmtNum(s.ocr_waiting)} waiting for OCR`);
+    else if (s.ocr_waiting === undefined) parts.push(`${fmtNum(p.waiting)} waiting`);
     parts.push(...tail);
-    if (s.current_file) parts.push(`now ${baseName(s.current_file)}`);
-    if (s.pages_per_hour) parts.push(`${fmtNum(s.pages_per_hour)} pages/h`);
-    return { cls: warnIf("run"), text: parts.join(" · "), title: (s.current_file || "") + (s.reader_note ? `\n${s.reader_note}` : ""), bar };
+    if (s.docs_per_hour > 0) parts.push(`${plural(s.docs_per_hour, "document")} an hour`);
+    else if (s.docs_per_hour === undefined && s.pages_per_hour) parts.push(`${fmtNum(s.pages_per_hour)} pages/h`);
+    if (s.reading_eta_secs > 0) parts.push(`about ${fmtDur(s.reading_eta_secs)} left`);
+    return { cls: warnIf("run"), text: parts.join(" · "), title: (s.current_file ? `Now reading ${s.current_file}` : "") + (s.reader_note ? `\n${s.reader_note}` : ""), bar };
   }
   if (p.waiting > 0) {
     const why = s.reader_note || (s.reader_state ? cap(s.reader_state) : "Waiting");
-    return { cls: p.paused ? "warn" : warnIf("idle"), text: [cap(why), progress, `${fmtNum(p.waiting)} waiting`, ...tail].join(" · "), title: s.reader_note || "", bar };
+    // "paused: …" (not by the user) and "stopped" are the reader's own trouble: say so in the warning colour.
+    return { cls: p.paused || /^stopped/i.test(s.reader_state || "") ? "warn" : warnIf("idle"), text: [cap(why), progress, `${fmtNum(p.waiting)} waiting`, ...tail].join(" · "), title: s.reader_note || "", bar };
   }
   if (!p.total) {
-    if (p.walking) return { cls: warnIf("idle"), text: [cap(s.reader_note || "waiting for the file list to finish"), "no PDFs queued yet", ...tail].join(" · "), title: "PDFs in your reading folders are queued as stage 1 lists them.", bar: 0 };
-    return { cls: "warn", text: ["No PDFs found in your reading folders", ...tail].join(" · "), title: "", bar: 0 };
+    if (p.walking) return { cls: warnIf("idle"), text: [cap(s.reader_note || "waiting for the file list to finish"), "no documents queued yet", ...tail].join(" · "), title: "Documents in your reading folders are queued as stage 1 lists them.", bar: 0 };
+    return { cls: "warn", text: ["No documents found in your reading folders", ...tail].join(" · "), title: "", bar: 0 };
   }
-  if (p.walking) return { cls: warnIf("idle"), text: [`All ${fmtNum(p.total)} PDFs found so far read`, "more are queued as stage 1 lists folders", ...tail].join(" · "), title: "", bar: 1 };
-  return { cls: warnIf("ok"), text: [`All ${fmtNum(p.total)} PDFs in your reading folders read`, ...tail].join(" · "), title: "", bar: 1 };
+  if (p.walking) return { cls: warnIf("idle"), text: [`All ${fmtNum(p.total)} documents found so far read`, "more are queued as stage 1 lists folders", ...tail].join(" · "), title: "", bar: 1 };
+  return { cls: warnIf("ok"), text: [`All ${fmtNum(p.total)} documents in your reading folders read`, ...tail].join(" · "), title: "", bar: 1 };
+}
+/** The state word of a stage ("Paused") as a pill, or nothing. */
+function stateWord(st) { return st.state ? el("span", "pill st-" + st.cls, st.state) : ""; }
+
+// ---------- redrawing live panels ----------
+// Monitor and Settings redraw their stage blocks from every status (2 s while
+// working). A click must not be lost to a redraw between press and release,
+// and the keyboard focus must stay on the button it was on (data-key).
+function holdWhilePressed(box) {
+  box.addEventListener("pointerdown", () => { box.dataset.held = "1"; });
+  window.addEventListener("pointerup", () => { delete box.dataset.held; });
+  window.addEventListener("pointercancel", () => { delete box.dataset.held; });
+}
+function redrawKeeping(box, draw) {
+  if (box.dataset.held) return;
+  const key = box.contains(document.activeElement) ? document.activeElement.dataset.key : null;
+  draw();
+  if (key) [...box.querySelectorAll("[data-key]")].find((b) => b.dataset.key === key)?.focus();
 }
 
 function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
@@ -400,7 +493,7 @@ class Viewer {
     this.msg.textContent = text || this.o.emptyText; this.msg.hidden = !this.msg.textContent;
     this.hitInfo.textContent = ""; this.pageInfo.textContent = "";
   }
-  /** doc: {path, name, page, query, tag, office, extra:[NormBox], extraLabel}. */
+  /** doc: {path, name, kind, page, query, tag, office, extra:[NormBox], extraLabel}. */
   async load(doc, page) {
     const seq = ++this.seq;
     this.doc = doc;
@@ -408,7 +501,8 @@ class Viewer {
     this.msg.hidden = true;
     if (!isPdf(doc.name || doc.path)) {
       this.img.removeAttribute("src");
-      this.hitInfo.textContent = ""; this.pageInfo.textContent = "Preview is shown for PDFs";
+      this.hitInfo.textContent = "";
+      this.pageInfo.textContent = doc.kind === "other" ? "Found by its file name. Sleuth does not read inside this type of file." : "Preview is shown for PDFs";
       return;
     }
     const pg = page || doc.page || 1;
@@ -467,6 +561,149 @@ class Viewer {
     this.cur = (this.cur + d + this.boxes.length) % this.boxes.length;
     this.hitInfo.textContent = `Mark ${this.cur + 1} of ${this.boxes.length}`;
     this.applyZoom(true);
+  }
+}
+
+// ---------- text viewer ----------
+// The text read from a file that has no page image (spreadsheet, drawing
+// model, email, scanned image…), one sheet, slide or page at a time, with the
+// matching lines marked and match stepping. Used by the search preview.
+class TextViewer {
+  constructor(host, opts) {
+    this.o = Object.assign({ height: "46vh" }, opts);
+    this.doc = null; this.page = 1; this.pages = 0; this.hits = []; this.cur = 0; this.seq = 0; this.retry = 0;
+    const tools = el("div", "pv-tools");
+    this.prevHit = el("button", "small", "‹ Match"); this.prevHit.type = "button"; this.prevHit.title = "Previous matching line";
+    this.hitInfo = el("span");
+    this.nextHit = el("button", "small", "Match ›"); this.nextHit.type = "button"; this.nextHit.title = "Next matching line";
+    tools.append(this.prevHit, this.hitInfo, this.nextHit, el("span", "grow"));
+    this.stage = el("div", "pv-stage tv-stage"); this.stage.style.height = this.o.height; this.stage.tabIndex = 0;
+    this.stage.setAttribute("aria-label", "Text read from the file");
+    this.label = el("h4", "tv-label"); this.lines = el("div", "tv-lines"); this.note = el("div", "tv-note");
+    this.msg = el("div", "pv-msg");
+    this.stage.append(this.label, this.lines, this.note, this.msg);
+    const pages = el("div", "pv-pages");
+    this.prevPage = el("button", "small", "‹"); this.prevPage.type = "button";
+    this.pageInfo = el("span");
+    this.nextPage = el("button", "small", "›"); this.nextPage.type = "button";
+    pages.append(this.prevPage, this.pageInfo, this.nextPage);
+    host.classList.add("viewer");
+    host.replaceChildren(tools, this.stage, pages);
+    this.prevHit.onclick = () => this.step(-1);
+    this.nextHit.onclick = () => this.step(1);
+    this.prevPage.onclick = () => { if (this.doc && this.page > 1) this.load(this.doc, this.page - 1); };
+    this.nextPage.onclick = () => { if (this.doc && this.page < this.pages) this.load(this.doc, this.page + 1); };
+    this.clear();
+  }
+  clear(text) {
+    this.doc = null; this.seq++; clearTimeout(this.retry);
+    this.lines.replaceChildren(); this.hits = [];
+    this.label.hidden = true; this.note.hidden = true;
+    this.say(text || "");
+    this.hitInfo.textContent = ""; this.pageInfo.textContent = "";
+    this.steppers(false, false);
+  }
+  say(...what) { this.msg.replaceChildren(...what); this.msg.hidden = !this.msg.childNodes.length || !this.msg.textContent; }
+  steppers(hits, pages) {
+    this.prevHit.hidden = this.nextHit.hidden = !hits;
+    this.prevPage.hidden = this.nextPage.hidden = !pages;
+  }
+  ask(doc, page) {
+    const req = { req: "text_preview", path: doc.path, page: page || doc.page || 1, query: doc.query || "" };
+    if (doc.tag) req.tag = doc.tag;
+    return call(req);
+  }
+  /** doc: {path, name, kind, page, query, tag}. */
+  async load(doc, page) {
+    const seq = ++this.seq;
+    clearTimeout(this.retry);
+    this.doc = doc;
+    let loading = this.stage.querySelector(".pv-loading");
+    if (!loading) { loading = el("div", "pv-loading", "Loading the text…"); this.stage.append(loading); }
+    try {
+      const r = await this.ask(doc, page);
+      if (seq === this.seq) this.show(r, doc);
+    } catch (e) {
+      if (seq !== this.seq) return;
+      this.lines.replaceChildren(); this.label.hidden = true; this.note.hidden = true;
+      this.hitInfo.textContent = ""; this.pageInfo.textContent = ""; this.steppers(false, false);
+      this.say(el("span", "error", String(e)));
+    } finally { if (seq === this.seq) loading.remove(); }
+  }
+  show(r, doc) {
+    const kind = r.kind && r.kind !== "other" ? r.kind : doc.kind;
+    const word = PAGE_WORD[kind] || "Page";
+    this.lines.replaceChildren(); this.hits = []; this.cur = 0;
+    this.say(); this.note.hidden = true;
+    this.label.textContent = r.label || ""; this.label.hidden = !r.label;
+    if (!r.pages || r.source === "pending") { this.pending(doc); return; }
+    this.pages = r.pages; this.page = r.page || 1;
+    const frag = document.createDocumentFragment();
+    for (const l of r.lines || []) {
+      const low = l.conf < VERIFY_BELOW;
+      const d = el("div", "tv-line" + (l.hit ? " hit" : "") + (low ? " low" : ""), l.text);
+      if (low) d.title = `Read with low confidence (${pct(l.conf)}): check the file`;
+      if (l.hit) this.hits.push(d);
+      frag.append(d);
+    }
+    this.lines.append(frag);
+    const many = this.pages > 1;
+    if (!(r.lines || []).length) this.say(many ? `No text was read on this ${word.toLowerCase()}.` : "No text was read from this file.");
+    if (r.truncated) {
+      this.note.textContent = `Showing the first ${fmtNum(r.lines.length)} lines${many ? ` of this ${word.toLowerCase()}` : ""}. Open the file to see the rest.`;
+      this.note.hidden = false;
+    }
+    this.pageInfo.textContent = many ? `${word} ${fmtNum(this.page)} of ${fmtNum(this.pages)}` : "";
+    this.prevPage.setAttribute("aria-label", `Previous ${word.toLowerCase()}`); this.nextPage.setAttribute("aria-label", `Next ${word.toLowerCase()}`);
+    this.prevPage.disabled = this.page <= 1; this.nextPage.disabled = this.page >= this.pages;
+    this.steppers(this.hits.length > 1, many);
+    this.noHit = many ? `No match on this ${word.toLowerCase()}` : "No matching line";
+    this.mark();
+    this.o.onLoaded?.(r);
+  }
+  /** Not read yet: say so, offer to read it first, then look again by itself. */
+  pending(doc) {
+    this.pages = 0; this.steppers(false, false);
+    this.hitInfo.textContent = "Not read yet"; this.pageInfo.textContent = "";
+    const box = el("div", "tv-pending");
+    if ((state.settings?.kinds_not_read || []).includes(doc.kind)) {
+      box.append(`Not read: ${KIND_LONG[doc.kind] || "files of this type"} are found by file name only on this PC. To read them, tick the type under Settings, File types read inside.`);
+    } else {
+      const b = el("button", "small primary", "Read now"); b.type = "button";
+      b.title = "Read this file before the others that are waiting";
+      b.onclick = async () => {
+        b.disabled = true;
+        try { await call({ req: "read_now", path: doc.path }); b.textContent = "Queued"; toast("Queued for reading first"); this.lookAgain(doc, 0); }
+        catch (e) { toast(String(e)); b.disabled = false; }
+      };
+      box.append("Not read yet: ", b);
+    }
+    this.say(box);
+  }
+  lookAgain(doc, n) {
+    clearTimeout(this.retry);
+    this.retry = setTimeout(async () => {
+      if (this.doc !== doc) return;
+      try {
+        const r = await this.ask(doc);
+        if (this.doc !== doc) return;
+        if (r.pages && r.source !== "pending") { this.show(r, doc); toast(`${doc.name} has been read`); return; }
+      } catch { /* try again */ }
+      if (n < 40) this.lookAgain(doc, n + 1);
+    }, 3000);
+  }
+  mark() {
+    const n = this.hits.length;
+    this.hits.forEach((d, i) => d.classList.toggle("cur", i === this.cur));
+    this.hitInfo.textContent = n ? `Match ${fmtNum(this.cur + 1)} of ${fmtNum(n)}` : this.noHit;
+    const d = this.hits[this.cur];
+    this.stage.scrollTop = d ? d.offsetTop - (this.stage.clientHeight - d.offsetHeight) / 2 : 0;
+    this.stage.scrollLeft = 0;
+  }
+  step(d) {
+    if (!this.hits.length) return;
+    this.cur = (this.cur + d + this.hits.length) % this.hits.length;
+    this.mark();
   }
 }
 

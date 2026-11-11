@@ -287,6 +287,14 @@ pub fn check_cache(dir: Option<&str>, enabled: bool, drives: &DriveMap) -> Cache
         return check(S::NotSet, "", "no shared folder is chosen");
     };
     let unc = drives.to_unc(dir);
+    // A folder on this PC's own disk is no use to an office, but it is what
+    // the office server on its own disks, a one-PC setup and the tests want.
+    if !unc.starts_with("\\\\") && std::env::var_os("SLEUTH_LOCAL_STORE").is_some() {
+        return match std::fs::create_dir_all(&unc) {
+            Ok(()) => check(S::Ok, &unc, "working (a folder on this PC)"),
+            Err(e) => check(S::NoAccess, &unc, &format!("cannot create it: {e}")),
+        };
+    }
     if !unc.starts_with("\\\\") {
         let letter: String = dir.chars().take(2).collect();
         if dir.chars().nth(1) == Some(':') && !drives.drives.iter().any(|d| d.letter.eq_ignore_ascii_case(&letter)) {

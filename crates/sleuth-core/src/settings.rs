@@ -166,7 +166,8 @@ pub struct Settings {
     pub shared_cache_enabled: bool,
     /// Keep the background reader running after the window is closed.
     pub keep_indexing_when_closed: bool,
-    /// Pause OCR while total CPU use is above this percentage.
+    /// Other programs using more CPU than this (while someone is at the PC)
+    /// keep reading at its minimum; it never stops.
     pub busy_cpu_percent: u32,
     /// Rebuild the file-name index of each drive this often.
     pub name_rescan_minutes: u32,
@@ -191,6 +192,14 @@ pub struct Settings {
     pub server: ServerSettings,
     /// Walk only these folders instead of every drive (office server).
     pub index_roots: Option<Vec<String>>,
+    /// Finding files is paused on this PC until the user resumes it.
+    pub pause_walk: bool,
+    /// Reading is paused on this PC until the user resumes it.
+    pub pause_reading: bool,
+    /// How hard this PC reads (a timed full speed is not saved).
+    pub read_speed: crate::protocol::SpeedMode,
+    /// File types found by name only, not read inside (empty = read all).
+    pub kinds_not_read: Vec<crate::kinds::FileKind>,
     /// Keys written by newer versions, preserved untouched.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -227,6 +236,10 @@ impl Default for Settings {
             revision_order: RevisionOrder::LettersThenNumbers,
             server: ServerSettings::default(),
             index_roots: None,
+            pause_walk: false,
+            pause_reading: false,
+            read_speed: Default::default(),
+            kinds_not_read: Vec::new(),
             extra: Map::new(),
         }
     }

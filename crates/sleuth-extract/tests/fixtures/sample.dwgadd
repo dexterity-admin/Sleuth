@@ -1,0 +1,13 @@
+version 2000
+HEADER.EXTMIN = (0 0 0)
+HEADER.EXTMAX = (420 297 0)
+text "ISO-1001-01" (300.0 20.0 0.0) 5
+text "PSV-1203 %%c50 45%%d" (100.0 150.0 0.0) 3.5
+mtext (50 250 0) 80 "{\fArial|b0|i0|c0|p34;GENERAL NOTES}\P1. ALL DIMENSIONS IN MM\P2. LINE 6in-P-1001-A1A \A1;\H2.5;TO PUMP P-101A"
+line (0 0 0) (420 297 0)
+block "TITLE"
+attdef 3 0 "Drawing number" (0.0 1.0 0.0) DWGNO "ISO-0000-00"
+line (0 1 0) (1 1 0)
+endblk
+insert (350 10 0) "TITLE" 1 1 1 0
+attrib 3 0 (360.0 12.0 0.0) DWGNO "ISO-1001-01 REV B"

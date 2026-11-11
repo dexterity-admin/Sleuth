@@ -9,18 +9,29 @@
 //! the server looks exactly like a local one apart from [`Hit::origin`].
 
 use crate::analyzer::MatchClass;
+use crate::kinds::{Category, FileKind};
 use crate::paths::Drive;
 use crate::settings::Settings;
 use serde::{Deserialize, Serialize};
 
-pub fn pipe_name() -> String {
+/// The worker of this user (and, for development setups running several
+/// workers side by side, of the instance named in `SLEUTH_INSTANCE`).
+pub fn instance_name() -> String {
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
-    let safe: String = user.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
-    format!(r"\\.\pipe\Sleuth-{safe}")
+    let name = match std::env::var("SLEUTH_INSTANCE") {
+        Ok(i) if !i.trim().is_empty() => format!("{user}-{}", i.trim()),
+        _ => user,
+    };
+    name.chars().map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' }).collect()
+}
+
+pub fn pipe_name() -> String {
+    format!(r"\\.\pipe\Sleuth-{}", instance_name())
 }
 
 /// 2: Sleuth 1.0 (projects, tags, revisions, corrections, office server).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: Sleuth 1.1 (office store, every file type, stage controls).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope<T> {
@@ -33,8 +44,8 @@ pub struct Envelope<T> {
 #[serde(tag = "req", rename_all = "snake_case")]
 pub enum Request {
     Hello { protocol: u32 },
-    /// Search the index (names and read PDFs). With `deep`, also walk
-    /// `roots` live and read any unread PDFs found on the way.
+    /// Search the index (names and read documents). With `deep`, also walk
+    /// `roots` live and read any unread documents found on the way.
     Search {
         query: String,
         #[serde(default)]
@@ -152,7 +163,55 @@ pub enum Request {
     /// Save the office server connection (the key is stored encrypted for
     /// this Windows user). An empty `url` returns to standalone use.
     SetServer { url: String, token: String, ca_file: String },
+    /// Pause or resume one background stage on this PC. It stays paused
+    /// across restarts until resumed; other PCs carry on.
+    SetPaused { stage: Stage, paused: bool },
+    /// Do a stage's work now: list every drive again (or only `root`), or
+    /// start reading without waiting for the first listing to finish.
+    RunNow {
+        stage: Stage,
+        #[serde(default)]
+        root: Option<String>,
+    },
+    /// How hard this PC reads. `Full` for `minutes` (0 = until changed)
+    /// ignores the busy-PC slowdown; `Gentle` never goes above the minimum.
+    SetSpeed {
+        mode: SpeedMode,
+        #[serde(default)]
+        minutes: u32,
+    },
+    /// The text read from a file that has no page image (spreadsheet, CAD
+    /// model, email ...), one page (sheet, slide) at a time, matches marked.
+    TextPreview {
+        path: String,
+        page: u32,
+        query: String,
+        #[serde(default)]
+        tag: Option<String>,
+    },
     Shutdown,
+}
+
+/// The two background stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// Finding files: listing folders into the file-name catalog.
+    Walk,
+    /// Reading documents: text layers, extractors and OCR.
+    Read,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeedMode {
+    /// As fast as the PC allows without getting in the user's way.
+    #[default]
+    Auto,
+    /// The minimum only, whatever the PC is doing.
+    Gentle,
+    /// Every core, even while the PC is in use.
+    Full,
 }
 
 fn default_limit() -> usize {
@@ -241,6 +300,26 @@ pub struct Hit {
     pub drawing_no: Option<String>,
     #[serde(default)]
     pub revision: Option<String>,
+    #[serde(default)]
+    pub kind: FileKind,
+    #[serde(default)]
+    pub category: Category,
+    /// The same document saved as other file types (the PDF, DWG and DGN of
+    /// one drawing), shown on this row instead of as rows of their own.
+    #[serde(default)]
+    pub twins: Vec<Twin>,
+}
+
+/// Another file of the same document, and what makes it the same.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Twin {
+    pub path: String,
+    pub display_path: String,
+    pub name: String,
+    pub kind: FileKind,
+    /// "same drawing number and revision in the title block", "same file
+    /// name in the same folder" or "same file name in a folder beside it".
+    pub why: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,9 +403,85 @@ pub struct Status {
     /// Plain-language reason for the reader's state, e.g. why it waits.
     #[serde(default)]
     pub reader_note: String,
-    /// Reading folders as chosen, each with its PDF counts.
+    /// Reading folders as chosen, each with its document counts.
     #[serde(default)]
     pub scopes: Vec<ScopeProgress>,
+    /// Stages paused by the user on this PC.
+    #[serde(default)]
+    pub walk_paused: bool,
+    #[serde(default)]
+    pub read_paused: bool,
+    #[serde(default)]
+    pub speed: SpeedMode,
+    /// Unix seconds a timed `Full` speed ends; 0 when not timed.
+    #[serde(default)]
+    pub speed_until: i64,
+    /// Reader processes running now, per lane.
+    #[serde(default)]
+    pub fast_workers: u32,
+    #[serde(default)]
+    pub ocr_workers: u32,
+    /// Documents read on this PC in the last hour.
+    #[serde(default)]
+    pub docs_per_hour: u64,
+    /// Waiting documents already known to need OCR (the slow lane).
+    #[serde(default)]
+    pub ocr_waiting: u64,
+    /// The office index in the shared folder.
+    #[serde(default)]
+    pub store: StoreStatus,
+    /// Readable files in the reading folders by type.
+    #[serde(default)]
+    pub kinds: Vec<KindCount>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StoreStatus {
+    /// "ok", "offline", "not set", "no access", "disabled".
+    pub state: String,
+    pub path: String,
+    pub message: String,
+    /// Search parts in use and their size on the share.
+    pub parts: u32,
+    pub bytes: u64,
+    /// Documents readable through it (all PCs' readings).
+    pub documents: u64,
+    /// This PC's readings not yet published to the share.
+    pub unpublished: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KindCount {
+    pub kind: FileKind,
+    pub found: u64,
+    pub read: u64,
+    pub waiting: u64,
+    pub failed: u64,
+}
+
+/// One PC as the others see it (its heartbeat file in the office store).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PcStatus {
+    pub name: String,
+    pub user: String,
+    pub version: String,
+    /// "reading", "paused", "idle", "listing files" ...
+    pub state: String,
+    /// Shares this PC is listing right now.
+    #[serde(default)]
+    pub walking: Vec<String>,
+    pub docs_per_hour: u64,
+    pub pages_per_hour: u64,
+    pub fast_workers: u32,
+    pub ocr_workers: u32,
+    /// What this PC can read beyond the built-in types: "office filter",
+    /// "dgn filter", "dwg".
+    #[serde(default)]
+    pub abilities: Vec<String>,
+    /// Unix seconds of its last heartbeat.
+    pub last_seen: i64,
+    #[serde(default)]
+    pub server: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -366,6 +521,9 @@ pub struct IndexRoot {
     pub note: String,
     /// Unix seconds this root last finished a complete walk; 0 = never.
     pub last_ok: i64,
+    /// The PC listing it (or that listed it last); empty for this PC's own disks.
+    #[serde(default)]
+    pub by: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -512,17 +670,24 @@ pub struct Related {
     pub page: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PageInfo {
     pub page: u32,
-    /// searchable, scanned, hybrid, vector_outlined, sparse, damaged
+    /// PDF pages: searchable, scanned, hybrid, vector_outlined, sparse,
+    /// damaged. Other files: sheet, slide, document, email, text, model, image.
     pub class: String,
     pub chars: u32,
     pub image_coverage: f32,
     pub ocr_tiles: u32,
     pub ocr_tiles_skipped: u32,
     pub ocr_millis: u64,
+    /// For a sheet or slide, its name.
     pub note: String,
+    /// Page size in points (1/72 inch); 0 when the file has no page size.
+    #[serde(default)]
+    pub width_pt: f32,
+    #[serde(default)]
+    pub height_pt: f32,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -558,6 +723,14 @@ pub struct LowLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextLine {
+    pub text: String,
+    /// The line matches the query (or carries the tag asked for).
+    pub hit: bool,
+    pub conf: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
     pub query: String,
     pub at: i64,
@@ -588,6 +761,20 @@ pub struct Monitor {
     pub rule_errors: Vec<String>,
     pub backend_note: String,
     pub change_journal: String,
+    /// Every PC seen in the office store in the last day, this one first.
+    #[serde(default)]
+    pub pcs: Vec<PcStatus>,
+    /// What this PC keeps on its own disk (settings, unpublished readings).
+    #[serde(default)]
+    pub local_bytes: u64,
+    /// Documents the whole office still has to read, and how long that
+    /// takes at the office's pace of the last hour (0 = unknown).
+    #[serde(default)]
+    pub office_waiting: u64,
+    #[serde(default)]
+    pub office_docs_per_hour: u64,
+    #[serde(default)]
+    pub office_eta_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +801,8 @@ pub enum Event {
     Monitor { monitor: Box<Monitor> },
     History { items: Vec<HistoryItem> },
     Server { server: ServerStatus },
+    /// One page (sheet, slide) of a file's text.
+    TextPreview { kind: FileKind, pages: u32, page: u32, label: String, lines: Vec<TextLine>, truncated: bool, source: TextSource },
     Ok,
     /// The office server's part of a search, when it could not be asked.
     Notice { message: String },

@@ -279,7 +279,14 @@ impl Config {
         s.index_roots = Some(roots.clone());
         s.content_scopes = roots;
         s.projects = self.projects.clone();
-        s.shared_cache_dir = self.shared_cache_dir.clone().filter(|d| !d.trim().is_empty());
+        // The office index: the shared folder the PCs use, so the server
+        // reads into the same index they search; without one, a folder of
+        // its own next to its other data.
+        s.shared_cache_dir = self
+            .shared_cache_dir
+            .clone()
+            .filter(|d| !d.trim().is_empty())
+            .or_else(|| std::env::var_os("SLEUTH_DATA_DIR").map(|d| std::path::PathBuf::from(d).join("store").to_string_lossy().into_owned()));
         s.shared_cache_enabled = s.shared_cache_dir.is_some();
         s.server = Default::default();
         Ok(s)

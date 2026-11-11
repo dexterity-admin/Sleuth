@@ -54,7 +54,7 @@
       <option value="smart">Smart match</option>
       <option value="exact">Exact only</option>
     </select>
-    <button id="deep" class="primary" title="Also walk the selected drives live and read any PDFs not read yet">Deep search</button>
+    <button id="deep" class="primary" title="Also walk the selected drives live and read any documents not read yet">Deep search</button>
     <div class="popwrap">
       <button id="exportBtn" title="Save these results as a spreadsheet">Export</button>
       <div id="exportMenu" class="menu below" hidden role="menu">
@@ -100,6 +100,16 @@
       <label title="The text was found only inside a longer tag or word"><input type="checkbox" id="f-partial" checked> <span class="pill partial">Partial</span></label>
       <label><input type="checkbox" id="f-content" checked> Text inside files</label>
       <label><input type="checkbox" id="f-names" checked> File names</label>
+      <div id="typeFilters" hidden>
+        <div class="side-sub">Types</div>
+        <label><input type="checkbox" id="f-c-drawing" checked> Drawings</label>
+        <label><input type="checkbox" id="f-c-document" checked> Documents</label>
+        <label><input type="checkbox" id="f-c-spreadsheet" checked> Spreadsheets</label>
+        <label><input type="checkbox" id="f-c-email" checked> Emails</label>
+        <label><input type="checkbox" id="f-c-presentation" checked> Presentations</label>
+        <label><input type="checkbox" id="f-c-other" checked> Other files</label>
+        <label class="side-switch" title="A drawing saved as PDF, DWG and DGN is shown once, with the other file types as small labels after its name"><input type="checkbox" id="f-fold" checked> One row per document</label>
+      </div>
       <h3>Folders being read</h3>
       <div id="scopes" class="scopes"></div>
       <button id="addScope" class="small">Add folder</button>
@@ -130,7 +140,9 @@
           <button role="tab" data-pt="related">Related</button>
         </div>
         <div id="pt-page" class="pt">
+          <div id="pvKind" class="pv-actions" hidden></div>
           <div id="pvViewer"></div>
+          <div id="pvText" hidden></div>
           <dl class="kv" id="pvMeta"></dl>
           <div class="pv-actions">
             <button id="pvOpen" class="primary">Open</button>
@@ -243,14 +255,26 @@
   </main>
 
   <div id="stages" class="stages" role="status" aria-label="What Sleuth is doing">
-    <button id="stage1" class="stage idle" type="button">
-      <span class="st-dot" aria-hidden="true"></span><span class="st-name">1 · Finding files</span><span class="st-text">Connecting to the background reader…</span>
-      <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
-    </button>
-    <button id="stage2" class="stage idle" type="button">
-      <span class="st-dot" aria-hidden="true"></span><span class="st-name">2 · Reading PDFs</span><span class="st-text"></span>
-      <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
-    </button>
+    <div class="stagecell">
+      <button id="stage1" class="stage idle" type="button">
+        <span class="st-dot" aria-hidden="true"></span><span class="st-name">1 · Finding files <span class="st-state pill" hidden></span></span><span class="st-text">Connecting to the background reader…</span>
+        <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
+      </button>
+      <span id="stage1Ctl" class="st-ctl" hidden>
+        <button id="stage1Resume" class="small primary" type="button" title="Resume finding files on this PC" hidden>Resume</button>
+        <button id="stage1Menu" class="small st-menu" type="button" data-stage="walk" aria-haspopup="menu" aria-expanded="false" aria-label="Pause or start finding files" title="Pause, resume or start finding files"><span class="st-menu-t">Pause or start</span> &#9662;</button>
+      </span>
+    </div>
+    <div class="stagecell">
+      <button id="stage2" class="stage idle" type="button">
+        <span class="st-dot" aria-hidden="true"></span><span class="st-name">2 · Reading documents <span class="st-state pill" hidden></span></span><span class="st-text"></span>
+        <span class="st-trk" aria-hidden="true"><span class="st-fill"></span></span>
+      </button>
+      <span id="stage2Ctl" class="st-ctl" hidden>
+        <button id="stage2Resume" class="small primary" type="button" title="Resume reading on this PC" hidden>Resume</button>
+        <button id="stage2Menu" class="small st-menu" type="button" data-stage="read" aria-haspopup="menu" aria-expanded="false" aria-label="Pause, start or change the speed of reading" title="Pause, resume or start reading, and how fast this PC reads"><span class="st-menu-t">Pause or start</span> &#9662;</button>
+      </span>
+    </div>
   </div>
 
   <footer class="statusbar">
@@ -268,15 +292,17 @@
   <button data-act="copy" role="menuitem">Copy path</button>
   <button data-act="copyunc" role="menuitem">Copy network path</button>
   <button data-act="copytext" role="menuitem">Copy text found</button>
-  <button data-act="read" role="menuitem">Read this PDF now</button>
+  <button data-act="read" role="menuitem">Read this file now</button>
   <button data-act="check" role="menuitem">Check low-confidence readings in this file</button>
 </div>
+
+<div id="stageMenu" class="menu" hidden role="menu"></div>
 
 <dialog id="settingsDlg">
   <form method="dialog" id="settingsForm">
     <h2>Settings</h2>
     <section>
-      <h3>Reading PDFs</h3>
+      <h3>Reading documents</h3>
       <label class="row">OCR accuracy
         <select id="s-quality">
           <option value="auto">Standard (recommended)</option>
@@ -294,15 +320,28 @@
         </select>
       </label>
       <p id="s-backendNote" class="hint"></p>
-      <label class="row">Pause reading while other programs use more than
-        <span><input id="s-busy" type="number" min="10" max="100" step="5"> % CPU</span>
+      <label class="row" id="s-speedRow" hidden title="Automatic reads as fast as the PC allows without getting in your way. Gentle keeps to the minimum whatever the PC is doing. Full speed uses every core, even while the PC is in use.">Reading speed
+        <select id="s-speed">
+          <option value="auto">Automatic (recommended)</option>
+          <option value="gentle">Gentle (the minimum only)</option>
+          <option value="full">Full speed (even while the PC is in use)</option>
+        </select>
       </label>
+      <label class="row">Read at the minimum while other programs use more than
+        <span class="nowrap"><input id="s-busy" type="number" min="10" max="100" step="5"> % CPU</span>
+      </label>
+      <p class="hint">Reading never stops by itself: while the PC is busy it carries on at the minimum.</p>
       <label class="check"><input type="checkbox" id="s-titleblock"> Read the title block of plotted drawings when the text has no drawing number</label>
       <label class="check"><input type="checkbox" id="s-keep"> Keep reading in the background when Sleuth is closed (starts with Windows)</label>
     </section>
+    <section id="kindsSection" hidden>
+      <h3>File types read inside</h3>
+      <p class="hint">Ticked types are opened and their text is read, in your reading folders. Unticked types are found by file name only.</p>
+      <div id="s-kinds" class="kinds"></div>
+    </section>
     <section id="cacheSection">
-      <h3>Shared reading cache (required)</h3>
-      <p class="hint">Drawings already read on another PC are not read again here, so everyone shares the work. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
+      <h3>Office index folder (required)</h3>
+      <p class="hint">The one folder, shared by every PC, that holds the office index: the list of files on every network drive and the text read from documents, so each document is read once for the whole office and nothing large is kept on this PC. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
       <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button></div>
       <p id="s-cacheState" class="hint"></p>
     </section>
@@ -312,9 +351,9 @@
       <label class="row">Address <input id="s-srvUrl" type="text" class="wide mono" placeholder="https://sleuth-server:8455" spellcheck="false" autocomplete="off"></label>
       <label class="row">Access key <input id="s-srvKey" type="password" class="wide" placeholder="Leave blank to keep the saved key" autocomplete="off"></label>
       <div class="row">Certificate file (optional)
-        <span class="row-inline wide"><input id="s-srvCa" type="text" placeholder="Found automatically in the shared cache folder" spellcheck="false"><button type="button" id="s-srvCaPick" class="small">Browse</button></span>
+        <span class="row-inline wide"><input id="s-srvCa" type="text" placeholder="Found automatically in the office index folder" spellcheck="false"><button type="button" id="s-srvCaPick" class="small">Browse</button></span>
       </div>
-      <p class="hint">Without a certificate file, Sleuth looks for sleuth-server-ca.pem in the shared cache folder.</p>
+      <p class="hint">Without a certificate file, Sleuth looks for sleuth-server-ca.pem in the office index folder.</p>
       <div class="row-inline">
         <button type="button" id="s-srvTest" class="small">Test</button>
         <button type="button" id="s-srvSave" class="small primary">Connect and save</button>
@@ -341,7 +380,7 @@
       <h3>Deep search</h3>
       <label class="row">Folders listed at once per file server <input id="s-per" type="number" min="1" max="16"></label>
       <label class="row">Give up on a folder after <span><input id="s-timeout" type="number" min="5" max="120"> seconds</span></label>
-      <label class="row">Refresh the file-name index every <span><input id="s-rescan" type="number" min="15" max="10080"> minutes</span></label>
+      <label class="row">Check the drives for new files every <span><input id="s-rescan" type="number" min="15" max="10080"> minutes</span></label>
       <label class="row">Never search inside (one per line)
         <textarea id="s-excluded" rows="4" spellcheck="false"></textarea>
       </label>
@@ -369,7 +408,7 @@
     <div id="s-indexState" class="idx-now" aria-live="polite"></div>
     <p id="s-error" class="error" hidden></p>
     <div class="dlg-actions">
-      <button type="button" id="s-rescanNow">Refresh index now</button>
+      <button type="button" id="s-rescanNow" title="List every drive again now, to pick up new, moved and deleted files">Find files now</button>
       <span class="grow"></span>
       <button value="cancel" formnovalidate>Cancel</button>
       <button type="button" id="s-save" class="primary">Save</button>

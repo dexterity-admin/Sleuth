@@ -1,6 +1,6 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/sleuth-core", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri", "apps/server"]
+members = ["crates/sleuth-core", "crates/sleuth-office", "crates/sleuth-extract", "crates/sleuth-lanes", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri", "apps/server"]
 
 [workspace.package]
 version = "1.0.2"
@@ -12,6 +12,9 @@ repository = "https://github.com/dexterity-admin/Sleuth"
 [workspace.dependencies]
 sleuth-core = { path = "crates/sleuth-core" }
 sleuth-engine = { path = "crates/sleuth-engine" }
+sleuth-office = { path = "crates/sleuth-office" }
+sleuth-extract = { path = "crates/sleuth-extract" }
+sleuth-lanes = { path = "crates/sleuth-lanes" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -41,6 +44,12 @@ windows = { version = "0.62", features = [
   "Globalization",
   "Foundation",
   "Foundation_Collections",
+  "Win32_Storage_IndexServer",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Registry",
+  "Win32_System_JobObjects",
+  "Win32_System_ProcessStatus",
 ] }
 
 [profile.release]

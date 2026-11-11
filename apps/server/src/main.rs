@@ -109,6 +109,10 @@ fn file_logging(data: &Path) {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--reader") {
+        // Started by the server's own engine as a reader process.
+        return sleuth_engine::readjob::serve();
+    }
     let cli = Cli::parse();
     let data = sleuth_server::data_dir(cli.data);
     sleuth_server::use_data_dir(&data);

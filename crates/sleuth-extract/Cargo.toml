@@ -1,0 +1,20 @@
+[package]
+name = "sleuth-extract"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Text extraction from office and CAD files"
+
+[dependencies]
+sleuth-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+calamine = "0.38"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+cfb = "0.16"
+encoding_rs = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true

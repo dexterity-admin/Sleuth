@@ -1,13 +1,23 @@
-// Sleuth window: worker connection, status bar, shared-cache enforcement,
-// settings, updates and start-up. Loaded last (after core.js, search.js, views.js).
+// Sleuth window: worker connection, status bar, stage controls, the office
+// index folder, settings, updates and start-up. Loaded last (after core.js,
+// search.js, views.js).
 "use strict";
 
 // ---------- worker connection ----------
+/** Ask the reader which protocol it speaks; an older one gets none of the 1.1 controls. */
+async function hello() {
+  const r = await call({ req: "hello", protocol: PROTOCOL });
+  state.proto = Number(r.protocol) || 0;
+  $("typeFilters").hidden = !newReader();
+  return r;
+}
 async function waitForWorker() {
   for (let i = 0; i < 60; i++) {
     try {
-      const r = await call({ req: "hello", protocol: PROTOCOL });
-      if (r.protocol !== undefined && r.protocol !== PROTOCOL) {
+      const r = await hello();
+      if (r.protocol !== undefined && r.protocol < PROTOCOL) {
+        showBanner(`The background reader (version ${r.version || "?"}) is older than this window, so the newer controls are hidden. Close Sleuth and open it again; if this stays, reinstall Sleuth.`, null);
+      } else if (r.protocol !== undefined && r.protocol !== PROTOCOL) {
         showBanner(`The background reader (version ${r.version || "?"}) does not match this window. Close Sleuth and open it again; if this stays, reinstall Sleuth.`, null);
       }
       return true;
@@ -17,11 +27,11 @@ async function waitForWorker() {
   return false;
 }
 listen("worker-down", () => {
-  for (const id of ["stage1", "stage2"]) { $(id).className = "stage warn"; }
-  $("stage1").querySelector(".st-text").textContent = "The background reader is restarting…";
-  $("stage2").querySelector(".st-text").textContent = "";
+  closeStageMenu();
+  paintStage("stage1", { cls: "warn", text: "The background reader is restarting…", title: "", bar: 0 });
+  paintStage("stage2", { cls: "warn", text: "", title: "", bar: 0 });
 });
-listen("worker-up", () => { loadStatus(); });
+listen("worker-up", () => { hello().catch(() => {}).then(() => loadStatus()); });
 
 // ---------- status ----------
 // Polled every 2 s while files are being listed or read, every 10 s otherwise,
@@ -43,21 +53,36 @@ function loadStatus() {
 async function fetchStatus() {
   try {
     const r = await call({ req: "status" });
-    const s = r.status;
-    state.lastStatus = r;
-    const p = progressModel(s);
-    statusBusy = p.walking || p.reading || /^loading/i.test(s.reader_state || "");
-    renderStages(p);
-    setServer(s.server);
-    enforceCache(s.cache);
-    onStatus(p);
+    if (stagePatch) Object.assign(r.status, stagePatch); // a click not confirmed yet
+    useStatus(r);
   } catch { /* worker restarting */ }
+}
+function useStatus(r) {
+  const s = r.status;
+  state.lastStatus = r;
+  syncSettings(s);
+  const p = progressModel(s);
+  statusBusy = p.walking || p.reading || /^loading/i.test(s.reader_state || "");
+  renderStages(p);
+  setServer(s.server);
+  enforceCache(s);
+  onStatus(p);
+}
+/** Pausing and the speed are saved by the reader itself: keep our copy of the settings in step, so a later Save does not undo them. */
+function syncSettings(s) {
+  const st = state.settings;
+  if (!st) return;
+  if (typeof s.walk_paused === "boolean") st.pause_walk = s.walk_paused;
+  if (typeof s.read_paused === "boolean") st.pause_reading = s.read_paused;
+  if (SPEED_LABEL[s.speed] && !(Number(s.speed_until) > 0)) st.read_speed = s.speed;
 }
 function paintStage(id, st) {
   const b = $(id);
   b.className = "stage " + st.cls;
   b.querySelector(".st-text").textContent = st.text;
-  b.title = st.text + "\n" + (st.title ? st.title + "\n" : "") + "Click for details";
+  const word = b.querySelector(".st-state");
+  word.textContent = st.state || ""; word.hidden = !st.state; word.className = "st-state pill st-" + st.cls;
+  b.title = (st.state ? st.state + " " : "") + st.text + "\n" + (st.title ? st.title + "\n" : "") + "Click for details";
   const fill = b.querySelector(".st-fill");
   fill.classList.toggle("moving", st.bar === null);
   fill.style.width = st.bar === null ? "" : Math.round(Math.min(1, Math.max(0, st.bar)) * 100) + "%";
@@ -65,7 +90,146 @@ function paintStage(id, st) {
 function renderStages(p) {
   paintStage("stage1", stageFind(p));
   paintStage("stage2", stageRead(p));
+  // The controls need the 1.1 reader; a paused stage keeps Resume one click away.
+  const manual = newReader() && !!p.ix;
+  $("stage1Ctl").hidden = $("stage2Ctl").hidden = !manual;
+  $("stage1Resume").hidden = !p.walkPaused;
+  $("stage2Resume").hidden = !p.readPaused;
+  if (!manual) closeStageMenu();
 }
+
+// ---------- stage controls ----------
+// Pause, resume and start each stage by hand on this PC (set_paused, run_now,
+// set_speed). The strip's menus, Monitor and Settings all draw the same
+// actions from the latest status. A click shows at once: `stagePatch` is laid
+// over the status until the reader's next status confirms it.
+let stagePatch = null, stagePending = 0;
+async function stageAct(req, patch, said) {
+  closeStageMenu(true);
+  stagePatch = { ...stagePatch, ...patch };
+  stagePending++;
+  if (state.lastStatus) { Object.assign(state.lastStatus.status, patch); useStatus(state.lastStatus); }
+  let failed = null;
+  try { await call(req); } catch (e) { failed = e; }
+  if (statusInFlight) await statusInFlight; // asked before the click: shown with the patch laid over it
+  if (failed && stagePatch) for (const k of Object.keys(patch)) delete stagePatch[k];
+  if (--stagePending === 0) stagePatch = null;
+  toast(failed ? String(failed) : said);
+  pollFast(30000);
+  await loadStatus();
+}
+function setPaused(stage, paused) {
+  const what = stage === "walk" ? "Finding files" : "Reading";
+  return stageAct({ req: "set_paused", stage, paused }, stage === "walk" ? { walk_paused: paused } : { read_paused: paused },
+    paused ? `${what} is paused on this PC until you resume it. Other PCs carry on.` : `${what} resumed on this PC.`);
+}
+/** Do a stage's work now: list every drive again (or one, `root`), or start reading at once. Also ends a pause. */
+function runNow(stage, root, name) {
+  const req = { req: "run_now", stage };
+  if (root) req.root = root;
+  if (stage === "walk") return stageAct(req, { walk_paused: false }, root ? `Listing ${name || root} again now.` : "Listing every drive again now. Progress shows at the bottom of the window.");
+  return stageAct(req, { read_paused: false }, "Reading starts now, without waiting for the file list.");
+}
+function setSpeed(mode, minutes) {
+  const until = mode === "full" && minutes ? nowSecs() + minutes * 60 : 0;
+  // A speed without a time limit is also the saved setting: keep an open Settings form in step.
+  if (!until && $("settingsDlg").open) $("s-speed").value = mode;
+  return stageAct({ req: "set_speed", mode, minutes: minutes || 0 }, { speed: mode, speed_until: until },
+    until ? `Full speed until ${fmtClock(until)}, then back to the speed set in Settings.`
+      : mode === "full" ? "Full speed until you change it." : mode === "gentle" ? "Reading at the minimum only, until you change it." : "Reading speed is automatic.");
+}
+/** The manual controls of a stage as the status stands: [{key, label, hint, run, pick, cur} | {sep}]. */
+function stageActions(stage, p) {
+  if (stage === "walk") return [
+    p.walkPaused
+      ? { key: "walk-pause", label: "Resume finding files", hint: "Carry on listing the drives on this PC.", run: () => setPaused("walk", false) }
+      : { key: "walk-pause", label: "Pause finding files", hint: "Stop listing drives on this PC until you resume it. Other PCs carry on.", run: () => setPaused("walk", true) },
+    { key: "walk-now", label: "Find files now", hint: "List every drive again now, to pick up new, moved and deleted files.", run: () => runNow("walk") },
+  ];
+  const timed = p.speedUntil;
+  const acts = [
+    p.readPaused
+      ? { key: "read-pause", label: "Resume reading", hint: "Carry on reading documents on this PC.", run: () => setPaused("read", false) }
+      : { key: "read-pause", label: "Pause reading", hint: "Stop reading documents on this PC until you resume it. Other PCs carry on.", run: () => setPaused("read", true) },
+    { key: "read-now", label: "Read now", hint: "Start reading at once, without waiting for the file list.", run: () => runNow("read") },
+    { sep: true },
+    { key: "speed-hour", pick: true, cur: !!timed, label: timed ? `Full speed until ${fmtClock(timed)}` : "Full speed for 1 hour", hint: "Every core for an hour, even while the PC is in use; then back to the speed set in Settings.", run: () => setSpeed("full", 60) },
+  ];
+  if (p.speed === "full" && !timed) acts.push({ key: "speed-full", pick: true, cur: true, label: "Full speed, until changed", hint: "Every core, even while the PC is in use.", run: () => setSpeed("full", 0) });
+  acts.push(
+    { key: "speed-gentle", pick: true, cur: p.speed === "gentle", label: "Gentle (minimum only)", hint: "The minimum only, whatever the PC is doing.", run: () => setSpeed("gentle", 0) },
+    { key: "speed-auto", pick: true, cur: p.speed === "auto", label: "Automatic speed", hint: "As fast as the PC allows without getting in your way.", run: () => setSpeed("auto", 0) },
+  );
+  return acts;
+}
+/** The same actions as plain buttons, each with its line of explanation (Monitor); `compact`: buttons only, explanation as tooltip (Settings). */
+function stageButtons(stage, p, compact) {
+  const box = el("div", compact ? "idx-acts" : "stage-acts");
+  for (const a of stageActions(stage, p)) {
+    if (a.sep || (compact && a.key === "walk-now")) continue; // Settings has "Find files now" beside Save
+    const b = el("button", "small" + (a.cur ? " cur" : ""), a.label); b.type = "button";
+    b.dataset.key = a.key; b.title = a.hint;
+    if (a.pick) b.setAttribute("aria-pressed", String(!!a.cur));
+    b.onclick = a.run;
+    if (compact) { box.append(b); continue; }
+    const row = el("div", "stage-act");
+    row.append(b, el("span", null, a.hint));
+    box.append(row);
+  }
+  return box;
+}
+// The menu of a stage in the strip.
+let stageMenuFor = null;
+function openStageMenu(btn) {
+  const m = $("stageMenu");
+  m.replaceChildren();
+  for (const a of stageActions(btn.dataset.stage, progressModel(state.lastStatus?.status))) {
+    if (a.sep) { m.append(el("div", "sep")); continue; }
+    const b = el("button", (a.pick ? "pick" : "") + (a.cur ? " cur" : "")); b.type = "button";
+    b.setAttribute("role", a.pick ? "menuitemradio" : "menuitem");
+    if (a.pick) b.setAttribute("aria-checked", String(!!a.cur));
+    b.append(el("span", "mi-label", a.label), el("span", "mi-hint", a.hint));
+    b.onclick = a.run;
+    m.append(b);
+  }
+  m.hidden = false;
+  const r = btn.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + "px";
+  m.style.top = Math.max(8, r.top - m.offsetHeight - 6) + "px";
+  stageMenuFor = btn;
+  btn.setAttribute("aria-expanded", "true");
+  m.querySelector("button")?.focus();
+}
+function closeStageMenu(refocus) {
+  const m = $("stageMenu");
+  if (m.hidden) return;
+  m.hidden = true;
+  stageMenuFor?.setAttribute("aria-expanded", "false");
+  if (refocus) stageMenuFor?.focus();
+  stageMenuFor = null;
+}
+for (const id of ["stage1Menu", "stage2Menu"]) {
+  $(id).onclick = (e) => {
+    e.stopPropagation();
+    const again = stageMenuFor === $(id);
+    closeStageMenu();
+    if (!again) openStageMenu($(id));
+  };
+}
+$("stageMenu").addEventListener("click", (e) => e.stopPropagation());
+$("stageMenu").addEventListener("keydown", (e) => {
+  const items = [...$("stageMenu").querySelectorAll("button")];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+  else if (e.key === "Home") { e.preventDefault(); items[0]?.focus(); }
+  else if (e.key === "End") { e.preventDefault(); items[items.length - 1]?.focus(); }
+  else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeStageMenu(true); }
+  else if (e.key === "Tab") closeStageMenu();
+});
+document.addEventListener("click", () => closeStageMenu());
+$("stage1Resume").onclick = () => setPaused("walk", false);
+$("stage2Resume").onclick = () => setPaused("read", false);
 /** Everything else that shows progress follows the latest status. */
 function onStatus(p) {
   updateWalkBanner(p);
@@ -92,8 +256,9 @@ function updateWalkBanner(p) {
     if (p.firstWalk) lines.push(`Still finding files — results may be incomplete (${plural(ix.files_seen || p.s.files_indexed, "file")} found so far).`);
     else lines.push(`Checking the drives for new files (${plural(ix.files_seen, "file")} checked so far). Files added since ${fmtAgo(ix.last_complete)} may not show yet.`);
   }
+  if (ix && p.walkPaused && p.firstWalk && state.query) lines.push("Finding files is paused on this PC before its first listing finished, so results may be incomplete.");
   if (state.query && state.view.length && looksLikeFileName(state.query) && p.waiting > 0 && p.scopeCount) {
-    lines.push(`Text inside PDFs is searched only in PDFs already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far.`);
+    lines.push(`Text inside documents is searched only in documents already read: ${fmtNum(p.read)} of ${fmtNum(p.total)} in your reading folders so far.`);
   }
   $("walkBannerText").textContent = lines.join(" ");
   $("walkBanner").hidden = !lines.length || state.view_ !== "search";
@@ -112,27 +277,33 @@ function scopeFeedback(p) {
   if (!scopeWatch) return;
   const sc = (p.scopes || []).find((x) => String(x.folder).toLowerCase() === scopeWatch.folder.toLowerCase());
   let msg = "";
-  if (!p.scopes) msg = `${scopeWatch.folder} added. Its PDFs will be read in the background.`;
-  else if (!sc) msg = `${scopeWatch.folder} added. Counting its PDFs…`;
+  if (!p.scopes) msg = `${scopeWatch.folder} added. Its documents will be read in the background.`;
+  else if (!sc) msg = `${scopeWatch.folder} added. Counting its documents…`;
   else if (sc.note && sc.note !== "ok" && sc.note !== "not indexed yet") msg = `${scopeWatch.folder}: ${sc.note}. ${SCOPE_NOTE[sc.note] || ""}`;
-  else if (sc.pdfs > 0) msg = `${sc.folder} — ${plural(sc.waiting, "PDF")} queued for reading` + (sc.read ? `, ${fmtNum(sc.read)} already read` : "") + ".";
-  else if (sc.note === "not indexed yet" || p.walking) msg = `${scopeWatch.folder} added. Its PDFs are queued as soon as stage 1 lists it.`;
-  else msg = `${scopeWatch.folder} added. No PDFs found in it.`;
+  else if (sc.pdfs > 0) msg = `${sc.folder} — ${plural(sc.waiting, "document")} queued for reading` + (sc.read ? `, ${fmtNum(sc.read)} already read` : "") + ".";
+  else if (sc.note === "not indexed yet" || p.walking) msg = `${scopeWatch.folder} added. Its documents are queued as soon as stage 1 lists it.`;
+  else msg = `${scopeWatch.folder} added. No documents found in it.`;
   if (msg !== scopeWatch.told) { toast(msg); scopeWatch.told = msg; }
   const settled = sc && (sc.pdfs > 0 || (sc.note && !["ok", "not indexed yet"].includes(sc.note)));
   if (settled || !p.scopes || Date.now() - scopeWatch.since > 10 * 60000) scopeWatch = null;
 }
 
-// Settings: the same two lines next to "Refresh index now".
+// Settings: the same two lines, with the same manual buttons, above "Find files now".
+holdWhilePressed($("s-indexState"));
 function renderSettingsIndex(p) {
   p = p || progressModel(state.lastStatus?.status);
   const box = $("s-indexState");
-  box.replaceChildren();
-  for (const [name, st] of [["Finding files", stageFind(p)], ["Reading PDFs", stageRead(p)]]) {
-    const row = el("div", "idx-line " + st.cls);
-    row.append(el("span", "st-dot"), el("b", null, name + ": "), el("span", null, st.text));
-    box.append(row);
-  }
+  const manual = newReader() && !!p.ix;
+  redrawKeeping(box, () => {
+    box.replaceChildren();
+    for (const [stage, name, st] of [["walk", "Finding files", stageFind(p)], ["read", "Reading documents", stageRead(p)]]) {
+      const row = el("div", "idx-line " + st.cls);
+      row.append(el("span", "st-dot"), el("b", null, name + ": "), stateWord(st), el("span", null, st.text));
+      box.append(row);
+      if (manual) box.append(stageButtons(stage, p, true));
+    }
+    if (manual) box.append(el("div", "idx-note", "These buttons act at once, on this PC only. They do not wait for Save."));
+  });
 }
 const SERVER_BADGE = {
   connected: ["ok", "Office server connected"],
@@ -160,19 +331,47 @@ function setServer(srv) {
 }
 $("sbServer").onclick = () => openSettings(false, "serverSection");
 
-// ---------- shared reading cache: required on every PC ----------
+// ---------- office index folder: required on every PC ----------
 // Not set up -> a message that cannot be dismissed. Ignored for a minute ->
-// Settings opens with the cache section highlighted. Closing Settings without
-// fixing it starts the same cycle again. A share that is only temporarily
-// unreachable gets a quiet notice instead.
+// Settings opens with the folder section highlighted. Closing Settings without
+// fixing it starts the same cycle again. While the share cannot be reached the
+// notice stays (1.1: text inside documents cannot be searched until it is back).
 const CACHE_NAG_MS = 60 * 1000;
 let cacheNagSince = 0;
 function cacheNeedsUser(c) { return c && (c.state === "not_set" || c.state === "no_access"); }
-function enforceCache(c) {
+/** The office index folder needs setting up on this PC (1.1: status.store; before: status.cache). */
+function storeNeedsUser(s) {
+  const st = s?.store?.state;
+  return st ? st === "not set" || st === "no access" : !!cacheNeedsUser(s?.cache);
+}
+function enforceCache(s) {
+  const st = s.store && s.store.state ? s.store : null;
+  if (!st) { enforceOldCache(s.cache); return; }
+  const b = $("cacheBanner");
+  const say = (text, action) => {
+    $("cacheBannerText").textContent = text;
+    $("cacheBannerAction").hidden = !action; $("cacheBannerClose").hidden = true;
+    b.hidden = false;
+  };
+  if (storeNeedsUser(s)) {
+    say(`The office index folder isn't working on this PC${st.message ? ": " + st.message : ""}. Set it up so this PC searches the office index and documents already read on other PCs aren't read again here.`, true);
+    if (!cacheNagSince) cacheNagSince = Date.now();
+    if (Date.now() - cacheNagSince > CACHE_NAG_MS && !$("settingsDlg").open) openSettings(true);
+    return;
+  }
+  cacheNagSince = 0;
+  if (st.state === "offline") {
+    say(`The office index folder (${st.path}) is not reachable. Searching text inside documents resumes when it is back` + (st.unpublished > 0 ? `; this PC keeps ${plural(st.unpublished, "new reading")} until then.` : "."), false);
+  } else if (st.state === "disabled") {
+    say(`The office index is switched off on this PC${st.message ? ": " + st.message : ""}.`, false);
+  } else b.hidden = true;
+}
+// An older background reader: its shared folder is only a store of finished readings.
+function enforceOldCache(c) {
   if (!c) return;
   const b = $("cacheBanner");
   if (cacheNeedsUser(c)) {
-    $("cacheBannerText").textContent = `The shared reading cache isn't working on this PC: ${c.message}. Set it up so drawings already read on other PCs aren't read again here.`;
+    $("cacheBannerText").textContent = `The office index folder isn't working on this PC: ${c.message}. Set it up so drawings already read on other PCs aren't read again here.`;
     $("cacheBannerAction").hidden = false; $("cacheBannerClose").hidden = true;
     b.hidden = false;
     if (!cacheNagSince) cacheNagSince = Date.now();
@@ -180,7 +379,7 @@ function enforceCache(c) {
   } else if (c.state === "offline") {
     cacheNagSince = 0;
     if (!b.dataset.dismissed) {
-      $("cacheBannerText").textContent = `The shared reading cache (${c.path}) can't be reached right now. Sleuth keeps reading on this PC and will use it again when it's back.`;
+      $("cacheBannerText").textContent = `The office index folder (${c.path}) can't be reached right now. Sleuth keeps reading on this PC and will use it again when it's back.`;
       $("cacheBannerAction").hidden = true; $("cacheBannerClose").hidden = false;
       b.hidden = false;
     }
@@ -210,7 +409,7 @@ async function testCache() {
   return r.check;
 }
 $("s-cacheTest").onclick = () => testCache().catch((e) => { $("s-cacheState").textContent = String(e); });
-$("settingsDlg").addEventListener("close", () => { if (cacheNeedsUser(state.lastStatus?.status?.cache)) cacheNagSince = Date.now(); });
+$("settingsDlg").addEventListener("close", () => { if (storeNeedsUser(state.lastStatus?.status)) cacheNagSince = Date.now(); });
 
 // ---------- settings ----------
 async function loadSettings() {
@@ -240,6 +439,16 @@ async function openSettings(focusCache, focusSection) {
   $("s-backend").querySelector('[value="directml"]').hidden = s.ocr_backend !== "directml";
   $("s-titleblock").checked = s.ocr_missing_title_block !== false;
   $("s-busy").value = s.busy_cpu_percent; $("s-keep").checked = s.keep_indexing_when_closed;
+  // 1.1 settings; an older reader's settings do not have them, and the controls stay hidden.
+  $("s-speedRow").hidden = !SPEED_LABEL[s.read_speed];
+  $("s-speed").value = SPEED_LABEL[s.read_speed] ? s.read_speed : "auto";
+  $("kindsSection").hidden = !Array.isArray(s.kinds_not_read);
+  $("s-kinds").replaceChildren(...Object.keys(FILE_KIND).map((k) => {
+    const lab = el("label", "check");
+    const cb = el("input"); cb.type = "checkbox"; cb.dataset.kind = k; cb.checked = !(s.kinds_not_read || []).includes(k);
+    lab.append(cb, " " + KIND_LONG[k]);
+    return lab;
+  }));
   $("s-cache").value = s.shared_cache_dir || ""; $("s-per").value = s.listings_per_server;
   $("s-timeout").value = s.listing_timeout_secs; $("s-rescan").value = s.name_rescan_minutes;
   $("s-excluded").value = (s.excluded || []).join("\n"); $("s-channel").value = s.update_channel;
@@ -262,7 +471,7 @@ async function openSettings(focusCache, focusSection) {
   renderSettingsIndex();
   $("settingsDlg").showModal();
   checkRollback();
-  if (focusCache || cacheNeedsUser(c)) highlightCache();
+  if (focusCache || storeNeedsUser(st)) highlightCache();
   else if (focusSection) $(focusSection).scrollIntoView({ block: "start" });
 }
 $("s-cachePick").onclick = async () => { const p = await invoke("pick_folder"); if (p) { $("s-cache").value = p; testCache().catch(() => {}); } };
@@ -427,10 +636,17 @@ $("s-save").onclick = async () => {
       tag_rules: tagRules,
       field_rules: fieldRules,
     };
+    if (!$("s-speedRow").hidden) s.read_speed = $("s-speed").value;
+    if (!$("kindsSection").hidden) {
+      // Unticked = found by file name only. Types this window does not list stay as they were.
+      const boxes = [...$("s-kinds").querySelectorAll("input")];
+      const listed = boxes.map((b) => b.dataset.kind);
+      s.kinds_not_read = [...(state.settings.kinds_not_read || []).filter((k) => !listed.includes(k)), ...boxes.filter((b) => !b.checked).map((b) => b.dataset.kind)];
+    }
     const c = await testCache();
     if (c.state === "not_set" || c.state === "no_access") {
       highlightCache();
-      throw new Error("Choose a shared folder that works before saving. Every PC needs the shared reading cache.");
+      throw new Error("Choose a shared folder that works before saving. Every PC needs the office index folder.");
     }
     await saveSettings(s);
     $("settingsDlg").close();
@@ -439,6 +655,7 @@ $("s-save").onclick = async () => {
   } catch (e) { $("s-error").textContent = e.message || String(e); $("s-error").hidden = false; }
 };
 $("s-rescanNow").onclick = async () => {
+  if (newReader()) { runNow("walk"); return; }
   await call({ req: "rescan_now" });
   toast("Checking the drives for new files in the background. Progress shows at the bottom of the window.");
   pollFast(60000); loadStatus();
@@ -480,8 +697,6 @@ async function runInstall(command, channel) {
 // installed).
 const UPDATE_EVERY = 3600 * 1000;
 const upd = { ready: null, busy: null, lastCheck: 0, asked: "" };
-function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
-function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* private mode */ } }
 function noteLines(notes) {
   // The first paragraph of the release notes, unwrapped and without Markdown.
   const para = String(notes || "").trim().split(/\r?\n\s*\r?\n/)[0] || "";
@@ -576,6 +791,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
     $("ctx").hidden = true; $("exportMenu").hidden = true; $("syntaxPop").hidden = true;
+    closeStageMenu(true);
   }
 });
 
@@ -585,6 +801,11 @@ document.addEventListener("keydown", (e) => {
   $("q").focus();
   if (!(await waitForWorker())) return;
   await Promise.all([loadDrives(), loadSettings(), loadStatus()]).catch((e) => toast(String(e)));
+  // This PC's name as the office sees it, to tell "listed by this PC" from another PC.
+  if (newReader()) call({ req: "monitor" }).then((r) => {
+    const name = r.monitor?.pcs?.[0]?.name;
+    if (name && name !== state.pcName) { state.pcName = name; if (state.lastStatus) useStatus(state.lastStatus); }
+  }).catch(() => {});
   // Apply "keep reading in the background" from the first start, not only after a save.
   if (state.settings) invoke("set_autostart", { enabled: !!state.settings.keep_indexing_when_closed }).catch(() => {});
   renderEmpty();

@@ -36,13 +36,14 @@ pub fn revision_key(rev: Option<&str>, order: RevisionOrder) -> (u8, u32, String
     (group, if numeric { n } else { r.len() as u32 }, r)
 }
 
-struct Occ {
-    norm: String,
-    category: String,
-    raw: String,
-    page: u32,
-    conf: f32,
-    bbox: NormBox,
+/// One tag as found on a page of a file.
+pub(crate) struct Occ {
+    pub norm: String,
+    pub category: String,
+    pub raw: String,
+    pub page: u32,
+    pub conf: f32,
+    pub bbox: NormBox,
 }
 
 impl Store {
@@ -148,7 +149,7 @@ impl Store {
         Ok(out)
     }
 
-    fn file_occurrences(&self, file_id: i64) -> Result<Vec<Occ>> {
+    pub(crate) fn file_occurrences(&self, file_id: i64) -> Result<Vec<Occ>> {
         let mut st = self.conn.prepare_cached(
             "SELECT t.norm, t.category, o.raw, o.page, o.conf, o.x, o.y, o.w, o.h FROM tag_occurrences o JOIN engineering_tags t ON t.id=o.tag_id WHERE o.file_id=?1 ORDER BY o.page, o.y, o.x",
         )?;
@@ -168,76 +169,86 @@ impl Store {
     /// of tags found unchanged in both.
     pub fn compare(&self, old_path: &str, new_path: &str) -> Result<(Vec<TagChange>, u32)> {
         let (a, b) = (self.read_file_id(old_path)?, self.read_file_id(new_path)?);
-        let (old, new) = (self.file_occurrences(a)?, self.file_occurrences(b)?);
-        let best = |list: &[Occ]| {
-            let mut m: HashMap<String, usize> = HashMap::new();
-            for (i, o) in list.iter().enumerate() {
-                let e = m.entry(o.norm.clone()).or_insert(i);
-                if o.conf > list[*e].conf {
-                    *e = i;
-                }
-            }
-            m
-        };
-        let (bo, bn) = (best(&old), best(&new));
-        let mut only_old: Vec<usize> = bo.iter().filter(|(k, _)| !bn.contains_key(*k)).map(|(_, i)| *i).collect();
-        let mut only_new: Vec<usize> = bn.iter().filter(|(k, _)| !bo.contains_key(*k)).map(|(_, i)| *i).collect();
-        only_old.sort();
-        only_new.sort();
-        let unchanged = bo.keys().filter(|k| bn.contains_key(*k)).count() as u32;
-        let mut changes = Vec::new();
-        let mut used_new = vec![false; new.len()];
-        let centre = |b: &NormBox| (b.x + b.w / 2.0, b.y + b.h / 2.0);
-        for &i in &only_old {
-            let o = &old[i];
-            // 1. the same characters up to look-alikes: an OCR question, not a change
-            let look = only_new.iter().copied().find(|&j| !used_new[j] && fold_form(&new[j].norm) == fold_form(&o.norm));
-            if let Some(j) = look {
-                used_new[j] = true;
-                changes.push(change(ChangeKind::Verify, Some(o), Some(&new[j]), "same characters except look-alikes (O/0, I/1, S/5, B/8); check both pages"));
-                continue;
-            }
-            // 2. a different tag of the same kind in the same place
-            let (ox, oy) = centre(&o.bbox);
-            let near = only_new.iter().copied().find(|&j| {
-                let n = &new[j];
-                let (nx, ny) = centre(&n.bbox);
-                !used_new[j] && n.page == o.page && n.category == o.category && (nx - ox).abs() < SAME_PLACE && (ny - oy).abs() < SAME_PLACE
-            });
-            if let Some(j) = near {
-                used_new[j] = true;
-                let n = &new[j];
-                if o.conf < LOW_CONFIDENCE || n.conf < LOW_CONFIDENCE {
-                    changes.push(change(ChangeKind::Verify, Some(o), Some(n), "reads differently in the same place, but one reading is low-confidence"));
-                } else {
-                    changes.push(change(ChangeKind::Changed, Some(o), Some(n), "a different tag of the same kind in the same place"));
-                }
-                continue;
-            }
-            if o.conf < LOW_CONFIDENCE {
-                changes.push(change(ChangeKind::Verify, Some(o), None, "only in the old revision, and read there with low confidence"));
-            } else {
-                changes.push(change(ChangeKind::Removed, Some(o), None, "only in the old revision"));
+        Ok(compare_occurrences(&self.file_occurrences(a)?, &self.file_occurrences(b)?))
+    }
+
+    /// Tags of one file that link documents (drawing numbers and specs link
+    /// too much to count).
+    pub(crate) fn linking_tags(&self, file_id: i64) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached("SELECT DISTINCT t.norm FROM tag_occurrences o JOIN engineering_tags t ON t.id=o.tag_id WHERE o.file_id=?1 AND t.category NOT IN ('drawing','spec')")?;
+        Ok(st.query_map([file_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Read documents carrying any of `norms`: `(path, name, drawing number,
+    /// the shared tags, first page one is on)`.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn files_with_tags(&self, norms: &[String], scope: &Scope) -> Result<Vec<(String, String, Option<String>, Vec<String>, u32)>> {
+        let mut found: HashMap<String, (String, Option<String>, Vec<String>, u32)> = HashMap::new();
+        for chunk in norms.chunks(300) {
+            // The scope's parameters follow the tags.
+            let (where_, sp) = scope.sql_from(chunk.len());
+            let marks: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+            let sql = format!(
+                "SELECT f.path, f.name, m.drawing_no, t.norm, MIN(o.page)
+                 FROM tag_occurrences o JOIN engineering_tags t ON t.id=o.tag_id JOIN files f ON f.id=o.file_id
+                 LEFT JOIN drawing_metadata m ON m.file_id=f.id
+                 WHERE t.norm IN ({}) AND f.read_state={}{where_} GROUP BY f.id, t.id LIMIT 20000",
+                marks.join(","),
+                state::READ
+            );
+            let mut st = self.conn.prepare(&sql)?;
+            let mut args: Vec<rusqlite::types::Value> = chunk.iter().cloned().map(Into::into).collect();
+            args.extend(sp.iter().cloned().map(Into::into));
+            let rows = st.query_map(params_from_iter(args), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?, r.get::<_, u32>(4)?)))?;
+            for row in rows {
+                let (path, name, dwg, norm, page) = row?;
+                let e = found.entry(path).or_insert((name, dwg, Vec::new(), page));
+                e.2.push(norm);
+                e.3 = e.3.min(page);
             }
         }
-        for &j in &only_new {
-            if used_new[j] {
-                continue;
-            }
-            let n = &new[j];
-            if n.conf < LOW_CONFIDENCE {
-                changes.push(change(ChangeKind::Verify, None, Some(n), "only in the new revision, and read there with low confidence"));
-            } else {
-                changes.push(change(ChangeKind::Added, None, Some(n), "only in the new revision"));
-            }
-        }
-        changes.sort_by_key(|c| match c.kind {
-            ChangeKind::Changed => 0,
-            ChangeKind::Added => 1,
-            ChangeKind::Removed => 2,
-            ChangeKind::Verify => 3,
-        });
-        Ok((changes, unchanged))
+        Ok(found.into_iter().map(|(path, (name, dwg, shared, page))| (path, name, dwg, shared, page)).collect())
+    }
+
+    /// The file, page, box and text of one line.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn line_file(&self, line_id: i64) -> Result<Option<(i64, String, u32, NormBox, String)>> {
+        Ok(self
+            .conn
+            .query_row("SELECT l.file_id, f.path, l.page, l.x, l.y, l.w, l.h, l.text FROM lines l JOIN files f ON f.id=l.file_id WHERE l.id=?1", [line_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, bbox(r, 3)?, r.get(7)?)))
+            .optional()?)
+    }
+
+    /// The OCR line of a file at one place saying `text` (the same line in
+    /// another copy of the reading).
+    pub(crate) fn find_line(&self, file_id: i64, page: u32, b: NormBox, text: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id FROM lines WHERE file_id=?1 AND page=?2 AND source=?3 AND text=?4 AND abs(x-?5)<1e-4 AND abs(y-?6)<1e-4 LIMIT 1",
+                params![file_id, page, source_code(TextSource::Ocr), text, b.x as f64, b.y as f64],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The file, page, place and text of one correction.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn correction_place(&self, correction_id: i64) -> Result<Option<(i64, String, u32, f64, f64, String)>> {
+        Ok(self
+            .conn
+            .query_row("SELECT c.file_id, f.path, c.page, c.x, c.y, c.corrected FROM corrections c JOIN files f ON f.id=c.file_id WHERE c.id=?1", [correction_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .optional()?)
+    }
+
+    /// The same correction in another copy of the reading.
+    pub(crate) fn find_correction(&self, file_id: i64, page: u32, x: f64, y: f64, corrected: &str) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM corrections WHERE file_id=?1 AND page=?2 AND stale=0 AND corrected=?5 AND abs(x-?3)<1e-4 AND abs(y-?4)<1e-4 ORDER BY id DESC LIMIT 1", params![file_id, page, x, y, corrected], |r| r.get(0))
+            .optional()?)
     }
 
     /// Other read documents sharing tags with this one (not counting
@@ -366,6 +377,81 @@ impl Store {
             .query_row("SELECT f.path, l.page, l.x, l.y, l.w, l.h FROM lines l JOIN files f ON f.id=l.file_id WHERE l.id=?1", [line_id], |r| Ok((r.get(0)?, r.get(1)?, bbox(r, 2)?)))
             .optional()?)
     }
+}
+
+/// Compare the tags of two revisions (each as found by
+/// [`Store::file_occurrences`]). Returns the changes and the number of tags
+/// found unchanged in both.
+pub(crate) fn compare_occurrences(old: &[Occ], new: &[Occ]) -> (Vec<TagChange>, u32) {
+    let best = |list: &[Occ]| {
+        let mut m: HashMap<String, usize> = HashMap::new();
+        for (i, o) in list.iter().enumerate() {
+            let e = m.entry(o.norm.clone()).or_insert(i);
+            if o.conf > list[*e].conf {
+                *e = i;
+            }
+        }
+        m
+    };
+    let (bo, bn) = (best(old), best(new));
+    let mut only_old: Vec<usize> = bo.iter().filter(|(k, _)| !bn.contains_key(*k)).map(|(_, i)| *i).collect();
+    let mut only_new: Vec<usize> = bn.iter().filter(|(k, _)| !bo.contains_key(*k)).map(|(_, i)| *i).collect();
+    only_old.sort();
+    only_new.sort();
+    let unchanged = bo.keys().filter(|k| bn.contains_key(*k)).count() as u32;
+    let mut changes = Vec::new();
+    let mut used_new = vec![false; new.len()];
+    let centre = |b: &NormBox| (b.x + b.w / 2.0, b.y + b.h / 2.0);
+    for &i in &only_old {
+        let o = &old[i];
+        // 1. the same characters up to look-alikes: an OCR question, not a change
+        let look = only_new.iter().copied().find(|&j| !used_new[j] && fold_form(&new[j].norm) == fold_form(&o.norm));
+        if let Some(j) = look {
+            used_new[j] = true;
+            changes.push(change(ChangeKind::Verify, Some(o), Some(&new[j]), "same characters except look-alikes (O/0, I/1, S/5, B/8); check both pages"));
+            continue;
+        }
+        // 2. a different tag of the same kind in the same place
+        let (ox, oy) = centre(&o.bbox);
+        let near = only_new.iter().copied().find(|&j| {
+            let n = &new[j];
+            let (nx, ny) = centre(&n.bbox);
+            !used_new[j] && n.page == o.page && n.category == o.category && (nx - ox).abs() < SAME_PLACE && (ny - oy).abs() < SAME_PLACE
+        });
+        if let Some(j) = near {
+            used_new[j] = true;
+            let n = &new[j];
+            if o.conf < LOW_CONFIDENCE || n.conf < LOW_CONFIDENCE {
+                changes.push(change(ChangeKind::Verify, Some(o), Some(n), "reads differently in the same place, but one reading is low-confidence"));
+            } else {
+                changes.push(change(ChangeKind::Changed, Some(o), Some(n), "a different tag of the same kind in the same place"));
+            }
+            continue;
+        }
+        if o.conf < LOW_CONFIDENCE {
+            changes.push(change(ChangeKind::Verify, Some(o), None, "only in the old revision, and read there with low confidence"));
+        } else {
+            changes.push(change(ChangeKind::Removed, Some(o), None, "only in the old revision"));
+        }
+    }
+    for &j in &only_new {
+        if used_new[j] {
+            continue;
+        }
+        let n = &new[j];
+        if n.conf < LOW_CONFIDENCE {
+            changes.push(change(ChangeKind::Verify, None, Some(n), "only in the new revision, and read there with low confidence"));
+        } else {
+            changes.push(change(ChangeKind::Added, None, Some(n), "only in the new revision"));
+        }
+    }
+    changes.sort_by_key(|c| match c.kind {
+        ChangeKind::Changed => 0,
+        ChangeKind::Added => 1,
+        ChangeKind::Removed => 2,
+        ChangeKind::Verify => 3,
+    });
+    (changes, unchanged)
 }
 
 fn remove_correction(tx: &rusqlite::Transaction, id: i64) -> Result<()> {

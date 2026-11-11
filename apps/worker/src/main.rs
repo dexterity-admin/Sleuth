@@ -1,10 +1,13 @@
-//! `sleuth-worker.exe`: indexes drives, reads PDFs and answers the Sleuth
-//! window over a per-user named pipe. One instance per user.
+//! `sleuth-worker.exe`: keeps the file list, has documents read and answers
+//! the Sleuth window over a per-user named pipe. One instance per user.
+//!
+//! Started as `sleuth-worker --reader fast|ocr` it is a reader process
+//! instead: it reads the files the worker hands it and nothing else.
 
 #![windows_subsystem = "windows"]
 
 use anyhow::Result;
-use sleuth_core::protocol::{Envelope, Event, PROTOCOL_VERSION, Request, pipe_name};
+use sleuth_core::protocol::{Envelope, Event, PROTOCOL_VERSION, Request, Stage, instance_name, pipe_name};
 use sleuth_core::settings::{Settings, data_dir};
 use sleuth_engine::service::{Engine, EventTx};
 use std::sync::Arc;
@@ -35,8 +38,7 @@ fn init_logging() {
 
 /// Exit quietly when another worker already runs for this user.
 fn single_instance() -> bool {
-    let user = std::env::var("USERNAME").unwrap_or_default();
-    let name = HSTRING::from(format!("Local\\Sleuth-worker-{user}"));
+    let name = HSTRING::from(format!("Local\\Sleuth-worker-{}", instance_name()));
     unsafe {
         let h = CreateMutexW(None, true, &name);
         // The handle is kept for the life of the process on purpose.
@@ -45,6 +47,10 @@ fn single_instance() -> bool {
 }
 
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--reader") {
+        // A reader process: no pipe, no index, no log file of its own.
+        return sleuth_engine::readjob::serve();
+    }
     if !single_instance() {
         return Ok(());
     }
@@ -210,17 +216,30 @@ fn dispatch(req: Envelope<Request>, engine: &Arc<Engine>, tx: &EventTx) {
             tokio::task::spawn_blocking(move || reply(&tx, id, e.status().map(|(status, failed)| Event::Status { status, failed })));
         }
         Request::Drives => {
-            let drives = sleuth_core::paths::DriveMap::current();
-            *e.drives.write().unwrap() = drives.clone();
-            reply(&tx, id, Ok(Event::Drives { drives: drives.drives }));
+            tokio::task::spawn_blocking(move || {
+                let drives = e.current_drives();
+                *e.drives.write().unwrap() = drives.clone();
+                reply(&tx, id, Ok(Event::Drives { drives: drives.drives }));
+            });
         }
         Request::GetSettings => reply(&tx, id, Ok(Event::Settings { settings: Box::new(e.settings.read().unwrap().clone()) })),
         Request::SetSettings { settings } => {
             tokio::task::spawn_blocking(move || reply(&tx, id, e.set_settings(*settings).map(|_| Event::Ok)));
         }
         Request::RescanNow => {
-            e.rescan_now();
-            reply(&tx, id, Ok(Event::Ok));
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.run_now(Stage::Walk, None).map(|_| Event::Ok)));
+        }
+        Request::SetPaused { stage, paused } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.set_paused(stage, paused).map(|_| Event::Ok)));
+        }
+        Request::RunNow { stage, root } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.run_now(stage, root.as_deref()).map(|_| Event::Ok)));
+        }
+        Request::SetSpeed { mode, minutes } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.set_speed(mode, minutes).map(|_| Event::Ok)));
+        }
+        Request::TextPreview { path, page, query, tag } => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.text_preview(&path, page, &query, tag.as_deref())));
         }
         Request::ReadNow { path } => {
             tokio::task::spawn_blocking(move || reply(&tx, id, e.read_now(&path).map(|_| Event::Ok)));
