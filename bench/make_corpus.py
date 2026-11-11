@@ -325,6 +325,55 @@ def small_print():
 small_print()
 
 
+def dense_sheet():
+    """A scanned A3 isometric as full as real ones are: a bill of material of
+    30 rows, 14 notes, 50 dimensions, 20 weld numbers and 16 tags, some 250
+    pieces of text. On the other sheets finding the text is nearly all the
+    work; here reading it is half of it, as on real drawings."""
+    notes = ["ALL DIMENSIONS IN MM UNLESS STATED OTHERWISE.", "FOR LINE DATA REFER LINE LIST DOC-1001-17."]
+    im, d = sheet("PIPING ISOMETRIC & BOM", "ISO-4001-01", "B", notes)
+    rnd = random.Random(23)
+    tags = ['8"-P-4001-A1B', '6"-P-4002-A1B', '4"-CW-4003-B2A', '2"-D-4004-B2A', "PSV-4101", "PSV-4102", "FV-4201", "FV-4202",
+            "HV-4301", "HV-4302", "XV-4401", "TT-4501", "PT-4502", "LT-4503", "FT-4504", "PI-4505"]
+    # Bill of material, top right.
+    bx, by = W - 1500, 110
+    d.rectangle([bx, by, W - 60, by + 1290], outline=0, width=3)
+    f, fb = font("arial.ttf", 22), font("arialbd.ttf", 22)
+    for a, (t, x) in enumerate([("PT", 16), ("DESCRIPTION", 80), ("ITEM CODE", 980), ("QTY", 1320)]):
+        d.text((bx + x, by + 12), t, font=fb, fill=0)
+    parts = ["PIPE SMLS, ASTM A106 GR.B, SCH-40", "ELBOW 90 DEG LR BW, ASTM A234 WPB", "TEE EQUAL BW, ASTM A234 WPB", "FLANGE WN CL150 RF, ASTM A105",
+             "GASKET SPIRAL WOUND CL150 RF", "STUD BOLT A193 B7 / A194 2H", "GATE VALVE CL150 RF, API 600", "REDUCER CONC BW, ASTM A234 WPB"]
+    for i in range(30):
+        y = by + 52 + i * 41
+        d.line([bx, y - 5, W - 60, y - 5], fill=0, width=1)
+        d.text((bx + 16, y), str(i + 1), font=f, fill=0)
+        d.text((bx + 80, y), f'{parts[i % len(parts)]}, {rnd.choice([2, 3, 4, 6, 8])}"', font=f, fill=0)
+        d.text((bx + 980, y), f"{rnd.choice(['PA', 'EL', 'TE', 'FL', 'GK', 'SB', 'VG', 'RC'])}{rnd.randrange(1000, 9999)}A1B", font=f, fill=0)
+        d.text((bx + 1320, y), rnd.choice(["1", "2", "4", "8", "16", "12.4 M", "3.1 M"]), font=f, fill=0)
+    # Notes, bottom middle.
+    more = ["HYDROTEST AS PER SPEC TS-400.", "SUPPORTS PER STD DWG SD-09.", "FIELD WELDS MARKED FW TO BE VERIFIED AT SITE.", "ALL BOLTS TO STRADDLE CENTRE LINES.",
+            "PAINTING AS PER SPEC PS-120, SYSTEM A-14.", "INSULATION THICKNESS REFER LINE LIST.", "GASKETS TO BE REPLACED AFTER HYDROTEST.", "VENTS AND DRAINS AS PER STD DWG SD-11.",
+            "PIPE SUPPORT TAGS REFER SUPPORT SCHEDULE.", "ELEVATIONS ARE TO CENTRE LINE OF PIPE.", "CO-ORDINATES ARE TO PLANT GRID.", "REFER P&ID PID-0101 FOR INSTRUMENT DETAILS.",
+            "DO NOT SCALE FROM THIS DRAWING.", "THIS SHEET SUPERSEDES REVISION A."]
+    for i, t in enumerate(more):
+        d.text((1100, H - 560 + i * 34), f"{i + 3}. {t}", font=f, fill=0)
+    # The run, its tags, dimensions and weld numbers, on the left two thirds.
+    xy = pipe_run(d, [(0, 0, 0), (700, 0, 0), (700, 0, -300), (700, 600, -300), (1200, 600, -300), (1200, 600, -700)], 900, 520, 0.8)
+    spots = [(140, 150), (640, 150), (1150, 150), (140, 420), (160, 700), (160, 980), (160, 1260), (160, 1540),
+             (700, 1260), (700, 1540), (1250, 1000), (1250, 1260), (1250, 1540), (600, 980), (1150, 760), (640, 420)]
+    for (x, y), t in zip(spots, tags):
+        label(d, (x, y), t, 28, box=t[0].isalpha())
+    fd = font("arial.ttf", 24)
+    for i in range(50):
+        d.text((120 + (i % 10) * 165 + rnd.randrange(0, 50), 240 + (i // 10) * 290 + rnd.randrange(0, 40)), str(rnd.randrange(150, 4800)), font=fd, fill=0)
+    for i in range(20):
+        d.text((220 + (i % 10) * 165 + rnd.randrange(0, 40), 330 + (i // 10) * 580 + rnd.randrange(0, 30)), f"W{i + 1}", font=fd, fill=0)
+    save_img_pdf(scanify(im, 0.3), "ISO-4001-01 dense.pdf", tags + ["ISO-4001-01"])
+
+
+dense_sheet()
+
+
 def image_files():
     """The same scans as loose image files, for the reader's image support:
     a PNG, a JPEG, a BMP and a three-page Group 4 (fax) TIFF, in `images/`

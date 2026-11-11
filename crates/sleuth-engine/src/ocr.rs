@@ -689,7 +689,7 @@ impl OcrReader {
             }
             let t = Instant::now();
             let whole = x == cx && y == cy && tw as u32 == canvas.width() && th as u32 == canvas.height();
-            let sub = if whole { Arc::clone(canvas) } else { Arc::new(imageops::crop_imm(canvas.as_ref(), (x - cx) as u32, (y - cy) as u32, tw as u32, th as u32).to_image()) };
+            let sub = if whole { Arc::clone(canvas) } else { Arc::new(cut_rgb(canvas, (x - cx) as u32, (y - cy) as u32, tw as u32, th as u32)) };
             let blank = is_blank(&sub);
             stats.tiles += 1;
             stats.blank += blank as u32;
@@ -1022,7 +1022,7 @@ impl OcrReader {
 mod images {
     use super::MAX_IMAGE_MPX;
     use anyhow::{Context, Result, anyhow, bail};
-    use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader, RgbImage, imageops};
+    use image::{DynamicImage, GrayImage, ImageDecoder, ImageReader, RgbImage};
     use std::fs::File;
     use std::io::{BufReader, Read, Seek, SeekFrom};
     use std::path::Path;
@@ -1053,7 +1053,7 @@ mod images {
         pub fn cut(&self, x: i32, y: i32, w: i32, h: i32) -> RgbImage {
             let (x, y, w, h) = (x.max(0) as u32, y.max(0) as u32, w.max(0) as u32, h.max(0) as u32);
             match self {
-                Pixels::Rgb(i) => imageops::crop_imm(i, x, y, w, h).to_image(),
+                Pixels::Rgb(i) => super::cut_rgb(i, x, y, w, h),
                 Pixels::Gray(i) => {
                     let mut out = Vec::with_capacity(w as usize * h as usize * 3);
                     let (iw, raw) = (i.width() as usize, i.as_raw());
@@ -1357,6 +1357,21 @@ mod images {
             assert_eq!(g.cut(1, 0, 2, 2).into_raw(), vec![50, 50, 50, 255, 255, 255, 150, 150, 150, 255, 255, 255]);
         }
     }
+}
+
+/// A rectangle of an image, clipped to it and copied row by row. (The image
+/// crate's own crop copies pixel by pixel, which took 0.15 s for every tile
+/// cut from a band.)
+fn cut_rgb(img: &RgbImage, x: u32, y: u32, w: u32, h: u32) -> RgbImage {
+    let (x, y) = (x.min(img.width()), y.min(img.height()));
+    let (w, h) = (w.min(img.width() - x), h.min(img.height() - y));
+    let (stride, raw) = (img.width() as usize * 3, img.as_raw());
+    let mut out = Vec::with_capacity(w as usize * h as usize * 3);
+    for row in y..y + h {
+        let start = row as usize * stride + x as usize * 3;
+        out.extend_from_slice(&raw[start..start + w as usize * 3]);
+    }
+    RgbImage::from_raw(w, h, out).expect("buffer sized for the rectangle")
 }
 
 /// A detected box moved by `(dx, dy)`, with its upright bounds. `None` for a
@@ -1676,6 +1691,14 @@ mod tests {
 
     fn r(x0: f32, y0: f32, x1: f32, y1: f32, cut: u8, tile: usize) -> Region {
         Region { quad: BoundingBox::from_coords(x0, y0, x1, y1), x0, y0, x1, y1, cut, near: cut, tile, joined: false, spares: Vec::new() }
+    }
+
+    #[test]
+    fn a_tile_is_cut_as_the_image_crate_cuts_it() {
+        let img = RgbImage::from_fn(13, 9, |x, y| image::Rgb([x as u8, y as u8, (x * y) as u8]));
+        for (x, y, w, h) in [(0, 0, 13, 9), (3, 2, 5, 4), (10, 7, 3, 2), (11, 6, 9, 9), (13, 9, 2, 2)] {
+            assert_eq!(cut_rgb(&img, x, y, w, h), imageops::crop_imm(&img, x, y, w, h).to_image(), "{x},{y} {w}x{h}");
+        }
     }
 
     #[test]

@@ -25,10 +25,12 @@ DirectML instead of the CPU.
 
 The corpus holds invented sheets only: scanned isometrics and a P&ID, a faded
 site scan, plotted text documents, a plotted drawing with a scanned site mark-up
-(hybrid), a plotted drawing with a small logo, two revisions of one drawing, and
-a scanned A2 general arrangement in small print (83 tags 1.8 to 2.5 mm high,
+(hybrid), a plotted drawing with a small logo, two revisions of one drawing, a
+scanned A2 general arrangement in small print (83 tags 1.8 to 2.5 mm high,
 some vertical, boxed or touched by a leader line, spread so that some sit on
-every tile border). `truth.json` lists every tag each file carries.
+every tile border), and a scanned isometric as full as real ones are (a bill
+of material of 30 rows, notes, dimensions, weld numbers: some 250 pieces of
+text). `truth.json` lists every tag each file carries.
 
 `images/` inside the corpus holds three of the scans again as loose image
 files (PNG, JPEG, BMP and a three-page Group 4 TIFF) with their own
