@@ -191,7 +191,10 @@ pub struct OcrOptions {
     /// is looked at (Sleuth 1.0), so that no two tiles know of each other.
     pub pool: bool,
     /// Before recognition, drop a region that another tile of the same band
-    /// found on the same pixels. Needs `pool`.
+    /// found on the same pixels. Needs `pool`. Off by default: on 30 real
+    /// sheets it saved about a tenth of the time but lost one real reading
+    /// (one of two numbers in a title-block box), and nothing read today
+    /// may be lost.
     pub early_dedupe: bool,
     /// Join the two parts of a line that a tile edge cut, and read the line
     /// whole from the band as well. Needs `pool`.
@@ -245,7 +248,7 @@ impl Default for OcrOptions {
             even_tiles: false,
             scale_all: false,
             pool: true,
-            early_dedupe: true,
+            early_dedupe: false,
             stitch: true,
             keep_parts: true,
             orient: Orient::Lazy,

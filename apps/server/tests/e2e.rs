@@ -84,7 +84,9 @@ fn office_server_end_to_end() {
     assert_eq!(caps.api_version, 1);
     assert_eq!((caps.user.as_str(), caps.role.as_str()), ("ana", "user"));
     assert_eq!(caps.projects, vec!["P1".to_string()]);
-    assert_eq!(caps.roots, vec![s(&proj)]);
+    // In the form the index stores paths: a mapped letter as its share.
+    assert_eq!(caps.roots.len(), 1);
+    assert!(caps.roots[0].to_lowercase().ends_with(&s(&proj).to_lowercase()[2..]), "{:?}", caps.roots);
 
     // wait for the PDF to be read (text layer)
     let started = Instant::now();

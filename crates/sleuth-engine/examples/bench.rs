@@ -214,7 +214,7 @@ fn read_image(path: &std::path::Path, r: &OcrReader) -> anyhow::Result<(FileText
     let mut tiles = 0;
     for (p, st) in pages.into_iter().zip(stats) {
         tiles += st.tiles - st.blank;
-        ft.page_info.push(sleuth_core::protocol::PageInfo { page: p.page, class: "image".into(), chars: 0, image_coverage: 1.0, ocr_tiles: st.tiles, ocr_tiles_skipped: st.blank, ocr_millis: 0, note: String::new() });
+        ft.page_info.push(sleuth_core::protocol::PageInfo { page: p.page, class: "image".into(), chars: 0, image_coverage: 1.0, ocr_tiles: st.tiles, ocr_tiles_skipped: st.blank, ocr_millis: 0, note: String::new(), ..Default::default() });
         ft.pages.push(p);
     }
     Ok((ft, tiles))

@@ -145,7 +145,10 @@ fn caller(st: &AppState, headers: &HeaderMap, peer: SocketAddr, uri: &Uri) -> Re
     let key = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer "))).map(str::trim).unwrap_or("");
     let cfg = st.config();
     match cfg.user_by_key(key).filter(|_| !key.is_empty()) {
-        Some(u) => Ok(Caller { name: u.name.clone(), role: u.role, projects: cfg.user_projects(u).into_iter().cloned().collect(), roots: cfg.user_roots(u) }),
+        // Folders as the index stores paths (a share by its server's
+        // address), so every comparison with a stored path holds whatever
+        // name or drive letter `server.json` uses.
+        Some(u) => Ok(Caller { name: u.name.clone(), role: u.role, projects: cfg.user_projects(u).into_iter().cloned().collect(), roots: cfg.user_roots(u).iter().map(|r| st.engine.stored_path(r)).collect() }),
         None => {
             st.audit.record("-", uri.path(), &format!("from {}", peer.ip()), if key.is_empty() { "unauthorized: no access key" } else { "unauthorized: unknown access key" });
             Err(ApiErr::new(StatusCode::UNAUTHORIZED, "unauthorized", "the access key was not accepted; ask IT for a new one"))
@@ -193,7 +196,7 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, ApiErr> + Sen
 fn scoped_roots(st: &AppState, c: &Caller, project: Option<&str>, action: &str) -> Result<Vec<String>, ApiErr> {
     let Some(name) = project else { return Ok(c.roots.clone()) };
     match c.projects.iter().find(|p| p.name.eq_ignore_ascii_case(name)) {
-        Some(p) => Ok(roots_within(&p.roots, &c.roots)),
+        Some(p) => Ok(roots_within(&p.roots.iter().map(|r| st.engine.stored_path(r)).collect::<Vec<_>>(), &c.roots)),
         None => {
             st.audit.record(&c.name, action, &format!("project {name}"), "forbidden: not the user's project");
             Err(ApiErr::forbidden(format!("you are not allowed to see project \"{name}\"")))
@@ -271,6 +274,7 @@ async fn lookup(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<
     let c = caller(&st, &h, peer, &uri)?;
     let p = params(q)?;
     let path = text(&p, "path", 1000)?.ok_or_else(|| ApiErr::bad("path is needed"))?.to_string();
+    let path = st.engine.stored_path(&path);
     if !path_allowed(&path, &c.roots) {
         st.audit.record(&c.name, "lookup", &path, "forbidden: outside the user's projects");
         return Err(ApiErr::forbidden("you are not allowed to see this document"));

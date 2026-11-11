@@ -362,7 +362,7 @@ impl Engine {
     }
 
     /// A path as it is stored: drive letter to share, server name to address.
-    pub(crate) fn stored_path(&self, path: &str) -> String {
+    pub fn stored_path(&self, path: &str) -> String {
         let unc = self.drives.read().unwrap().to_unc(path);
         canonical_path(&unc, &|h| self.address(h))
     }

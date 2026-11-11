@@ -332,7 +332,7 @@ fn take_lease(init: &Init, path: &str) -> Result<Option<Lease>, Outcome> {
 fn read_image(reader: &OcrReader, path: &Path, cancel: &dyn Fn() -> bool) -> Result<FileText> {
     use sleuth_core::protocol::PageInfo;
     let t = Instant::now();
-    let (pages, stats) = image_pages(reader, path, cancel)?;
+    let (pages, stats) = reader.read_image_file(path, cancel)?;
     let per_page = t.elapsed().as_millis() as u64 / pages.len().max(1) as u64;
     let page_info = pages
         .iter()
@@ -349,11 +349,6 @@ fn read_image(reader: &OcrReader, path: &Path, cancel: &dyn Fn() -> bool) -> Res
         })
         .collect();
     Ok(FileText { reader_version: READER_VERSION, model: reader.model.clone(), pages, page_info, provenance: Provenance::default() })
-}
-
-// PLACEHOLDER until the OCR branch is merged: `OcrReader::read_image_file`.
-fn image_pages(_reader: &OcrReader, _path: &Path, _cancel: &dyn Fn() -> bool) -> Result<(Vec<crate::text::PageText>, Vec<crate::ocr::TileStats>)> {
-    bail!("image files are read once the OCR update is merged")
 }
 
 /// Errors that may go away by themselves: the file could not be opened or
