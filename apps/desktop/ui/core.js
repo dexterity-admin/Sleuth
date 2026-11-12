@@ -90,6 +90,8 @@ function toast(msg) { $("sbSearch").textContent = msg; }
 function lsGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function lsSet(k, v) { try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* private mode */ } }
 function cap(s) { return s ? s[0].toUpperCase() + s.slice(1) : ""; }
+/** Time left, for people: "less than a minute", "about 12 min". An estimate, so "about", except under a minute. */
+function fmtLeft(secs) { return Math.round(Number(secs) || 0) < 60 ? fmtDur(secs) : `about ${fmtDur(secs)}`; }
 /** A duration for people: "less than a minute", "12 min", "3 h 20 min", "2 days 4 h". */
 function fmtDur(secs) {
   secs = Math.max(0, Math.round(Number(secs) || 0));
@@ -263,7 +265,7 @@ function stageRead(p) {
     parts.push(...tail);
     if (s.docs_per_hour > 0) parts.push(`${plural(s.docs_per_hour, "document")} an hour`);
     else if (s.docs_per_hour === undefined && s.pages_per_hour) parts.push(`${fmtNum(s.pages_per_hour)} pages/h`);
-    if (s.reading_eta_secs > 0) parts.push(`about ${fmtDur(s.reading_eta_secs)} left`);
+    if (s.reading_eta_secs > 0) parts.push(`${fmtLeft(s.reading_eta_secs)} left`);
     return { cls: warnIf("run"), text: parts.join(" · "), title: (s.current_file ? `Now reading ${s.current_file}` : "") + (s.reader_note ? `\n${s.reader_note}` : ""), bar };
   }
   if (p.waiting > 0) {

@@ -72,6 +72,13 @@ impl FileKind {
         self != FileKind::Other
     }
 
+    /// Whether it can carry its own title block. An email or a text file
+    /// only mentions other documents ("added in line list rev 4"), so a
+    /// drawing number or revision read from it would be someone else's.
+    pub fn has_title_block(self) -> bool {
+        !matches!(self, FileKind::Email | FileKind::Text)
+    }
+
     /// Whether reading it always means OCR (the slow lane).
     pub fn needs_ocr(self) -> bool {
         self == FileKind::Image

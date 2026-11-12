@@ -494,7 +494,7 @@ function drawIndexing() {
     ["Reading speed", p.speed ? (p.speed === "full" ? speedNote(p) : SPEED_LABEL[p.speed]) : null],
     ["Reading at once", readers ? `${plural(readers, "document")}` + (s.ocr_workers ? ` (${fmtNum(s.ocr_workers)} by OCR)` : "") : null],
     ["Pace on this PC", pace || null],
-    ["Time left", s.reading_eta_secs > 0 ? `about ${fmtDur(s.reading_eta_secs)}` : (p.waiting > 0 && !p.readPaused ? "Not known yet" : null)],
+    ["Time left", s.reading_eta_secs > 0 ? fmtLeft(s.reading_eta_secs) : (p.waiting > 0 && !p.readPaused ? "Not known yet" : null)],
   ], manual ? stageButtons("read", p) : null));
   monIndex.append(stages);
 
@@ -621,7 +621,7 @@ function renderOffice(m) {
     const left = Number(m.office_waiting) || 0, rate = Number(m.office_docs_per_hour) || 0;
     const line = !left ? "Nothing is waiting to be read."
       : `${plural(left, "document")} still to read` + (rate ? ` · the office reads ${plural(rate, "document")} an hour` : "")
-        + (m.office_eta_secs > 0 ? ` · about ${fmtDur(m.office_eta_secs)} left at the office's current pace` : " · time left not known yet");
+        + (m.office_eta_secs > 0 ? ` · ${fmtLeft(m.office_eta_secs)} left at the office's current pace` : " · time left not known yet");
     monOffice.append(el("p", "office-pace", line));
   }
   if (pcs.length) {

@@ -356,6 +356,14 @@ impl Store {
             "CREATE TEMP TABLE hidden(id INTEGER PRIMARY KEY);
              CREATE TEMP VIEW files AS SELECT * FROM main.files WHERE id NOT IN (SELECT id FROM temp.hidden);",
         )?;
+        // Parts written by 1.1.0 hold title-block details read from emails
+        // and text files, which have no title block of their own
+        // (`FileKind::has_title_block`); they are left out here.
+        s.conn.execute_batch(&format!(
+            "CREATE TEMP VIEW drawing_metadata AS SELECT * FROM main.drawing_metadata m
+             WHERE NOT EXISTS (SELECT 1 FROM main.files f WHERE f.id=m.file_id AND ({}));",
+            NO_TITLE_BLOCK_SQL
+        ))?;
         Ok(s)
     }
 
@@ -1746,6 +1754,9 @@ impl Store {
     }
 }
 
+/// Names of file types without a title block, as SQL on `f.name`.
+const NO_TITLE_BLOCK_SQL: &str = "lower(f.name) LIKE '%.msg' OR lower(f.name) LIKE '%.eml' OR lower(f.name) LIKE '%.txt' OR lower(f.name) LIKE '%.csv' OR lower(f.name) LIKE '%.tsv' OR lower(f.name) LIKE '%.log'";
+
 /// Replace a file's tags and title-block details from its stored lines.
 fn derive_into(tx: &rusqlite::Transaction, file_id: i64, name: &str, d: &Deriver) -> Result<()> {
     tx.execute("DELETE FROM tag_occurrences WHERE file_id=?1", [file_id])?;
@@ -1776,7 +1787,7 @@ fn derive_into(tx: &rusqlite::Transaction, file_id: i64, name: &str, d: &Deriver
         }
     }
     let lines: Vec<(u32, &Line)> = pages.iter().filter(|(p, l)| !l.alt && !corrected(*p, l)).map(|(p, l)| (*p, l)).collect();
-    let m = d.metadata(name, &lines);
+    let m = if sleuth_core::kinds::FileKind::of(name).has_title_block() { d.metadata(name, &lines) } else { DrawingMeta::default() };
     if m.drawing_no.is_some() || m.revision.is_some() || m.title.is_some() {
         tx.execute(
             "INSERT INTO drawing_metadata(file_id, drawing_no, drawing_norm, title, revision, revision_norm, project, discipline, sheet, status, evidence)
@@ -1831,6 +1842,47 @@ mod tests {
         assert_eq!(hits[0].class, MatchClass::Exact);
         assert_eq!(hits[1].class, MatchClass::Uncertain);
         assert_eq!(hits[1].page, Some(2));
+    }
+
+    #[test]
+    fn emails_and_text_files_have_no_title_block() {
+        let mut s = Store::open_in_memory().unwrap();
+        let said = vec![line("The outlet line is added in line list rev 4", 1.0, TextSource::TextLayer), line("DRAWING No.: ISO-1001-01", 1.0, TextSource::TextLayer)];
+        let mut ids = Vec::new();
+        for name in ["note.pdf", "RE PSV-1203.eml", "RE PSV-1203.msg", "index.csv", "notes.txt"] {
+            let (id, _) = s.upsert_file(&format!(r"\\srv\p\{name}"), r"\\srv\p", name, 1, 1, 1, state::WAITING).unwrap();
+            s.save_read(id, name, &ft(1, said.clone()), 1, &d()).unwrap();
+            ids.push(id);
+        }
+        assert_eq!(s.metadata(ids[0]).unwrap().drawing_no.as_deref(), Some("ISO-1001-01"), "a PDF keeps its title block");
+        for id in &ids[1..] {
+            let m = s.metadata(*id).unwrap();
+            assert!(m.drawing_no.is_none() && m.revision.is_none(), "{id}: {m:?}");
+        }
+    }
+
+    #[test]
+    fn parts_hide_title_blocks_of_emails_written_by_1_1_0() {
+        let dir = std::env::temp_dir().join(format!("sl-tb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("part.db");
+        let (pdf, eml) = {
+            let s = Store::create_bulk(&p).unwrap();
+            let (pdf, _) = s.upsert_file(r"\\srv\p\iso.pdf", r"\\srv\p", "iso.pdf", 1, 1, 1, state::WAITING).unwrap();
+            let (eml, _) = s.upsert_file(r"\\srv\p\RE iso.EML", r"\\srv\p", "RE iso.EML", 1, 1, 1, state::WAITING).unwrap();
+            // what 1.1.0 wrote for both
+            for id in [pdf, eml] {
+                s.conn.execute("INSERT INTO drawing_metadata(file_id, drawing_no, drawing_norm, revision, revision_norm, evidence) VALUES(?1,'ISO-1001-01','ISO10010','4','4','[]')", [id]).unwrap();
+            }
+            (pdf, eml)
+        };
+        let part = Store::open_part(&p).unwrap();
+        assert_eq!(part.metadata(pdf).unwrap().revision.as_deref(), Some("4"));
+        let m = part.metadata(eml).unwrap();
+        assert!(m.drawing_no.is_none() && m.revision.is_none(), "{m:?}");
+        assert_eq!(part.metadata_many(&[pdf, eml]).unwrap().len(), 1);
+        drop(part);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

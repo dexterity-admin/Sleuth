@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1
+
+- **Fixed:** an email or a text file no longer gets a drawing number or
+  revision from the documents it mentions ("added in line list rev 4"). Such
+  details already in the office index from 1.1.0 are no longer shown or used
+  to group drawings; nothing has to be read again.
+- **Fixed:** the time left said "about less than a minute"; it now says
+  "less than a minute".
+
 ## 1.1.0
 
 One office index instead of one per PC, every PC reading for everyone, and
