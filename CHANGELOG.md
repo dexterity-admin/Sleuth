@@ -45,8 +45,8 @@ index (5 to 6 GB on a busy PC); settings are kept.
     needs about 0.8 GB instead of 1.8 GB per reader. Where it finds text on
     a page is exactly as before; on 30 real drawings no text found before
     was lost, and short text that 1.0 read upside down (900 as 006) is now
-    read the right way up. Pages read by 1.0 are read again once, because
-    the reading changed.
+    read the right way up. Documents read by 1.0 keep their readings; new
+    and changed files are read the new way.
   - Scanned pages still take minutes of processor time each on a PC: one
     PC reads a few dozen scanned pages an hour per processor core. The
     office reads many more by every PC reading at once.
