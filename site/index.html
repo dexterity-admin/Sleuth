@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Sleuth — drawing search for Dexterity Design Services</title>
-<meta name="description" content="Sleuth reads scanned isometrics, P&IDs and plotted PDFs on every office drive, and opens the sheet with the tag you typed ringed in red.">
+<meta name="description" content="Sleuth reads scanned isometrics, P&IDs, plotted PDFs, spreadsheets, emails and CAD files on every office drive, and opens the sheet with the tag you typed ringed in red.">
 <meta property="og:title" content="Sleuth — drawing search">
 <meta property="og:description" content="Type a line number. Sleuth opens the scanned sheet with the tag ringed in red.">
 <meta property="og:image" content="https://dexterity-admin.github.io/Sleuth/assets/og.jpg">
@@ -316,7 +316,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="bar">
     <a class="cell brand" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
     <span class="cell hide-s">DWG SLH-001</span>
-    <span class="cell hide-s">REV 1.0.2</span>
+    <span class="cell hide-s">REV 1.1.0</span>
     <span class="grow"></span>
     <a class="cell hide-s" href="#try">Try it</a>
     <a class="cell hide-s" href="#revisions">Revisions</a>
@@ -332,12 +332,12 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="copy">
     <div class="label"><b>SLH-001</b> Drawing search · Dexterity Design Services</div>
     <h1 id="h1"><span class="sr-only">Sleuth finds any tag in scanned drawings. For example: </span><span class="tag" id="heroTag">6"-P-1001-A1B</span><span id="heroWhere">Found on ISO‑1001‑01, zone B3.</span></h1>
-    <p class="lead">Sleuth reads the scans nobody indexed: isometrics, P&amp;IDs, plotted PDFs on every office drive. Type a line number and it opens the sheet with the tag ringed in red, and tells you why it matched.</p>
+    <p class="lead">Sleuth reads the scans nobody indexed: isometrics, P&amp;IDs, plotted PDFs on every office drive, and the spreadsheets, Word files, emails, DWG and DGN beside them. Type a line number and it opens the sheet with the tag ringed in red, and tells you why it matched.</p>
     <div class="cta">
       <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
-    <div class="facts">v1.0.2 · 56 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.5 MB)</a></div>
+    <div class="facts">v1.1.0 · 61 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 3.6 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
@@ -377,7 +377,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
         <div class="meta" id="pgMeta"></div>
       </div>
     </div>
-    <p class="samplenote">The sample drawings were made for this page, and the folder names are examples. In the app the same search runs over every drawing read on your PC and in the office cache.</p>
+    <p class="samplenote">The sample drawings were made for this page, and the folder names are examples. In the app the same search runs over every document read by any PC in the office.</p>
   </div>
 </section>
 
@@ -509,6 +509,8 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
           <tr><td>Search mapped network drives</td><td class="part">If the server indexes them</td><td class="part">By scanning folders</td><td class="us yes">Yes, offline shares skipped</td></tr>
           <tr><td>Find text in PDFs that carry text</td><td class="part">With a PDF filter installed</td><td class="part">At search time, slowly</td><td class="us yes">Yes, read in advance</td></tr>
           <tr><td>Find text in scanned drawings</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, OCR</td></tr>
+          <tr><td>Find text inside DWG and DGN</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes</td></tr>
+          <tr><td>Show the PDF, DWG and DGN of a drawing as one</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, with the reason</td></tr>
           <tr><td>Match 6"-P-1001 to 6P1001</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, and labelled</td></tr>
           <tr><td>Open the page with the tag marked</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes</td></tr>
           <tr><td>Say why each file matched</td><td class="no">No</td><td class="no">No</td><td class="us yes">Yes, in words</td></tr>
@@ -529,15 +531,15 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
           <thead><tr><th>PT</th><th>Description</th><th>Qty</th><th>Remarks</th></tr></thead>
           <tbody>
             <tr><td>1</td><td>Search window</td><td>1</td><td>About 150 MB. Results as you type.</td></tr>
-            <tr><td>2</td><td>Background reader</td><td>1</td><td>Low priority. Pauses above 60% CPU and on battery. Frees its memory after 2 idle minutes.</td></tr>
+            <tr><td>2</td><td>Background readers</td><td>1 to 1 per core</td><td>Separate programs at the lowest priority. The minimum while the PC is busy, doubling every 30 s while it is free. Pause, Read now and Full speed for 1 hour. Pauses on battery.</td></tr>
             <tr><td>3</td><td>Page classifier</td><td>1</td><td>Plotted text, scan, text + scan, outlined text, damaged. OCR only where a page needs it.</td></tr>
             <tr><td>4</td><td>OCR engine, PP-OCRv6</td><td>1</td><td>300 dpi, 1600 px tiles, 512 px overlap. CPU, or DirectML only if it reads a check picture exactly like the CPU and faster.</td></tr>
             <tr><td>5</td><td>Second reader, Windows OCR</td><td>1</td><td>Re-reads lines under 85% confidence. A disagreement is marked Verify.</td></tr>
             <tr><td>6</td><td>Tag and title-block rules</td><td>1 set</td><td>Line numbers, instruments, valves, equipment; drawing number, revision, title. Each value keeps the text it came from.</td></tr>
-            <tr><td>7</td><td>Local index</td><td>1</td><td>SQLite with trigram search. Folder limits applied before result limits.</td></tr>
-            <tr><td>8</td><td>Shared reading cache</td><td>1</td><td>Keyed by content and reading pipeline, checksummed. Each drawing read once for the office.</td></tr>
-            <tr><td>9</td><td>Office server</td><td>Optional</td><td>Same engine over shared folders. HTTPS, access keys, per-project permissions, audit log.</td></tr>
-            <tr><td>10</td><td>Updater</td><td>1</td><td>Checks every hour and asks when an update is downloaded and ready. Checks the SHA-256 before installing. Rolls back to the previous release. Keeps settings and index.</td></tr>
+            <tr><td>7</td><td>Office index</td><td>1</td><td>In the office folder on U:, shared by every PC. Made of SQLite files written once and never changed, so many PCs add to it at once without a database server. Each document read once for the office; one PC lists each share for everyone.</td></tr>
+            <tr><td>8</td><td>File readers</td><td>9 types</td><td>PDF, Excel, Word, PowerPoint, Outlook, text and CSV, AutoCAD (LibreDWG), MicroStation DGN and PDS .i01, scanned images.</td></tr>
+            <tr><td>9</td><td>Office server</td><td>Optional</td><td>Reads into the same office index, day and night. HTTPS, access keys, per-project permissions, audit log.</td></tr>
+            <tr><td>10</td><td>Updater</td><td>1</td><td>Checks every hour and asks when an update is downloaded and ready. Checks the SHA-256 before installing. Rolls back to the previous release. Keeps settings.</td></tr>
           </tbody>
         </table>
       </div>
@@ -546,12 +548,12 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="label reveal"><b>09</b> Your drawings</div>
       <h2 class="reveal">Nothing leaves the office.</h2>
       <ul class="notes reveal">
-        <li>Drawings are read on your own PC. Sleuth never changes, moves or uploads a file.</li>
-        <li>Read results stay on your PC and in the office's shared cache folder, on our own server.</li>
+        <li>Documents are read on the office's own PCs. Sleuth never changes, moves or uploads a file.</li>
+        <li>Read results stay in the office index folder, on our own server.</li>
         <li>The only internet traffic is a check on GitHub for a new version.</li>
         <li>No AI: no language models, no chat, nothing sent to an AI service, nothing learned from your corrections. OCR uses fixed models whose fingerprint is recorded with every reading.</li>
         <li>Files Sleuth can't read are listed with the reason: password protected, damaged or no access. None are skipped silently.</li>
-        <li>Uninstalling removes the program. Your settings and index stay until you delete them.</li>
+        <li>Uninstalling removes the program. Your settings stay until you delete them; the office index belongs to the office.</li>
       </ul>
     </div>
   </div>
@@ -563,13 +565,13 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <h2 class="reveal">Questions, answered.</h2>
     <div class="rfi reveal" style="margin-top:30px">
       <details><summary><span class="no">RFI-001</span><span class="qq">Windows says it "protected your PC". Is that safe?</span><span class="st">CLOSED</span></summary><div class="a">The installer isn't code-signed, so Windows warns on the first install. Click <b>More info</b>, then <b>Run anyway</b>. Updates install from inside Sleuth and don't show this.</div></details>
-      <details><summary><span class="no">RFI-002</span><span class="qq">Will it slow my PC down while I'm drafting?</span><span class="st">CLOSED</span></summary><div class="a">Reading runs at low priority on half the processor. While other programs keep the CPU busy it slows to a single thread instead of stopping, so the reading still gets done; on battery it pauses. It uses more of the CPU only after nobody has touched the PC for five minutes.</div></details>
-      <details><summary><span class="no">RFI-003</span><span class="qq">How long before my project is searchable?</span><span class="st">CLOSED</span></summary><div class="a">Sleuth works in two stages, both shown in the status strip at the bottom. <b>Finding files</b> lists every folder of every drive; names become searchable as it goes, and the first listing of large office shares can take an hour or more. <b>Reading PDFs</b> starts as soon as the drives holding your reading folders are listed (they are listed first) and shows how many are read and the time left. A PDF with a text layer is read in seconds; a scanned sheet takes about 20 seconds, unless a colleague's PC already read it.</div></details>
+      <details><summary><span class="no">RFI-002</span><span class="qq">Will it slow my PC down while I'm drafting?</span><span class="st">CLOSED</span></summary><div class="a">Reading runs in separate programs at the lowest priority, so Windows gives them only the time you aren't using. While other programs keep the CPU busy it carries on at the minimum instead of stopping, so the reading still gets done; on battery it pauses. While the PC is free it doubles its readers every 30 seconds, and drops back as soon as you need the PC. You can also pause it, or choose Gentle, from the status strip.</div></details>
+      <details><summary><span class="no">RFI-003</span><span class="qq">How long before my project is searchable?</span><span class="st">CLOSED</span></summary><div class="a">Sleuth works in two stages, both shown in the status strip at the bottom. <b>Finding files</b> lists every folder of every drive; names become searchable as it goes, and the first listing of large office shares can take an hour or more. <b>Reading documents</b> starts as soon as the drives holding your reading folders are listed (they are listed first), or at once with <b>Read now</b>, and shows how many are read and the time left. Spreadsheets, Word files, emails, CAD files and PDFs with a text layer are read in seconds, many at a time; a scanned sheet takes a few minutes of processor time. A document any PC in the office has read is not read again, and every PC that reads the same folders adds to the speed.</div></details>
       <details><summary><span class="no">RFI-004</span><span class="qq">How sure is "found"?</span><span class="st">CLOSED</span></summary><div class="a">Every result shows how it matched and where the text came from. Uncertain OCR is labelled <b>Verify</b> and is never reported as exact. The preview always rings the spot, so you can check it in a second.</div></details>
       <details><summary><span class="no">RFI-005</span><span class="qq">What if a drive is offline or a folder is locked?</span><span class="st">CLOSED</span></summary><div class="a">A share that doesn't answer is asked three times before it is marked offline, and the Monitor page says so. A folder that fails to list gets a second try later in the same listing; one that still doesn't answer is shown as partly listed, with the reason, and tried again on the next check. A network error while reading is retried up to five times before a file is listed as unreadable.</div></details>
-      <details><summary><span class="no">RFI-006</span><span class="qq">Does it search DWG or Word files?</span><span class="st">CLOSED</span></summary><div class="a">Version 1.0 reads inside PDFs, and finds any file type by name.</div></details>
+      <details><summary><span class="no">RFI-006</span><span class="qq">Does it search DWG or Word files?</span><span class="st">CLOSED</span></summary><div class="a">Yes, from version 1.1. Sleuth reads inside Excel, Word, PowerPoint, Outlook emails, text and CSV, AutoCAD DWG and DXF, MicroStation DGN (including PDS .i01 isometrics) and scanned images, as well as PDF. The PDF, DWG and DGN of one drawing show as one result, with the reason they were grouped. Any other file is found by name.</div></details>
       <details><summary><span class="no">RFI-007</span><span class="qq">Does Sleuth use AI?</span><span class="st">CLOSED</span></summary><div class="a">No. There is no language model, chat or generated summary anywhere. Tags and title-block details are found by fixed, editable rules, and every value shows the text it was read from. The OCR models are fixed; a correction you type is stored as a checked reading and never changes them.</div></details>
-      <details><summary><span class="no">RFI-008</span><span class="qq">Do we need a server?</span><span class="st">CLOSED</span></summary><div class="a">No. Every PC indexes and reads its own drives. IT can add the optional office server, which reads the shared project folders once for everyone; if it is offline, each PC keeps searching on its own and says so.</div></details>
+      <details><summary><span class="no">RFI-008</span><span class="qq">Do we need a server?</span><span class="st">CLOSED</span></summary><div class="a">No. The office index lives in a shared folder (<span class="mono">U:\Sleuth-cache</span>), and every PC that is switched on lists and reads for everyone. IT can add the optional office server, which reads into the same index day and night.</div></details>
       <details><summary><span class="no">RFI-009</span><span class="qq">Will it use my graphics card?</span><span class="st">CLOSED</span></summary><div class="a">Only if it proves itself. Sleuth reads a fixed check picture on the CPU and on the card; the card is used only when the readings are identical and it is clearly faster. On our test PC the card failed the check, so Sleuth used the CPU and said why on the Monitor page.</div></details>
     </div>
   </div>
@@ -583,18 +585,18 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <ol class="notes reveal">
         <li>Download the installer and run it. It installs for your account only; no admin rights are needed.</li>
         <li>On the first install only, click <b>More info → Run anyway</b> if Windows asks.</li>
-        <li>Sleuth connects to the shared cache at <span class="mono">U:\Sleuth-cache</span>. If it can't, it shows you what to fix.</li>
-        <li>Add your project folders under <b>Folders being read</b>. Search straight away. Updating from 0.1 keeps your settings and everything already read.</li>
+        <li>Sleuth connects to the office index at <span class="mono">U:\Sleuth-cache</span>. If it can't, it shows you what to fix.</li>
+        <li>Add your project folders under <b>Folders being read</b>. Search straight away. Updating from 1.0 keeps your settings, moves what your PC already read into the office index, and frees the 5 to 6 GB the old index took on your PC.</li>
         <li>Keep the guide by your desk. Its last page is a one-page quick reference.</li>
       </ol>
     </div>
     <div class="issue reveal">
       <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
-        <span class="t2">REV 1.0.2 · 56 MB · WIN 10/11</span>
+        <span class="t2">REV 1.1.0 · 61 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
       </a>
-      <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.5 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
+      <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 3.6 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
     </div>
   </div>
 </section>
@@ -606,14 +608,15 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="big"><span class="k">Title</span><span class="v">Sleuth · drawing search</span></div>
       <div><span class="k">Client</span><span class="v">Dexterity Design Services</span></div>
       <div><span class="k">Dwg no.</span><span class="v mono">SLH-001</span></div>
-      <div><span class="k">Rev</span><span class="v mono">1.0.2</span></div>
-      <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6</span></div>
+      <div><span class="k">Rev</span><span class="v mono">1.1.0</span></div>
+      <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6 · LibreDWG</span></div>
       <div><span class="k">Source</span><span class="v"><a href="https://github.com/dexterity-admin/Sleuth">GitHub</a></span></div>
       <div><span class="k">Sheet</span><span class="v mono">1 of 1</span></div>
     </div>
     <table class="reg revs" aria-label="Revisions">
       <thead><tr><th>Rev</th><th>Date</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td>1.1.0</td><td>12 Nov 2026</td><td>One office index on U: instead of one per PC; every PC lists and reads for everyone. Excel, Word, PowerPoint, emails, text, DWG, DGN and scanned images read inside; PDF, DWG and DGN of a drawing on one row. Pause, Read now and Full speed for each stage. Faster OCR with half the memory.</td></tr>
         <tr><td>1.0.2</td><td>04 Nov 2026</td><td>Updates find you: checked every hour, downloaded in the background, then a dialog asks to restart and update or later. An "Update ready" button stays in the status bar until installed.</td></tr>
         <tr><td>1.0.1</td><td>04 Nov 2026</td><td>Reading folders chosen by drive letter are read. Every folder of every drive is listed, reading folders first; listings resume and survive network drops. Progress shown for both stages, with time left. File names found like Everything. Index repaired on install.</td></tr>
         <tr><td>1.0.0</td><td>03 Nov 2026</td><td>Pages classified, OCR only where needed. Every match explained; partial matches never exact. Tags, revision compare, related drawings, reading checks, monitor. Projects, OR and filters, export. Optional office server. Rollback.</td></tr>

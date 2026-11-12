@@ -11,9 +11,13 @@ carries on.
 
 ## What it does
 
-- Walks the project folders listed in `server.json` and reads every PDF in them
-  (text layer, then OCR where needed). If a shared reading cache is set, it
-  shares results with the desktops through it.
+- Walks the project folders listed in `server.json` and reads every document
+  in them: PDFs (text layer, then OCR where needed), Excel, Word, PowerPoint,
+  emails, text, AutoCAD, MicroStation and scanned images.
+- With `shared_cache_dir` set to the office index folder the desktops use
+  (`--shared-cache`), the server reads into the office index with them, day
+  and night: nothing is read twice, and desktops search what it read. Without
+  it, the server keeps its own index in its data folder (`store`).
 - Answers desktops over HTTPS on port 8455, API version 1 (`/api/v1`).
 - Each person has an access key. The server stores only a SHA-256 hash of the
   key, never the key itself.
@@ -137,8 +141,8 @@ either:
   Log On.
 
 Give read access only. The server never writes to the project shares. It
-writes only to the shared reading cache, if one is set, so that account also
-needs modify access to the cache folder.
+writes only to the office index folder, if one is set, so that account also
+needs modify access to that folder.
 
 ## Connecting a desktop
 
