@@ -340,14 +340,24 @@
       <div id="s-kinds" class="kinds"></div>
     </section>
     <section id="cacheSection">
-      <h3>Office index folder (required)</h3>
+      <h3>Office index folder <span id="s-cacheBadge">(required)</span></h3>
       <p class="hint">The one folder, shared by every PC, that holds the office index: the list of files on every network drive and the text read from documents, so each document is read once for the whole office and nothing large is kept on this PC. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
-      <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button></div>
+      <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button><button type="button" id="s-cacheChange" class="small" hidden>Change…</button></div>
       <p id="s-cacheState" class="hint"></p>
+      <p class="hint">A drive letter such as U: is fine. On a PC where that letter is not mapped or does not answer, Sleuth uses the same folder by its network path (\\server\share\…) by itself.</p>
     </section>
     <section id="serverSection">
       <h3>Office server (optional)</h3>
       <p class="hint">With an office server, searches also cover the drawings it has read. Leave the address empty to use Sleuth on its own.</p>
+      <div id="s-srvFound" class="found" hidden></div>
+      <details class="hint howto">
+        <summary>Where do the address, key and certificate come from?</summary>
+        <ol>
+          <li>On the office PC that stays on, extract <b>Sleuth-Server_…_x64.zip</b> and double-click <b>sleuth-server.exe</b>. Windows asks for administrator rights; a setup window walks through five steps.</li>
+          <li>Setup puts the <b>certificate</b> and the server's <b>address</b> in the office index folder. Sleuth finds both there: leave the certificate empty and press <b>Use it</b> when the address is offered above.</li>
+          <li>Setup shows an <b>access key</b> for each person it adds (also copied to that PC's clipboard). Paste yours under Access key, then press <b>Connect and save</b>. A lost key is replaced by running sleuth-server.exe again: remove the person and add them back.</li>
+        </ol>
+      </details>
       <label class="row">Address <input id="s-srvUrl" type="text" class="wide mono" placeholder="https://sleuth-server:8455" spellcheck="false" autocomplete="off"></label>
       <label class="row">Access key <input id="s-srvKey" type="password" class="wide" placeholder="Leave blank to keep the saved key" autocomplete="off"></label>
       <div class="row">Certificate file (optional)

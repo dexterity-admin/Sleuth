@@ -1,5 +1,8 @@
 //! `sleuth-server.exe`: set up and run the Sleuth office server.
 //!
+//! Double-clicked (no arguments) it opens the guided setup (`setup.rs`); the
+//! commands below are for scripts and IT.
+//!
 //! Every command takes `--data <folder>` (default
 //! `%ProgramData%\Sleuth Server`). Changes made here (users, projects,
 //! certificates) are written to the audit log as the Windows user running
@@ -13,6 +16,8 @@ use sleuth_server::config::{self, Config, Role, UserCfg};
 use sleuth_server::tls;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+mod setup;
 
 #[derive(Parser)]
 #[command(name = "sleuth-server", version, about = "Sleuth office server: one shared drawing index for the office, over HTTPS")]
@@ -32,6 +37,8 @@ enum RoleArg {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Guided setup and menu (what a double-click opens).
+    Setup,
     /// Create server.json and the certificates.
     Init {
         /// NAME=\\server\share[,\\server\other] (repeat for more projects).
@@ -113,10 +120,16 @@ fn main() -> Result<()> {
         // Started by the server's own engine as a reader process.
         return sleuth_engine::readjob::serve();
     }
+    // Double-clicked in Explorer: no arguments. Open the guided setup instead of
+    // printing usage into a window that closes at once.
+    if std::env::args_os().len() == 1 {
+        return guided(sleuth_server::data_dir(None));
+    }
     let cli = Cli::parse();
     let data = sleuth_server::data_dir(cli.data);
     sleuth_server::use_data_dir(&data);
     match cli.cmd {
+        Cmd::Setup => guided(data),
         Cmd::Init { projects, listen, hostnames, shared_cache } => init(&data, &projects, listen, hostnames, shared_cache),
         Cmd::AddProject { project } => change(&data, "add project", &project, |c| {
             let p = config::parse_project(&project)?;
@@ -179,6 +192,21 @@ fn main() -> Result<()> {
             run_service(data)
         }
     }
+}
+
+/// The guided setup; keeps the window open at the end (and after an error) so it can be read.
+fn guided(data: PathBuf) -> Result<()> {
+    sleuth_server::use_data_dir(&data);
+    match setup::run(&data) {
+        Ok(true) => setup::pause(),
+        Ok(false) => {}
+        Err(e) => {
+            println!();
+            println!("Setup stopped: {e:#}");
+            setup::pause();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -271,20 +299,26 @@ fn change(data: &Path, action: &str, target: &str, f: impl FnOnce(&mut Config) -
     Ok(())
 }
 
-fn add_user(data: &Path, name: &str, role: RoleArg, projects: &str) -> Result<()> {
+/// Add a user and return their new access key (the server keeps only its hash).
+fn create_user(data: &Path, name: &str, role: Role, projects: &[String]) -> Result<String> {
     let key = config::new_key()?;
+    change(data, "add user", name, |c| {
+        if c.user(name).is_some() {
+            bail!("there is already a user called {name} (remove-user first to issue a new key)");
+        }
+        c.users.push(UserCfg { name: name.trim().to_string(), token_sha256: config::hash_key(&key), role, projects: projects.to_vec() });
+        Ok(())
+    })?;
+    Ok(key)
+}
+
+fn add_user(data: &Path, name: &str, role: RoleArg, projects: &str) -> Result<()> {
     let projects: Vec<String> = projects.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
     let role = match role {
         RoleArg::User => Role::User,
         RoleArg::Admin => Role::Admin,
     };
-    change(data, "add user", name, |c| {
-        if c.user(name).is_some() {
-            bail!("there is already a user called {name} (remove-user first to issue a new key)");
-        }
-        c.users.push(UserCfg { name: name.trim().to_string(), token_sha256: config::hash_key(&key), role, projects: projects.clone() });
-        Ok(())
-    })?;
+    let key = create_user(data, name, role, &projects)?;
     println!();
     println!("Access key for {name} (shown only this once; the server keeps only its hash):");
     println!();

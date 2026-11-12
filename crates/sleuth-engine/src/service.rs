@@ -8,7 +8,7 @@
 //! `indexing.rs` keeps the catalog, `reading.rs` reads documents, and
 //! `views.rs` answers the tag, revision and correction pages.
 
-use crate::cache::check_cache;
+use crate::cache::check_cache_with;
 use crate::crawl::{WalkConfig, WalkEvent, norm_dir, walk_resumable};
 use crate::derive::Deriver;
 use crate::pool::Pool;
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::info;
+use tracing::{info, warn};
 
 pub type EventTx = tokio::sync::mpsc::UnboundedSender<Envelope<Event>>;
 
@@ -426,9 +426,16 @@ impl Engine {
         self.indexer_signal.raise();
     }
 
-    pub fn set_settings(&self, s: Settings) -> Result<()> {
-        s.save()?;
+    pub fn set_settings(&self, mut s: Settings) -> Result<()> {
         let old = self.settings.read().unwrap().clone();
+        // a network path learned for another folder must not be tried for this one
+        let norm = |d: &Option<String>| d.as_deref().map(|d| d.trim().trim_end_matches('\\').to_lowercase());
+        if norm(&old.shared_cache_dir) != norm(&s.shared_cache_dir) {
+            s.shared_cache_unc = None;
+        } else if s.shared_cache_unc.is_none() {
+            s.shared_cache_unc = old.shared_cache_unc.clone();
+        }
+        s.save()?;
         *self.settings.write().unwrap() = s.clone();
         self.cache_signal.raise();
         if old.projects != s.projects {
@@ -635,7 +642,9 @@ impl Engine {
         while !self.stopping() {
             let s = self.settings.read().unwrap().clone();
             let drives = self.current_drives();
-            let c = check_cache(s.shared_cache_dir.as_deref(), s.shared_cache_enabled, &drives);
+            let fallback = s.shared_cache_dir.as_deref().and_then(|d| s.shared_cache_fallback(d));
+            let c = check_cache_with(s.shared_cache_dir.as_deref(), fallback.as_deref(), s.shared_cache_enabled, &drives);
+            self.learn_cache_unc(&s, &c);
             let was = self.cache.lock().unwrap().state;
             if c.state != CacheState::Ok && c.state != was {
                 info!("office store {:?}: {}", c.state, c.message);
@@ -653,7 +662,31 @@ impl Engine {
 
     /// Test a folder the user is about to choose.
     pub fn check_cache_dir(&self, dir: &str) -> CacheCheck {
-        check_cache(Some(dir), true, &self.current_drives())
+        let fallback = self.settings.read().unwrap().shared_cache_fallback(dir);
+        check_cache_with(Some(dir), fallback.as_deref(), true, &self.current_drives())
+    }
+
+    /// Remember the network path a drive-letter index folder led to while it
+    /// worked, so a PC where that letter later goes missing still finds it.
+    fn learn_cache_unc(&self, s: &Settings, c: &CacheCheck) {
+        let Some(dir) = s.shared_cache_dir.as_deref().map(str::trim) else { return };
+        let lettered = dir.chars().nth(1) == Some(':');
+        let direct = !c.message.starts_with("working through");
+        if c.state != CacheState::Ok || !lettered || !direct || !c.path.starts_with("\\\\") {
+            return;
+        }
+        if s.shared_cache_unc.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(&c.path)) {
+            return;
+        }
+        let mut next = self.settings.read().unwrap().clone();
+        if next.shared_cache_dir.as_deref().map(str::trim) != Some(dir) {
+            return; // changed meanwhile
+        }
+        next.shared_cache_unc = Some(c.path.clone());
+        match next.save() {
+            Ok(()) => *self.settings.write().unwrap() = next,
+            Err(e) => warn!("cannot remember the index folder's network path: {e:#}"),
+        }
     }
 
     /// Roots in the catalog: every fixed and network drive minus excluded
@@ -715,7 +748,9 @@ impl Engine {
     fn office_client(&self, url: &str, token: &str, ca_file: &str) -> Result<remote::Client> {
         let s = self.settings.read().unwrap().clone();
         let drives = self.drives.read().unwrap().clone();
-        let ca = remote::ca_path(ca_file, s.shared_cache_dir.as_deref(), &drives).ok_or_else(|| anyhow!("no server certificate file: set one, or put {} in the shared folder", remote::CA_FILE_NAME))?;
+        // the folder that really works (it may be the network path, when the drive letter is not mapped)
+        let store = self.store_dir().map(|p| p.display().to_string()).or(s.shared_cache_dir.clone());
+        let ca = remote::ca_path(ca_file, store.as_deref(), &drives).ok_or_else(|| anyhow!("no server certificate file: set one, or put {} in the shared folder", remote::CA_FILE_NAME))?;
         let pem = std::fs::read(&ca).map_err(|e| anyhow!("cannot read the server certificate {}: {e}", ca.display()))?;
         remote::Client::new(url, token, &pem)
     }

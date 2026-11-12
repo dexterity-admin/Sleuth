@@ -316,7 +316,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
   <div class="bar">
     <a class="cell brand" href="#top"><img src="assets/icon.png" alt="">Sleuth</a>
     <span class="cell hide-s">DWG SLH-001</span>
-    <span class="cell hide-s">REV 1.1.1</span>
+    <span class="cell hide-s">REV 1.2.0</span>
     <span class="grow"></span>
     <a class="cell hide-s" href="#try">Try it</a>
     <a class="cell hide-s" href="#revisions">Revisions</a>
@@ -337,7 +337,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <a class="btn ink dl-link" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">Download for Windows</a>
       <a class="btn" href="#try">Try it on sample sheets</a>
     </div>
-    <div class="facts">v1.1.1 · 61 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 5.2 MB)</a></div>
+    <div class="facts">v1.2.0 · 61 MB · Windows 10/11, 64-bit · no admin rights · no AI · <a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide (PDF, 5.2 MB)</a></div>
   </div>
   <div class="stage" aria-hidden="true">
     <div class="sheet" id="heroSheet">
@@ -595,7 +595,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <div class="issue reveal">
       <a class="bigstamp dl-link" id="stamp" href="https://github.com/dexterity-admin/Sleuth/releases/latest/download/Sleuth_x64-setup.exe">
         <span class="t1">Download</span>
-        <span class="t2">REV 1.1.1 · 61 MB · WIN 10/11</span>
+        <span class="t2">REV 1.2.0 · 61 MB · WIN 10/11</span>
         <span class="t3">approved for use</span>
       </a>
       <p class="facts" style="margin-top:30px"><a href="Sleuth-User-Guide.pdf" target="_blank" rel="noopener">User guide, PDF, 5.2 MB</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases">All versions</a> · <a href="https://github.com/dexterity-admin/Sleuth/releases/latest">Office server (zip)</a></p>
@@ -610,7 +610,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
       <div class="big"><span class="k">Title</span><span class="v">Sleuth · drawing search</span></div>
       <div><span class="k">Client</span><span class="v">Dexterity Design Services</span></div>
       <div><span class="k">Dwg no.</span><span class="v mono">SLH-001</span></div>
-      <div><span class="k">Rev</span><span class="v mono">1.1.1</span></div>
+      <div><span class="k">Rev</span><span class="v mono">1.2.0</span></div>
       <div><span class="k">Built with</span><span class="v">Rust · Tauri · PDFium · SQLite · PP-OCRv6 · LibreDWG</span></div>
       <div><span class="k">Source</span><span class="v"><a href="https://github.com/dexterity-admin/Sleuth">GitHub</a></span></div>
       <div><span class="k">Sheet</span><span class="v mono">1 of 1</span></div>
@@ -618,6 +618,7 @@ footer { padding: 60px 0 calc(70px + env(safe-area-inset-bottom)); }
     <table class="reg revs" aria-label="Revisions">
       <thead><tr><th>Rev</th><th>Date</th><th>Description</th></tr></thead>
       <tbody>
+        <tr><td>1.2.0</td><td>12 Nov 2026</td><td>Office server set up by double-clicking sleuth-server.exe; PCs find its address by themselves. The office index folder settles once set, and falls back to its network path when U: is missing.</td></tr>
         <tr><td>1.1.1</td><td>12 Nov 2026</td><td>An email or text file no longer takes a drawing number or revision from the documents it mentions. Time left reads "less than a minute".</td></tr>
         <tr><td>1.1.0</td><td>12 Nov 2026</td><td>One office index on U: instead of one per PC; every PC lists and reads for everyone. Excel, Word, PowerPoint, emails, text, DWG, DGN and scanned images read inside; PDF, DWG and DGN of a drawing on one row. Pause, Read now and Full speed for each stage. Faster OCR with half the memory.</td></tr>
         <tr><td>1.0.2</td><td>04 Nov 2026</td><td>Updates find you: checked every hour, downloaded in the background, then a dialog asks to restart and update or later. An "Update ready" button stays in the status bar until installed.</td></tr>

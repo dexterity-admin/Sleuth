@@ -47,7 +47,28 @@ choose another with `--data "<folder>"` on every command):
 | `data\models\`, `config\` | Engine downloads and settings, made by the server |
 | `logs\server.log` | Service log (the console shows the log when you use `run`) |
 
-## Installing (IT)
+## Quick setup (double-click)
+
+1. On the office PC that stays on, right-click the zip > **Extract All...**
+   (do not run it from inside the zip).
+2. Double-click **sleuth-server.exe**. Windows asks for administrator rights.
+3. Setup offers to copy itself to `C:\Program Files\Sleuth Server` (the
+   service runs from there), then walks through five steps:
+   - **Office index folder**: the shared folder every Sleuth PC uses. Its
+     network path is offered (the service cannot see mapped drives like U:).
+   - **Projects**: a name and its folders. Drive letters are turned into
+     network paths, and each folder is checked.
+   - **Certificates**: made for you. The certificate is copied into the office
+     index folder, with `sleuth-server.json` holding the server's address.
+   - **Access keys**: one per person, shown once and copied to the clipboard.
+   - **Windows service**: installed, started, and checked to answer.
+4. The window ends with what to enter on each PC (see Connecting a desktop).
+
+Run `sleuth-server.exe` again at any time for a menu: show the connection
+details, add or remove a person, add a project, check everything, restart the
+service, renew the certificate. The commands below do the same from scripts.
+
+## Installing (IT, by command)
 
 Run these in an administrator command prompt in the folder that holds
 `sleuth-server.exe`. Keep `pdfium.dll` and the `models` folder next to the
@@ -148,8 +169,10 @@ needs modify access to that folder.
 
 In Sleuth: **Settings > Office server**
 
-- Address: `https://<server>:8455`. Use a name or address that appears in the
-  certificate; `init` and `renew-cert` print them.
+- Address: when setup left `sleuth-server.json` in the office index folder,
+  Settings shows "Found the office server ..." with a **Use it** button.
+  Otherwise type `https://<server>:8455`, a name or address that appears in
+  the certificate; `init` and `renew-cert` print them.
 - Access key: the key from `add-user`. It is stored encrypted for that
   Windows user.
 - Certificate: if the shared cache folder is set, Sleuth finds

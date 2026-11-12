@@ -562,6 +562,26 @@ pub struct CacheCheck {
     /// Network path actually used.
     pub path: String,
     pub message: String,
+    /// The office server's connection card, when its setup left one in the
+    /// index folder (`sleuth-server.json`): desktops fill the address from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub office_server: Option<OfficeServerCard>,
+}
+
+/// Written by `sleuth-server setup` into the office index folder, next to the
+/// CA certificate, so desktops find the server without anyone typing it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OfficeServerCard {
+    /// `https://NAME:8455`
+    pub address: String,
+    /// Other addresses that reach the same server (by IP).
+    pub addresses: Vec<String>,
+    /// Computer that runs the server.
+    pub pc: String,
+    /// Unix seconds when it was written.
+    pub at: i64,
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

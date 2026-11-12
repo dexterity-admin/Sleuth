@@ -17,6 +17,10 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// Office default for the shared reading cache.
 pub const OFFICE_CACHE_DIR: &str = r"U:\Sleuth-cache";
 
+/// The same folder by its network path: used on a PC where U: is not mapped
+/// (or does not answer), so nobody has to know the difference.
+pub const OFFICE_CACHE_UNC: &str = r"\\192.168.0.200\free exchange - updated\Sleuth-cache";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum OcrQuality {
@@ -161,6 +165,10 @@ pub struct Settings {
     /// between PCs, so each PDF is read once for the whole office. A drive
     /// letter is resolved to its network path on each PC.
     pub shared_cache_dir: Option<String>,
+    /// The network path `shared_cache_dir` led to the last time it worked
+    /// through a drive letter; tried when that letter is not mapped or does
+    /// not answer. Learned by the reader, cleared when the folder changes.
+    pub shared_cache_unc: Option<String>,
     /// The shared cache is expected on every PC; the app keeps asking until
     /// it works. Only IT should switch this off (in settings.json).
     pub shared_cache_enabled: bool,
@@ -220,6 +228,7 @@ impl Default for Settings {
             ocr_quality: OcrQuality::Auto,
             ocr_dpi: 300,
             shared_cache_dir: Some(OFFICE_CACHE_DIR.into()),
+            shared_cache_unc: None,
             shared_cache_enabled: true,
             keep_indexing_when_closed: true,
             busy_cpu_percent: 60,
@@ -289,6 +298,20 @@ impl Settings {
         self.discipline_prefixes.clone().unwrap_or_else(default_discipline_prefixes)
     }
 
+    /// Another way to the index folder `dir` when it cannot be reached as
+    /// written: the network path learned while it worked, or, for the office
+    /// default on U:, its known network path.
+    pub fn shared_cache_fallback(&self, dir: &str) -> Option<String> {
+        let norm = |d: &str| d.trim().trim_end_matches('\\').to_lowercase();
+        let same = self.shared_cache_dir.as_deref().is_some_and(|d| norm(d) == norm(dir));
+        if same {
+            if let Some(u) = self.shared_cache_unc.as_deref().filter(|u| u.starts_with(r"\\")) {
+                return Some(u.to_string());
+            }
+        }
+        (norm(dir) == norm(OFFICE_CACHE_DIR)).then(|| OFFICE_CACHE_UNC.to_string())
+    }
+
     pub fn load_from(path: &Path) -> anyhow::Result<Settings> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -342,6 +365,19 @@ mod tests {
         let d = std::env::temp_dir().join(format!("dh-settings-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d.join("settings.json")
+    }
+
+    #[test]
+    fn index_folder_fallback() {
+        let mut s = Settings::default();
+        // the office default on U: falls back to its known network path
+        assert_eq!(s.shared_cache_fallback(r"u:\sleuth-cache\").as_deref(), Some(OFFICE_CACHE_UNC));
+        assert_eq!(s.shared_cache_fallback(r"P:\Other"), None);
+        // a learned path wins, but only for the folder it was learned for
+        s.shared_cache_dir = Some(r"P:\Index".into());
+        s.shared_cache_unc = Some(r"\\fs1\data\Index".into());
+        assert_eq!(s.shared_cache_fallback(r"p:\index").as_deref(), Some(r"\\fs1\data\Index"));
+        assert_eq!(s.shared_cache_fallback(r"Q:\Index"), None);
     }
 
     #[test]

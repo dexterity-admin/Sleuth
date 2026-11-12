@@ -5271,7 +5271,7 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sleuth"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "rust_xlsxwriter",
@@ -5292,7 +5292,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-core"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5302,7 +5302,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-engine"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5328,7 +5328,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-extract"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "calamine",
@@ -5343,7 +5343,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-lanes"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5354,7 +5354,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-office"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -5367,7 +5367,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-server"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5394,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "sleuth-worker"
-version = "1.1.1"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "serde_json",

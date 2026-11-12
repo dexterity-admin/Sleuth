@@ -279,7 +279,7 @@ mod tests {
 /// written. Each probe that can hang on a network share runs with a timeout.
 pub fn check_cache(dir: Option<&str>, enabled: bool, drives: &DriveMap) -> CacheCheck {
     use sleuth_core::protocol::CacheState as S;
-    let check = |state, path: &str, message: &str| CacheCheck { state, path: path.to_string(), message: message.to_string() };
+    let check = |state, path: &str, message: &str| CacheCheck { state, path: path.to_string(), message: message.to_string(), office_server: None };
     if !enabled {
         return check(S::Disabled, "", "switched off");
     }
@@ -339,6 +339,35 @@ pub fn check_cache(dir: Option<&str>, enabled: bool, drives: &DriveMap) -> Cache
     }
 }
 
+/// `check_cache`, then, when the folder cannot be reached as written (a drive
+/// letter that is not mapped on this PC, or a share that does not answer), the
+/// same folder by its network path (`fallback`). A working folder also brings
+/// the office server's connection card, when the server's setup left one.
+pub fn check_cache_with(dir: Option<&str>, fallback: Option<&str>, enabled: bool, drives: &DriveMap) -> CacheCheck {
+    use sleuth_core::protocol::CacheState as S;
+    let mut c = check_cache(dir, enabled, drives);
+    if let (S::NotSet | S::Offline, Some(dir), Some(alt)) = (c.state, dir.map(str::trim).filter(|d| !d.is_empty()), fallback.map(str::trim)) {
+        if !alt.is_empty() && !alt.eq_ignore_ascii_case(&c.path) && !alt.eq_ignore_ascii_case(dir) {
+            let a = check_cache(Some(alt), true, drives);
+            if a.state == S::Ok {
+                let why = c.message.clone();
+                c = CacheCheck { message: format!("working through the network path, because {why}"), ..a };
+            }
+        }
+    }
+    if c.state == S::Ok {
+        c.office_server = read_server_card(Path::new(&c.path));
+    }
+    c
+}
+
+/// The connection card `sleuth-server setup` writes into the index folder.
+pub fn read_server_card(dir: &Path) -> Option<sleuth_core::protocol::OfficeServerCard> {
+    let p = dir.join(crate::remote::SERVER_CARD_FILE);
+    let text = with_timeout(move || std::fs::read_to_string(p), Duration::from_secs(5))?.ok()?;
+    serde_json::from_str::<sleuth_core::protocol::OfficeServerCard>(text.trim_start_matches('\u{feff}')).ok().filter(|c| c.address.starts_with("https://"))
+}
+
 fn with_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static, t: Duration) -> Option<T> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -360,5 +389,38 @@ mod check_tests {
         assert_eq!(check_cache(Some(r"C:\cache"), true, &drives).state, CacheState::NoAccess);
         assert_eq!(check_cache(None, true, &drives).state, CacheState::NotSet);
         assert_eq!(check_cache(None, false, &drives).state, CacheState::Disabled);
+    }
+
+    #[test]
+    fn a_fallback_that_fails_too_keeps_the_first_answer() {
+        let drives = DriveMap { drives: vec![Drive { letter: "C:".into(), kind: DriveKind::Fixed, unc: None }] };
+        let c = check_cache_with(Some(r"U:\Sleuth-cache"), Some(r"\\no-such-host-sleuth-test\share\Sleuth-cache"), true, &drives);
+        assert_eq!(c.state, CacheState::NotSet);
+        assert!(c.message.contains("not mapped"), "{}", c.message);
+        assert!(c.office_server.is_none());
+    }
+
+    /// Run by hand on an office PC: `cargo test -p sleuth-engine office_unc -- --ignored`.
+    #[test]
+    #[ignore]
+    fn office_unc_is_used_when_u_is_not_mapped() {
+        let drives = DriveMap { drives: vec![Drive { letter: "C:".into(), kind: DriveKind::Fixed, unc: None }] };
+        let c = check_cache_with(Some(sleuth_core::settings::OFFICE_CACHE_DIR), Some(sleuth_core::settings::OFFICE_CACHE_UNC), true, &drives);
+        assert_eq!(c.state, CacheState::Ok, "{}", c.message);
+        assert!(c.path.starts_with(r"\\"), "{}", c.path);
+        assert!(c.message.starts_with("working through"), "{}", c.message);
+    }
+
+    #[test]
+    fn server_card_is_read_from_the_folder() {
+        let d = std::env::temp_dir().join(format!("sleuth-card-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(read_server_card(&d).is_none());
+        std::fs::write(d.join(crate::remote::SERVER_CARD_FILE), r#"{"address":"https://srv:8455","pc":"SRV","at":5}"#).unwrap();
+        let c = read_server_card(&d).unwrap();
+        assert_eq!((c.address.as_str(), c.pc.as_str(), c.at), ("https://srv:8455", "SRV", 5));
+        std::fs::write(d.join(crate::remote::SERVER_CARD_FILE), r#"{"address":"ftp://x"}"#).unwrap();
+        assert!(read_server_card(&d).is_none(), "only https addresses are offered");
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.0
+
+- **Office server setup by double-click:** `sleuth-server.exe` opened with no
+  arguments now runs a guided setup instead of closing at once. It asks for
+  administrator rights, installs itself in Program Files, and walks through
+  the index folder, projects, certificates, access keys and the Windows
+  service, checks the server answers, and ends with what to enter on each PC.
+  Running it again opens a menu (add or remove people, check, restart, renew).
+- **Server found by itself:** setup leaves the server's address in the office
+  index folder next to its certificate. Settings > Office server offers it
+  with **Use it**, so a PC needs only its access key. A "Where do these come
+  from?" note explains each field.
+- **Office index folder settles once set:** when the saved folder works it is
+  shown as set up, with **Change...** to edit it, and the red outline goes as
+  soon as a test succeeds.
+- **Drive letter or network path:** U:\Sleuth-cache stays the default; on a
+  PC where U: is not mapped or does not answer, Sleuth uses the same folder by
+  its network path. For any other drive letter, the network path it led to is
+  remembered while it works and used the same way.
+
 ## 1.1.1
 
 - **Fixed:** an email or a text file no longer gets a drawing number or

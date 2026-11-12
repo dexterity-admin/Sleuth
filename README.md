@@ -23,6 +23,15 @@
 <p align="center"><img src="docs/images/v11/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line lists (PDF and Excel); on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial, verify with the reason" width="100%"></p>
 <p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
 
+## New in 1.2: office server by double-click
+
+| | |
+|---|---|
+| **Guided server setup** | Double-click `sleuth-server.exe` from the extracted server zip: it asks for administrator rights, installs itself in Program Files, and walks through the index folder, projects, certificates, access keys and the Windows service, then shows what to enter on each PC. Run it again for a menu. |
+| **Server found by itself** | Setup leaves the server's address next to its certificate in the office index folder. Settings → Office server offers it with **Use it**, so each PC only pastes its access key. |
+| **Index folder that stays put** | Once the saved folder works it shows as set up, with **Change…** to edit it, and the red outline clears. |
+| **U: or network path** | `U:\Sleuth-cache` stays the default; where `U:` isn't mapped or doesn't answer, Sleuth uses the same folder by its network path by itself. |
+
 ## New in 1.1: one office index, every file type
 
 | | |

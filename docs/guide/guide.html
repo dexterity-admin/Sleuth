@@ -5,7 +5,7 @@
 <title>Sleuth User Guide</title>
 <style>
 /* Printed A4 manual. Body in Segoe UI for screen-like familiarity; tags and paths in Consolas. */
-@page { size: A4; margin: 18mm 17mm 20mm; @bottom-left { content: "Sleuth User Guide · version 1.1"; font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } @bottom-right { content: counter(page); font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } }
+@page { size: A4; margin: 18mm 17mm 20mm; @bottom-left { content: "Sleuth User Guide · version 1.2"; font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } @bottom-right { content: counter(page); font: 8.5pt "Segoe UI", sans-serif; color: #7a8796; } }
 @page cover { margin: 0; @bottom-left { content: none; } @bottom-right { content: none; } }
 :root { --ink: #16202c; --ink-2: #4c5a6b; --ink-3: #7a8796; --blue: #1f5fbf; --blue-soft: #e8f0fc; --red: #d7262b; --line: #d5dbe3; --ok: #1d7a4a; --ok-soft: #e1f2e8; --warn: #8a5700; --warn-soft: #fbefd6; }
 * { box-sizing: border-box; }
@@ -70,7 +70,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <div class="grid"></div>
   <div class="text">
     <img class="logo" src="../../site/assets/icon.png" alt="">
-    <div class="kicker">User guide · version 1.1</div>
+    <div class="kicker">User guide · version 1.2</div>
     <h1>Sleuth<span>.</span></h1>
     <div class="sub">Find any tag, in any drawing, on any drive. Even when the PDF is a scan.</div>
   </div>
@@ -413,9 +413,16 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <h3>The office server</h3>
 <p>If IT runs the Sleuth office server, it reads into the same office index as the PCs, day and night at full speed. Your searches include what it has read, and its projects and access keys work as before.</p>
 <ol>
-  <li>Get the server address and your personal access key from IT.</li>
-  <li>Settings → Office server: enter both. The certificate is found automatically in the office index folder; IT may give you a file instead.</li>
-  <li>Click <b>Test</b>, then <b>Connect and save</b>. Your key is stored encrypted for your Windows account.</li>
+  <li>Settings → Office server. When the server was set up, Sleuth finds it in the office index folder and shows <b>Found the office server … Use it</b>: click <b>Use it</b> to fill in the address.</li>
+  <li>Paste your personal <b>access key</b>. Leave the certificate empty: Sleuth finds it in the office index folder.</li>
+  <li>Click <b>Test</b>, then <b>Connect and save</b>. "Now: Connected." means it works. Your key is stored encrypted for your Windows account.</li>
+</ol>
+<h3>Setting up the office server (once, on the PC that stays on)</h3>
+<ol>
+  <li>Download <b>Sleuth-Server_…_x64.zip</b> from the releases page, right-click it → <b>Extract All…</b>.</li>
+  <li>Double-click <b>sleuth-server.exe</b> and allow administrator rights. A setup window copies the server to Program Files and walks through five steps: the office index folder, the projects to read, certificates, access keys and the Windows service.</li>
+  <li>Each access key is shown once and copied to the clipboard. Give each person theirs. The window ends with exactly what to enter on each PC.</li>
+  <li>Run <b>sleuth-server.exe</b> again any time to add or remove a person, add a project, check everything or restart the service.</li>
 </ol>
 <p>You only see projects IT has given you. If the server is offline, Sleuth says so above the results and keeps searching your own index. <b>Disconnect</b> returns to working on your own.</p>
 
@@ -430,6 +437,9 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <li>after a minute, opens Settings with the office index section highlighted;</li>
   <li>won't save a folder that doesn't work.</li>
 </ol>
+<p>Once the saved folder works, Settings shows it as <b>set up on this PC</b>, with <b>Change…</b> to edit it, and the red outline goes.</p>
+<h3>Drive letter or network path</h3>
+<p><code>U:\Sleuth-cache</code> is the default. On a PC where <code>U:</code> isn't mapped or doesn't answer, Sleuth uses the same folder by its network path (<code>\\192.168.0.200\free exchange - updated\Sleuth-cache</code>) by itself, and Settings says so. For another drive letter, Sleuth remembers the network path it led to while it worked, and uses it the same way.</p>
 <p>If the folder is only temporarily unreachable (you're off-site, or the server is down), Sleuth says so: <b>searching text inside documents resumes when it is back</b>. What your PC reads meanwhile is kept on your PC and added to the office index when the folder is back.</p>
 <h3>Upgrading from 1.0</h3>
 <p>Version 1.0 kept a full index on each PC, often 5 to 6 GB. When you install 1.1, your PC moves the readings it already has into the office index, checks that they arrived, and then deletes its old index. Nothing is read again.</p>
@@ -528,6 +538,6 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td><span class="pill sep">Separators ignored</span></td><td>Usually; glance at the preview.</td></tr>
   <tr><td><span class="pill verify">Verify, OCR unsure</span></td><td>Check the page yourself before relying on it.</td></tr>
 </table>
-<p style="margin-top:18pt;color:var(--ink-3);font-size:9pt">Sleuth 1.1 · Dexterity Design Services Pvt. Ltd. · Screenshots show Sleuth's own interface with results read from sample drawings; folder and server names are examples. Latest version and this guide: github.com/dexterity-admin/Sleuth</p>
+<p style="margin-top:18pt;color:var(--ink-3);font-size:9pt">Sleuth 1.2 · Dexterity Design Services Pvt. Ltd. · Screenshots show Sleuth's own interface with results read from sample drawings; folder and server names are examples. Latest version and this guide: github.com/dexterity-admin/Sleuth</p>
 </body>
 </html>

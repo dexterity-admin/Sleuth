@@ -201,6 +201,12 @@ dialog .check { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
 .banner.warn { background: var(--warn-soft); }
 .banner.warn #cacheBannerText { color: var(--ink); }
 #cacheSection.attention { outline: 3px solid var(--red); outline-offset: 6px; border-radius: 6px; animation: attention 1.2s ease-in-out 4; }
+#cacheSection.locked #s-cache { background: transparent; border-color: transparent; color: var(--ink); padding-left: 0; }
+#s-cacheBadge.ok { color: var(--ok); text-transform: none; }
+#serverSection .found { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; padding: 6px 8px; border: 1px solid var(--accent); border-radius: 6px; }
+#serverSection .howto summary { cursor: pointer; }
+#serverSection .howto ol { margin: 6px 0 0 18px; padding: 0; }
+#serverSection .howto li { margin: 3px 0; }
 @keyframes attention { 50% { outline-color: transparent; } }
 .ok-text { color: var(--ok); }
 @media (prefers-reduced-motion: reduce) { #cacheSection.attention { animation: none; } }

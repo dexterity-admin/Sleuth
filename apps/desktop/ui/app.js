@@ -399,7 +399,30 @@ function highlightCache() {
 function showCacheCheck(c) {
   const p = $("s-cacheState");
   p.className = c.state === "ok" ? "hint ok-text" : "hint error";
-  p.textContent = c.state === "ok" ? `Working: ${c.path}` : c.state === "offline" ? `Can't be reached right now: ${c.message}` : `Not usable: ${c.message}`;
+  p.textContent = c.state === "ok" ? `Working: ${c.path}${c.message && c.message !== "working" ? ` (${c.message})` : ""}` : c.state === "offline" ? `Can't be reached right now: ${c.message}` : `Not usable: ${c.message}`;
+  // a folder that works needs no more attention: the red outline goes
+  if (c.state === "ok") $("cacheSection").classList.remove("attention");
+  showServerCard(c.state === "ok" ? c.office_server : null);
+}
+/** Once the saved folder works, it is shown as set and cannot be changed by accident ("Change…" opens it again). */
+function setCacheLocked(locked) {
+  $("cacheSection").classList.toggle("locked", locked);
+  $("s-cache").readOnly = locked;
+  $("s-cacheTest").hidden = locked; $("s-cachePick").hidden = locked; $("s-cacheChange").hidden = !locked;
+  $("s-cacheBadge").textContent = locked ? "· set up on this PC" : "(required)";
+  $("s-cacheBadge").classList.toggle("ok", locked);
+}
+$("s-cacheChange").onclick = () => { setCacheLocked(false); $("s-cache").focus(); $("s-cache").select(); };
+/** The office server's setup left its address in the index folder: offer it when none is typed in. */
+function showServerCard(card) {
+  const box = $("s-srvFound");
+  const url = $("s-srvUrl").value.trim();
+  if (!card?.address || url.toLowerCase() === card.address.toLowerCase()) { box.hidden = true; return; }
+  const use = el("button", "small primary", "Use it"); use.type = "button";
+  use.onclick = () => { $("s-srvUrl").value = card.address; box.hidden = true; $("s-srvKey").focus(); };
+  const when = card.at ? ` (set up ${new Date(card.at * 1000).toLocaleDateString()})` : "";
+  box.replaceChildren(el("span", null, `Found the office server on ${card.pc || "the server PC"}${when}: `), el("b", "mono", card.address), use);
+  box.hidden = false;
 }
 async function testCache() {
   const dir = $("s-cache").value.trim();
@@ -409,7 +432,10 @@ async function testCache() {
   return r.check;
 }
 $("s-cacheTest").onclick = () => testCache().catch((e) => { $("s-cacheState").textContent = String(e); });
-$("settingsDlg").addEventListener("close", () => { if (storeNeedsUser(state.lastStatus?.status)) cacheNagSince = Date.now(); });
+$("settingsDlg").addEventListener("close", () => {
+  $("cacheSection").classList.remove("attention");
+  if (storeNeedsUser(state.lastStatus?.status)) cacheNagSince = Date.now();
+});
 
 // ---------- settings ----------
 async function loadSettings() {
@@ -456,6 +482,7 @@ async function openSettings(focusCache, focusSection) {
   $("s-srvUrl").value = s.server?.url || ""; $("s-srvKey").value = ""; $("s-srvCa").value = s.server?.ca_file || "";
   $("s-srvKey").placeholder = s.server?.token_protected ? "Saved. Leave blank to keep it" : "Access key from IT";
   showServerState(state.server, false);
+  $("s-srvFound").hidden = true;
   $("s-tagRules").value = s.tag_rules ? JSON.stringify(s.tag_rules, null, 2) : "";
   $("s-fieldRules").value = s.field_rules ? JSON.stringify(s.field_rules, null, 2) : "";
   draftProjects = (s.projects || []).map((p) => ({ name: p.name, roots: [...(p.roots || [])] }));
@@ -468,10 +495,14 @@ async function openSettings(focusCache, focusSection) {
   call({ req: "monitor" }).then((r) => { if (r.monitor?.backend_note) $("s-backendNote").textContent = `Currently running on: ${st?.ocr_backend || r.monitor.status?.ocr_backend || "?"}. ${r.monitor.backend_note}`; }).catch(() => {});
   const c = st?.cache;
   if (c) showCacheCheck(c); else $("s-cacheState").textContent = "";
+  $("cacheSection").classList.remove("attention");
+  setCacheLocked(!!s.shared_cache_dir && c?.state === "ok");
   renderSettingsIndex();
   $("settingsDlg").showModal();
   checkRollback();
-  if (focusCache || storeNeedsUser(st)) highlightCache();
+  // fresh check of the saved folder: refreshes the state line and brings the server card
+  if (s.shared_cache_dir) testCache().then((r) => { if (r.state === "ok" && $("s-cache").value.trim() === (s.shared_cache_dir || "").trim()) setCacheLocked(true); }).catch(() => {});
+  if (focusCache || storeNeedsUser(st)) { setCacheLocked(false); highlightCache(); }
   else if (focusSection) $(focusSection).scrollIntoView({ block: "start" });
 }
 $("s-cachePick").onclick = async () => { const p = await invoke("pick_folder"); if (p) { $("s-cache").value = p; testCache().catch(() => {}); } };

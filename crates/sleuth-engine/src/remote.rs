@@ -19,6 +19,8 @@ use std::time::Duration;
 
 pub const API_MAJOR: u32 = 1;
 pub const CA_FILE_NAME: &str = "sleuth-server-ca.pem";
+/// The server's connection card in the office index folder (address, PC).
+pub const SERVER_CARD_FILE: &str = "sleuth-server.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
