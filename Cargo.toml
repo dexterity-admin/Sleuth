@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sleuth-core", "crates/sleuth-office", "crates/sleuth-extract", "crates/sleuth-lanes", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri", "apps/server"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 authors = ["Dexterity Design Services Pvt. Ltd."]
 license = "LicenseRef-Proprietary"
