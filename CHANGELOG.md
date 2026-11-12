@@ -34,14 +34,22 @@ index (5 to 6 GB on a busy PC); settings are kept.
   model's text, an email, with the matching lines marked.
 - **Reading is faster and never stops by itself.**
   - Documents that need no OCR (plotted PDFs and every type above but
-    images) are read many at a time: {FAST_RATE}.
+    images) are read many at a time: one PC read 2,000 spreadsheets, Word and
+    text files on a network share in about 3 minutes (roughly 40,000 small
+    files an hour). Larger documents take longer.
   - Scanned pages are read by separate reader processes at the lowest
     processor priority, so the PC stays as quick as before. The number of
     readers starts at the minimum while the PC is in use and doubles every
     30 seconds while it is free.
-  - OCR itself does about a third less work on dense drawings ({OCR_GAIN})
-    and needs {OCR_MEM} instead of 1.8 GB per reader, with the same text
-    found.
+  - OCR reads real scanned drawings about 1.3 to 1.4 times as fast and
+    needs about 0.8 GB instead of 1.8 GB per reader. Where it finds text on
+    a page is exactly as before; on 30 real drawings no text found before
+    was lost, and short text that 1.0 read upside down (900 as 006) is now
+    read the right way up. Pages read by 1.0 are read again once, because
+    the reading changed.
+  - Scanned pages still take minutes of processor time each on a PC: one
+    PC reads a few dozen scanned pages an hour per processor core. The
+    office reads many more by every PC reading at once.
   - A file that crashes or hangs its reader costs that file, not the reader.
 - **You control both stages.** Pause and resume finding files and reading,
   start either at once (**Find files now**, **Read now**), choose **Full

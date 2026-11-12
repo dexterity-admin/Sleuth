@@ -25,6 +25,8 @@
 
 ## New in 1.1: one office index, every file type
 
+> **Development build.** 1.1 is on the Development update channel for testing; the stable release follows. The [latest release](https://github.com/dexterity-admin/Sleuth/releases/latest) is still 1.0.2.
+
 | | |
 |---|---|
 | **One office index** | Kept in the shared folder (`U:\Sleuth-cache`), not on each PC: a PC keeps only settings and a few MB of work in progress. One PC lists each share for everybody; every PC that is on reads for everybody, and a document is read once for the whole office. |
