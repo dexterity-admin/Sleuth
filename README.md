@@ -20,8 +20,8 @@
 
 **Sleuth** is the internal drawing search tool of Dexterity Design Services. Type a tag, line number, document number or any text printed on a drawing. Sleuth shows every file that contains it, says **why** each one matched, and opens the page with the text **circled in red**, even when the PDF is a scan.
 
-<p align="center"><img src="docs/images/v1/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line list; on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial with the reason" width="100%"></p>
-<p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth 1.0 still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
+<p align="center"><img src="docs/images/v11/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line lists (PDF and Excel); on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial, verify with the reason" width="100%"></p>
+<p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
 
 ## New in 1.1: one office index, every file type
 
@@ -33,21 +33,27 @@
 | **Faster reading that never gets in the way** | Documents needing no OCR are read many at a time; scans are read by separate processes at the lowest priority, ramping up while the PC is free. |
 | **Pause, resume, now** | Each stage can be paused, resumed or started at once by hand, and reading can run at full speed for an hour. |
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/v11/search.png" alt="Searching PSV-1203: P&amp;IDs, isometric, scan, email, CSV, Excel and Word results; ISO-1001-01.pdf carries DGN and DWG labels and its page is open with the tag marked"><br><sub><b>One row per drawing:</b> the PDF of ISO-1001-01 carries its DGN and DWG; the email, spreadsheet and Word file that mention the valve are found too.</sub></td>
+    <td width="50%"><img src="docs/images/v11/cad.png" alt="The MicroStation file ISO-1001-01.dgn previewed as text with PSV-1203 marked; Open in MicroStation and Show the PDF page"><br><sub><b>Inside CAD files:</b> the text of a DGN with the match marked, and its DWG and PDF beside it.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/v11/text-preview.png" alt="An Excel line list previewed sheet by sheet with the row of 6&quot;-P-1001-A1B marked"><br><sub><b>Inside spreadsheets:</b> the matching row marked, sheet by sheet.</sub></td>
+    <td><img src="docs/images/v11/email.png" alt="An Outlook email previewed with both mentions of PSV-1203 marked"><br><sub><b>Inside emails:</b> subject, sender, date and body.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/images/v11/stage-menu.png" alt="The Pause or start menu of stage 2: Pause reading, Read now, Full speed for 1 hour, Gentle, Automatic speed"><br><sub><b>Your controls:</b> pause, Read now, Full speed for 1 hour or Gentle, for each stage.</sub></td>
+    <td><img src="docs/images/v11/monitor.png" alt="Monitor: the office index folder, its size and documents readable; three PCs with user, version and what each is doing; both stages below"><br><sub><b>The office:</b> one index on U:, every PC that reads, and what each is doing.</sub></td>
+  </tr>
+</table>
+
 See [what is new in 1.1](CHANGELOG.md) for the details and the measured speeds.
 
 ## New in 1.0.1: indexing you can watch
 
 1.0.0 could leave a new install with nothing to search: reading folders chosen by drive letter (`Z:\`) were never read, and the walk of each drive skipped most subfolders. 1.0.1 fixes both and shows what Sleuth is doing at every moment. An existing index is repaired when you install it.
 
-<p align="center"><img src="docs/images/v101/welcome.png" alt="New install: the welcome card shows stage 1, Finding files (folders listed, files found, running time), and stage 2, Reading PDFs (waiting for the file list), with the reading folders and their state in the sidebar" width="100%"></p>
-<p align="center"><sub>A new install says what happens next and how far it has got. The status strip at the bottom stays visible everywhere.</sub></p>
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/v101/monitor-walking.png" alt="Monitor during the first listing: each drive with its state (done, listing folders, waiting its turn, offline), folders and files; reading folders with a note when a drive letter is not mapped"><br><sub><b>Stage 1, finding files:</b> every drive with its progress, and why a drive or reading folder needs attention.</sub></td>
-    <td width="50%"><img src="docs/images/v101/monitor-reading.png" alt="Monitor while reading: PDFs read of total in each reading folder, waiting, failed, pages per hour and time left"><br><sub><b>Stage 2, reading PDFs:</b> read of total per reading folder, speed and time left.</sub></td>
-  </tr>
-</table>
 
 | | |
 |---|---|
@@ -75,20 +81,20 @@ No AI of any kind: no language models, chat, generated summaries or learning fro
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/v1/revisions.png" alt="Revision compare: FV-2301 changed to FV-2302, PT-5501 to LT-6601, both pages side by side with the tag marked"><br><sub><b>Revisions:</b> rev A against rev B, every changed tag marked on both sheets.</sub></td>
-    <td width="50%"><img src="docs/images/v1/tags.png" alt="Tags view: 41 tags with documents, places and lowest confidence; DOC-1001-17 found in three places"><br><sub><b>Tags:</b> every tag, where it appears, and how surely it was read.</sub></td>
+    <td width="50%"><img src="docs/images/v11/revisions.png" alt="Revision compare: FV-2301 changed to FV-2302, PT-5501 to LT-6601, both pages side by side with the tag marked"><br><sub><b>Revisions:</b> rev A against rev B, every changed tag marked on both sheets.</sub></td>
+    <td width="50%"><img src="docs/images/v11/tags.png" alt="Tags view filtered to 1203: PSV-1203 with documents, places and lowest confidence; every place listed and the P&amp;ID page with it marked"><br><sub><b>Tags:</b> every tag, where it appears, and how surely it was read.</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/v1/details.png" alt="Details tab: drawing number, title, revision and sheet with the text each was read from; page read as text plus scan, two OCR tiles"><br><sub><b>Evidence:</b> title-block values with the line they came from, and how the file was read.</sub></td>
-    <td><img src="docs/images/v1/related.png" alt="Related tab listing drawings that share tags with the P&amp;ID"><br><sub><b>Related:</b> drawings sharing tags with the one open.</sub></td>
+    <td><img src="docs/images/v11/details.png" alt="Details tab of a P&amp;ID: drawing number, title, revision and sheet with the text each was read from; the scanned page and its OCR tiles; which PC read it"><br><sub><b>Evidence:</b> title-block values with the line they came from, and how the file was read.</sub></td>
+    <td><img src="docs/images/v11/related.png" alt="Related tab listing documents that share tags with the P&amp;ID, with the shared tags"><br><sub><b>Related:</b> drawings sharing tags with the one open.</sub></td>
   </tr>
   <tr>
-    <td><img src="docs/images/v1/monitor.png" alt="Monitor: files read, OCR time per page, pages by kind, search times, the OCR backend and why"><br><sub><b>Monitor:</b> reading, cache, search times, and why OCR runs where it does.</sub></td>
-    <td><img src="docs/images/v1/settings-server.png" alt="Settings: optional office server and projects"><br><sub><b>Projects and office server:</b> both optional.</sub></td>
+    <td><img src="docs/images/v11/settings.png" alt="Settings: reading speed, the busy-PC threshold, file types read inside, the office index folder"><br><sub><b>Settings:</b> reading speed and the file types read inside.</sub></td>
+    <td><img src="docs/images/v11/scan.png" alt="A scanned isometric with HV-4410 read by OCR at 100% confidence and circled"><br><sub><b>Scans:</b> read by OCR, the tag circled on the sheet.</sub></td>
   </tr>
 </table>
 
-<sub>Screenshots show Sleuth 1.0 running against the real reader with sample drawings. Folder, drive and PC names are examples.</sub>
+<sub>Screenshots show Sleuth 1.1 running against the real reader with sample files, three example PCs sharing one test office index. Folder, drive, PC and user names are examples.</sub>
 
 ## Get started
 

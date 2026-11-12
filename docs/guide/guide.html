@@ -74,7 +74,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
     <h1>Sleuth<span>.</span></h1>
     <div class="sub">Find any tag, in any drawing, on any drive. Even when the PDF is a scan.</div>
   </div>
-  <div class="shot"><img src="../images/v1/search-partial.png" alt=""></div>
+  <div class="shot"><img src="../images/v11/search.png" alt=""></div>
   <div class="foot">Dexterity Design Services Pvt. Ltd. · internal tool · github.com/dexterity-admin/Sleuth</div>
 </section>
 
@@ -154,7 +154,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 <p class="intro">Two things need to be right: the office index folder, and the folders you want Sleuth to read. Both take a minute.</p>
 <h3>Step 1: the office index folder</h3>
 <p>Sleuth uses the office folder <code>U:\Sleuth-cache</code> automatically. If your PC has <code>U:</code> mapped, there is nothing to do. If it doesn't, Sleuth shows a yellow message at the top of the window. If you leave it, Sleuth opens Settings and highlights the place to fix it:</p>
-<figure><img src="../images/cache.png" alt="Settings with the shared reading cache section outlined in red and the reason it is not working"><figcaption>Sleuth won't let this go: until the office folder works, it asks every minute. Section 16 explains why. (Screenshot from version 1.0, where the section was called "Shared reading cache".)</figcaption></figure>
+<figure><img src="../images/v11/settings-office.png" alt="Settings: the office index folder U:\Sleuth-cache, tested and Working, and the optional office server below it"><figcaption>Settings → Office index folder. <b>Test</b> shows "Working" in green when the folder is right. Until it works, Sleuth asks every minute; section 16 explains why.</figcaption></figure>
 <ol>
   <li>Type the folder IT gave you, or click <b>Browse</b> to pick it. It must be on a network drive everyone can write to.</li>
   <li>Click <b>Test</b>. "Working" in green means it's right.</li>
@@ -171,8 +171,8 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">4</span>A tour of the window</h2>
 <p class="intro">Sleuth's window has a search bar at the top and three panes below it.</p>
-<figure class="callout-map"><img src="../images/v1/search-or.png" alt="The Sleuth window with a search for two tags and its preview">
-  <span class="k" style="left:37%;top:0.6%">1</span><span class="k" style="left:30%;top:5%">2</span><span class="k" style="left:84%;top:5%">3</span><span class="k" style="left:7%;top:33%">4</span><span class="k" style="left:45%;top:40%">5</span><span class="k" style="left:80%;top:30%">6</span><span class="k" style="left:66%;top:93%">7</span>
+<figure class="callout-map"><img src="../images/v11/search-or.png" alt="The Sleuth window with a search for two tags, the results, the preview with both tags marked, and the two stages at the bottom">
+  <span class="k" style="left:36%;top:0.6%">1</span><span class="k" style="left:30%;top:5%">2</span><span class="k" style="left:84%;top:5%">3</span><span class="k" style="left:7%;top:33%">4</span><span class="k" style="left:45%;top:22%">5</span><span class="k" style="left:80%;top:30%">6</span><span class="k" style="left:47%;top:93%">7</span>
   <figcaption>A search for two tags at once. The numbers match the table below.</figcaption></figure>
 <table>
   <tr><th>#</th><th>Part</th><th>What it does</th></tr>
@@ -180,9 +180,9 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <tr><td>2</td><td>Project and search box</td><td>Pick a project, or <b>All locations</b>. Type a tag or any text; results appear as you type. <kbd>Ctrl</kbd>+<kbd>F</kbd> jumps here. <b>?</b> shows the search syntax; <b>▾</b> shows recent and pinned searches.</td></tr>
   <tr><td>3</td><td>Smart match, Deep search, Export</td><td><b>Smart match</b> also finds tags written differently; <b>Exact only</b> hides those. <b>Deep search</b> walks the drives live (section 8). <b>Export</b> saves the results to Excel or CSV.</td></tr>
   <tr><td>4</td><td>Locations and filters</td><td>Tick the drives to search. Show or hide result types. Manage <b>Folders being read</b>.</td></tr>
-  <tr><td>5</td><td>Results</td><td>One row per file: name, folder, the exact text found, page and match type. Hover a row to see why it matched. Click a column heading to sort.</td></tr>
-  <tr><td>6</td><td>Preview</td><td><b>Page</b>: the page with the text circled in red. <b>Details</b>: title block and how the file was read. <b>Related</b>: drawings sharing tags.</td></tr>
-  <tr><td>7</td><td>Status bar</td><td>Number of results, the office server if you use one, and what the reader is doing. Click the reader status for details.</td></tr>
+  <tr><td>5</td><td>Results</td><td>One row per document: its type, name, folder, the exact text found, page and match type. The PDF, DWG and DGN of one drawing share a row, with the other types as small labels after the name. Hover a row to see why it matched. Click a column heading to sort.</td></tr>
+  <tr><td>6</td><td>Preview</td><td><b>Page</b>: the page with the text circled in red, or for a spreadsheet, email or CAD file the text read from it with the match marked. <b>Details</b>: title block and how the file was read. <b>Related</b>: drawings sharing tags.</td></tr>
+  <tr><td>7</td><td>Status strip and status bar</td><td>The two stages, <b>Finding files</b> and <b>Reading documents</b>, each with a <b>Pause or start</b> menu (section 9); click a stage for details. Below it: the number of results and the office server if you use one.</td></tr>
 </table>
 
 <h2><span class="n">5</span>Searching</h2>
@@ -239,7 +239,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
   <li><b>Checked</b>: a person typed this reading in Check readings.</li>
   <li><b>File name</b>: matched the name only.</li>
 </ul>
-<figure><img src="../images/scan.png" alt="A faint scanned isometric with the tag HV-4410 circled"><figcaption>A low-contrast site scan. The tag was read with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
+<figure><img src="../images/v11/scan.png" alt="A scanned isometric with the tag HV-4410 circled"><figcaption>A site scan. The tag was read by OCR with 100% confidence; the circled mark lets you confirm it in a second.</figcaption></figure>
 <div class="eng"><b>Rule of thumb</b>Sleuth never reports an uncertain reading as Exact. If it matters, look at the page: the preview is one click away and always shows the spot.</div>
 
 <h2><span class="n">7</span>Previewing and opening files</h2>
@@ -267,7 +267,9 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
     </ul>
   </div>
 </div>
-<figure><img src="../images/menu.png" alt="The right-click menu on a result"><figcaption>Right-click any result for these actions.</figcaption></figure>
+<figure><img src="../images/v11/menu.png" alt="The right-click menu on a result: Open, Open folder, Copy path, Copy network path, Copy text found, Read this file now, Check low-confidence readings"><figcaption>Right-click any result for these actions.</figcaption></figure>
+<figure><img src="../images/v11/text-preview.png" alt="Preview of an Excel line list: the sheet Process lines with the row of 6&quot;-P-1001-A1B marked, Sheet 1 of 2, and Open in Excel"><figcaption>A spreadsheet shows the text read from it, sheet by sheet, with the matching row marked.</figcaption></figure>
+<figure><img src="../images/v11/cad.png" alt="Preview of a MicroStation file ISO-1001-01.dgn: its text with PSV-1203 marked, Open in MicroStation and Show the PDF page; its DWG and PDF listed as Also saved as"><figcaption>A MicroStation drawing, with <b>One row per document</b> switched off so the DGN, DWG and PDF each have a row. <b>Show the PDF page</b> opens the same drawing's PDF.</figcaption></figure>
 <div class="tip"><b>Sharing a location with a colleague</b>Use <b>Copy network path</b>. Drive letters differ between PCs; the network path doesn't.</div>
 
 <h2><span class="n">8</span>Deep search: when you don't know where it is</h2>
@@ -326,7 +328,8 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 </ul>
 <h3>Index status</h3>
 <p>Click either stage in the status strip to open <b>Monitor</b>. It shows each drive (listing, done, partly listed or offline, with the reason), each reading folder with how many of its documents are read, and the files that could not be read and why. A reading folder given by a drive letter that is not mapped on this PC is flagged there.</p>
-<figure><img src="../images/v101/monitor-reading.png" alt="Monitor: both stages, each drive with its state, each reading folder with PDFs read of total"><figcaption>Monitor: what each stage is doing, every drive and reading folder, and files that can't be read, with the reason. (Screenshot from version 1.0.1.)</figcaption></figure>
+<figure><img src="../images/v11/stage-menu.png" alt="The Pause or start menu of stage 2: Pause reading, Read now, Full speed for 1 hour, Gentle, Automatic speed"><figcaption>The <b>Pause or start</b> menu of stage 2, Reading documents.</figcaption></figure>
+<figure><img src="../images/v11/paused.png" alt="The status strip with Reading documents Paused on this PC and a Resume button"><figcaption>Reading paused on this PC: <b>Resume</b> starts it again. Other PCs carry on.</figcaption></figure>
 <table>
   <tr><th>Reason shown</th><th>Meaning</th></tr>
   <tr><td>password protected</td><td>The PDF is encrypted. Sleuth can still find it by name.</td></tr>
@@ -337,7 +340,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">10</span>Tags: every tag and where it appears</h2>
 <p class="intro">The <b>Tags</b> view lists every engineering tag Sleuth has found in the drawings it has read, with the documents and places it appears in.</p>
-<figure><img src="../images/v1/tags.png" alt="The Tags view: a table of tags with category, documents, places and lowest confidence; on the right the places of DOC-1001-17 and the page with it marked"><figcaption>Click a tag to list every place it appears; click a place to see the page with the tag marked.</figcaption></figure>
+<figure><img src="../images/v11/tags.png" alt="The Tags view filtered to 1203: PSV-1203 with its documents, places and lowest confidence; on the right every place it was found, and the P&amp;ID page with it marked"><figcaption>Click a tag to list every place it appears; click a place to see the page with the tag marked.</figcaption></figure>
 <ul>
   <li><b>Categories</b>: line numbers, instruments, valves, equipment, supports, welds, drawing numbers and specs. Sleuth finds them with fixed patterns (rules) applied to the text it read; nothing is guessed. A line number like <code>6"-P-1001-A1B</code> is one tag, never also "equipment P-1001".</li>
   <li><b>Lowest confidence</b>: the weakest reading among the places. Under 80% it is marked <span class="pill verify">verify</span>: check those places on the drawing.</li>
@@ -348,7 +351,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">11</span>Revisions: what changed between two issues</h2>
 <p class="intro">The <b>Revisions</b> view groups drawings by drawing number and compares the tags of any two revisions.</p>
-<figure><img src="../images/v1/revisions.png" alt="Revision compare of ISO-2001-01 rev A and rev B: two tags changed, shown side by side with the tag marked on both sheets"><figcaption>Rev A against rev B. Select a change to see both sheets with the tag marked.</figcaption></figure>
+<figure><img src="../images/v11/revisions.png" alt="Revision compare of ISO-2001-01 rev A and rev B: FV-2301 changed to FV-2302 and PT-5501 to LT-6601, both sheets side by side with the tag marked"><figcaption>Rev A against rev B. Select a change to see both sheets with the tag marked.</figcaption></figure>
 <ol>
   <li>Find the drawing number (type part of it in the filter).</li>
   <li>Expand it. Sleuth lists its revisions oldest first and picks the last two; choose others with <b>Old</b> and <b>New</b>.</li>
@@ -365,7 +368,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">12</span>Details and related drawings</h2>
 <p class="intro">The preview pane has three tabs: <b>Page</b>, <b>Details</b> and <b>Related</b>.</p>
-<figure><img src="../images/v1/details.png" alt="The Details tab: drawing number, title, revision, discipline and sheet with the text each was read from; the page kind and OCR tiles; how the file was read"><figcaption>Every value shows the text it was read from. A value Sleuth did not find says "not found"; it is never guessed.</figcaption></figure>
+<figure><img src="../images/v11/details.png" alt="The Details tab of a P&amp;ID: drawing number, title, revision, discipline and sheet with the text each was read from; the page kind and OCR tiles; how the file was read and by which PC"><figcaption>Every value shows the text it was read from. A value Sleuth did not find says "not found"; it is never guessed.</figcaption></figure>
 <ul>
   <li><b>Title block</b>: drawing number, title, revision, project, discipline, sheet and status, each with its evidence (for example <code>page 1: "REV. B"</code>, or <code>OCR 98%</code> when it was read from a scan).</li>
   <li><b>Pages</b>: what kind each page is and how it was read:
@@ -392,7 +395,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">14</span>Monitor</h2>
 <p class="intro">The <b>Monitor</b> view shows how reading is going and why: useful when something seems slow or missing.</p>
-<figure><img src="../images/v1/monitor.png" alt="The Monitor view: files read, OCR time per page, pages by kind, search times, the OCR backend and why"><figcaption>Everything the reader is doing, with the reasons.</figcaption></figure>
+<figure><img src="../images/v11/monitor.png" alt="The Monitor view: the office index folder and its size, documents readable, the PCs seen in the last day with user, version and what each is doing, then both stages with their buttons"><figcaption>The office at the top: the office index, every PC that reads, and what each is doing. Both stages of this PC below.</figcaption></figure>
 <ul>
   <li><b>Office</b>: every PC that is reading (and the office server, if there is one), what it is doing and how fast, the office's documents an hour and time left, and the size of the office index.</li>
   <li><b>Reading</b>: documents read, waiting and failed, by file type; documents and pages per hour; OCR time per page.</li>
@@ -404,7 +407,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">15</span>Projects and the office server</h2>
 <p class="intro">Both are optional. Sleuth works fully on its own.</p>
-<figure><img src="../images/v1/settings-server.png" alt="Settings: office server address, access key and certificate; projects with their folders"><figcaption>Settings → Office server and Projects.</figcaption></figure>
+<figure><img src="../images/v11/settings-office.png" alt="Settings: the office index folder, and the office server address, access key and certificate"><figcaption>Settings → Office index folder and Office server.</figcaption></figure>
 <h3>Projects</h3>
 <p>A project is a name for a set of folders. Add them in Settings → Projects, then pick the project next to the search box to search only its folders. The Tags and Revisions views have the same project filter.</p>
 <h3>The office server</h3>
@@ -434,7 +437,7 @@ kbd { font: 9pt Consolas, monospace; border: 0.6pt solid #b9c3cf; border-bottom-
 
 <h2><span class="n">17</span>Settings reference</h2>
 <p class="intro">Open with <b>Settings</b> at the top right.</p>
-<figure><img src="../images/settings.png" alt="The settings window"><figcaption>The Settings window.</figcaption></figure>
+<figure><img src="../images/v11/settings.png" alt="Settings: reading speed, the busy-PC threshold, file types read inside, and the office index folder"><figcaption>Settings: reading speed, file types read inside, and the office index folder.</figcaption></figure>
 <table>
   <tr><th style="width:32%">Setting</th><th>What it does</th><th style="width:18%">Default</th></tr>
   <tr><td>OCR accuracy</td><td><b>Standard</b> is recommended. <b>High</b> uses a larger model, downloaded once (140 MB); it is about 3× slower and found no extra text in our tests.</td><td>Standard</td></tr>
