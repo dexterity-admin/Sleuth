@@ -39,6 +39,21 @@ const DEEP_READ_LIMIT: usize = 400;
 const RESULT_CAP: usize = 5000;
 /// Searches remembered with their results (dropped when anything changes).
 const RESULT_MEMORY: usize = 12;
+/// Said while the office index is opened after a start; the window searches
+/// again by itself once it is ready.
+pub const STILL_OPENING: &str = "The office index is still opening after the start; text inside documents will be added to these results by itself in a moment.";
+
+/// Page images kept for the preview (a few MB each).
+const PREVIEW_MEMORY: usize = 10;
+
+/// A rendered page as the preview receives it.
+pub(crate) struct Rendered {
+    png_base64: String,
+    width: u32,
+    height: u32,
+    pages: u32,
+    page: u32,
+}
 /// How often the office server is asked how it is.
 const OFFICE_INTERVAL: Duration = Duration::from_secs(60);
 /// Lines of a text preview sent at once.
@@ -197,6 +212,9 @@ pub struct Engine {
     pub(crate) reader_signal: Signal,
     pub(crate) indexer_signal: Signal,
     pub(crate) follow_signal: Signal,
+    pub(crate) heartbeat_signal: Signal,
+    /// The office index's parts were opened at least once since start.
+    pub(crate) pool_ready: AtomicBool,
     pub(crate) cache_signal: Signal,
     pub(crate) office_signal: Signal,
     pub(crate) stats_signal: Signal,
@@ -205,6 +223,9 @@ pub struct Engine {
     /// (when, pages) of every document read here in the last hour.
     pub(crate) pages_read: Mutex<VecDeque<(Instant, u32)>>,
     results: Mutex<VecDeque<(String, (u64, u64), Arc<Vec<Hit>>)>>,
+    /// The last pages rendered for the preview, by file, page, size and
+    /// the file's size and date: going back to a result shows it at once.
+    previews: Mutex<VecDeque<(String, Arc<Rendered>)>>,
     pub(crate) latencies: Mutex<VecDeque<u64>>,
     pub(crate) searches_total: AtomicU64,
     pub(crate) cache_hits: AtomicU64,
@@ -252,7 +273,8 @@ impl Engine {
 
     fn build(settings: Settings, server_mode: bool) -> Arc<Engine> {
         let deriver = Arc::new(Deriver::new(&settings));
-        let pc = std::env::var("SLEUTH_PC_NAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "this-pc".into());
+        crate::derive::set_current(Arc::clone(&deriver));
+        let pc =std::env::var("SLEUTH_PC_NAME").or_else(|_| std::env::var("COMPUTERNAME")).unwrap_or_else(|_| "this-pc".into());
         Arc::new(Engine {
             settings: RwLock::new(settings),
             drives: RwLock::new(DriveMap::default()),
@@ -269,6 +291,8 @@ impl Engine {
             reader_signal: Signal::default(),
             indexer_signal: Signal::default(),
             follow_signal: Signal::default(),
+            heartbeat_signal: Signal::default(),
+            pool_ready: AtomicBool::new(false),
             cache_signal: Signal::default(),
             office_signal: Signal::default(),
             stats_signal: Signal::default(),
@@ -276,6 +300,7 @@ impl Engine {
             searches: Mutex::new(HashMap::new()),
             pages_read: Mutex::new(VecDeque::new()),
             results: Mutex::new(VecDeque::new()),
+            previews: Mutex::new(VecDeque::new()),
             latencies: Mutex::new(VecDeque::new()),
             searches_total: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
@@ -393,6 +418,7 @@ impl Engine {
         };
         spawn("sleuth-store", Engine::cache_loop)?;
         spawn("sleuth-follow", Engine::follow_loop)?;
+        spawn("sleuth-heartbeat", Engine::heartbeat_loop)?;
         spawn("sleuth-indexer", Engine::indexer_loop)?;
         spawn("sleuth-reader", Engine::reader_loop)?;
         spawn("sleuth-stats", Engine::stats_loop)?;
@@ -405,7 +431,7 @@ impl Engine {
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.walk_cancel.store(true, Ordering::SeqCst);
-        for s in [&self.reader_signal, &self.indexer_signal, &self.follow_signal, &self.cache_signal, &self.office_signal, &self.stats_signal] {
+        for s in [&self.reader_signal, &self.indexer_signal, &self.follow_signal, &self.heartbeat_signal, &self.cache_signal, &self.office_signal, &self.stats_signal] {
             s.raise();
         }
         for flag in self.searches.lock().unwrap().values() {
@@ -446,6 +472,7 @@ impl Engine {
             for e in &d.errors {
                 self.event("warn", &format!("rule not used: {e}"));
             }
+            crate::derive::set_current(Arc::clone(&d));
             *self.deriver.write().unwrap() = d;
             self.event("info", "tag or title-block rules changed; they apply to documents read from now on");
         }
@@ -552,16 +579,22 @@ impl Engine {
         }
         st.pages_per_hour = log.iter().map(|(_, n)| *n as u64).sum();
         st.docs_per_hour = log.len() as u64;
-        // Time left: waiting documents at the pace of those read in the
-        // last hour; unknown until a few were read.
-        st.reading_eta_secs = match (log.front(), log.len()) {
-            (Some((first, _)), n) if n >= 3 && snap.waiting > 0 => {
-                let secs = first.elapsed().as_secs_f64().max(60.0);
-                (snap.waiting as f64 * secs / n as f64) as u64
-            }
-            _ => 0,
+        // This PC's pace: documents read in the last hour, over the time
+        // since the first of them; unknown until a few were read.
+        let mine_per_hour = match (log.front(), log.len()) {
+            (Some((first, _)), n) if n >= 3 => n as f64 * 3600.0 / first.elapsed().as_secs_f64().max(60.0),
+            _ => 0.0,
         };
         drop(log);
+        // Time left is the whole office's: the waiting documents are shared
+        // out among every PC that reads, so this PC's pace alone overstates it.
+        let others: u64 = {
+            let pcs = self.pcs.lock().unwrap();
+            pcs.iter().skip(1).filter(|p| now() - p.last_seen < crate::indexing::ACTIVE_SECS).map(|p| p.docs_per_hour).sum()
+        };
+        let office = mine_per_hour + others as f64;
+        st.office_docs_per_hour = office.round() as u64;
+        st.reading_eta_secs = if snap.waiting > 0 && office >= 1.0 { (snap.waiting as f64 * 3600.0 / office) as u64 } else { 0 };
         let (roots, last_complete, first_walk) = self.root_progress();
         st.index.first_walk = first_walk;
         st.index.last_complete = last_complete;
@@ -639,6 +672,9 @@ impl Engine {
     /// Check the office store folder every 2 minutes, and at once after
     /// settings change.
     fn cache_loop(self: Arc<Self>) {
+        fn c_ok(s: &CacheState) -> bool {
+            *s == CacheState::Ok
+        }
         while !self.stopping() {
             let s = self.settings.read().unwrap().clone();
             let drives = self.current_drives();
@@ -655,8 +691,14 @@ impl Engine {
             if changed {
                 self.follow_signal.raise();
                 self.reader_signal.raise();
+                if c_ok(&self.cache.lock().unwrap().state) {
+                    self.event("info", "The office index folder is back; carrying on by itself");
+                }
             }
-            self.cache_signal.wait(Duration::from_secs(120));
+            // Gone: look again every few seconds, so work resumes on its own
+            // as soon as the folder is back (no restart, no clicking).
+            let ok = c_ok(&self.cache.lock().unwrap().state);
+            self.cache_signal.wait(Duration::from_secs(if ok { 120 } else { 10 }));
         }
     }
 
@@ -741,7 +783,10 @@ impl Engine {
     fn office_loop(self: Arc<Self>) {
         while !self.stopping() {
             self.refresh_office();
-            self.office_signal.wait(OFFICE_INTERVAL);
+            // Offline: try again soon, so the office results come back by
+            // themselves as soon as the server answers again.
+            let offline = self.office.lock().unwrap().status.state == ServerState::Offline;
+            self.office_signal.wait(if offline { Duration::from_secs(15) } else { OFFICE_INTERVAL });
         }
     }
 
@@ -750,9 +795,53 @@ impl Engine {
         let drives = self.drives.read().unwrap().clone();
         // the folder that really works (it may be the network path, when the drive letter is not mapped)
         let store = self.store_dir().map(|p| p.display().to_string()).or(s.shared_cache_dir.clone());
+        // A certificate file chosen by hand first; else the one saved when this
+        // PC connected itself; else the one in the office index folder.
+        if ca_file.trim().is_empty() && !s.server.ca_pem.trim().is_empty() {
+            return remote::Client::new(url, token, s.server.ca_pem.as_bytes());
+        }
         let ca = remote::ca_path(ca_file, store.as_deref(), &drives).ok_or_else(|| anyhow!("no server certificate file: set one, or put {} in the shared folder", remote::CA_FILE_NAME))?;
         let pem = std::fs::read(&ca).map_err(|e| anyhow!("cannot read the server certificate {}: {e}", ca.display()))?;
         remote::Client::new(url, token, &pem)
+    }
+
+    /// "Connect this PC": read the server's card in the office index folder
+    /// (address, certificate, join code), ask the server for this PC's own
+    /// access key, and save all three. Nothing is typed.
+    pub fn join_server(&self) -> Result<ServerStatus> {
+        let dir = self.store_dir().ok_or_else(|| anyhow!("the office index folder cannot be reached; Sleuth finds the office server through it"))?;
+        let card = crate::cache::read_server_card(&dir).ok_or_else(|| anyhow!("no office server has left its details in {} yet; set up the server first (Sleuth Server window)", dir.display()))?;
+        if card.ca_pem.trim().is_empty() || card.join_code.trim().is_empty() {
+            bail!("the office server on {} does not let PCs connect themselves (it is older, or this is switched off in its window); type the access key from IT instead", card.pc);
+        }
+        let req = remote::JoinRequest { code: card.join_code.clone(), pc: self.pc.clone(), user: std::env::var("USERNAME").unwrap_or_default() };
+        // By name first, then by each address the server listed.
+        let mut last = None;
+        for url in std::iter::once(&card.address).chain(card.addresses.iter()) {
+            match remote::join(url, card.ca_pem.as_bytes(), &req) {
+                Ok(r) => {
+                    let mut s = self.settings.read().unwrap().clone();
+                    s.server.url = url.clone();
+                    s.server.ca_file = String::new();
+                    s.server.ca_pem = card.ca_pem.clone();
+                    s.server.token_protected = remote::protect(&r.key)?;
+                    self.set_settings(s)?;
+                    self.event("info", &format!("connected to the office server on {} as {}", card.pc, r.name));
+                    self.refresh_office();
+                    return Ok(self.office.lock().unwrap().status.clone());
+                }
+                Err(e) => {
+                    let m = format!("{e:#}");
+                    // Refused by the server itself: another address gives the same answer.
+                    let refused = !(m.contains("cannot be reached") || m.contains("did not answer"));
+                    last = Some(e);
+                    if refused {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow!("the office server could not be reached")))
     }
 
     fn refresh_office(&self) {
@@ -825,6 +914,10 @@ impl Engine {
         if url.trim().is_empty() {
             s.server = Default::default();
         } else {
+            if s.server.url.trim() != url.trim() {
+                // A certificate saved for another server does not belong to this one.
+                s.server.ca_pem.clear();
+            }
             s.server.url = url.trim().to_string();
             s.server.ca_file = ca_file.trim().to_string();
             if !token.trim().is_empty() {
@@ -912,13 +1005,36 @@ impl Engine {
         }
     }
 
-    /// One page of a search's rows, each with the other files of its document.
-    pub fn search_page(&self, query: &str, roots: &[String], offset: usize, limit: usize) -> Result<(Vec<Hit>, usize)> {
+    /// One page of a search's rows, each with the other files of its
+    /// document, and every row of the search.
+    pub fn search_page(&self, query: &str, roots: &[String], offset: usize, limit: usize) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
         let all = self.search_hits(query, roots)?;
         let mut page: Vec<Hit> = all.iter().skip(offset).take(limit).cloned().collect();
         let drives = self.drives.read().unwrap().clone();
         attach_twins(&mut page, &self.pool, &self.catalog, &drives);
-        Ok((page, all.len()))
+        Ok((page, all))
+    }
+
+    /// Whether this search's rows are remembered (it answers at once).
+    fn remembered(&self, query: &str, roots: &[String]) -> bool {
+        let generation = self.generation();
+        let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
+        self.results.lock().unwrap().iter().any(|(k, g, _)| *k == key && *g == generation)
+    }
+
+    /// The rows file names alone give, from the catalog in memory: shown
+    /// while the read documents in the office folder are searched.
+    fn names_first(&self, q: &SearchQuery, roots: &[String], limit: usize) -> Vec<Hit> {
+        let drives = self.drives.read().unwrap().clone();
+        let roots: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();
+        let mut hits = search_index(&Pool::new(), &self.catalog, q, &roots, limit, &drives).unwrap_or_default();
+        for h in &mut hits {
+            // Known to be read: say so, so the row does not look unread.
+            if let Some(c) = self.pool.covered(&h.path).filter(|c| c.state == state::READ) {
+                h.doc_id = Some(crate::pool::compose(c.slot, c.id));
+            }
+        }
+        hits
     }
 
     /// Runs on a blocking thread; streams events to `tx`.
@@ -942,11 +1058,23 @@ impl Engine {
             let (query, project) = (query.to_string(), project.map(str::to_string));
             std::thread::spawn(move || c.search(&query, project.as_deref(), limit, offset))
         });
+        // File names answer from memory at once; the text inside the read
+        // documents follows and replaces these rows.
+        if offset == 0 && !self.remembered(query, &roots) {
+            let names = self.names_first(&q, &roots, limit);
+            if !names.is_empty() && !cancel.load(Ordering::SeqCst) {
+                let _ = tx.send(Envelope { id, body: Event::Provisional { hits: names, millis: started.elapsed().as_millis() as u64 } });
+            }
+        }
+        if offset == 0 && !self.pool_ready.load(Ordering::SeqCst) && self.store_dir().is_some() {
+            let _ = tx.send(Envelope { id, body: Event::Notice { message: STILL_OPENING.into() } });
+        }
         let (page, all) = self.search_page(query, &roots, offset, limit)?;
         self.record_latency(started.elapsed().as_millis() as u64);
-        let mut more = all > offset + limit;
+        let mut more = all.len() > offset + limit;
         let mut total = page.len();
-        let mut reported: HashSet<String> = self.search_hits(query, &roots)?.iter().map(|h| h.path.to_lowercase()).collect();
+        let mut reported: HashSet<String> = all.iter().map(|h| h.path.to_lowercase()).collect();
+        drop(all);
         if !page.is_empty() {
             let _ = tx.send(Envelope { id, body: Event::Hits { hits: page } });
         }
@@ -1163,13 +1291,8 @@ impl Engine {
         if FileKind::of(&stored) != FileKind::Pdf {
             bail!("only PDFs have a page image; this file's text is shown instead");
         }
-        let doc = crate::pdf::Doc::open(Path::new(&stored))?;
-        let pages = doc.page_count();
-        let page = page.clamp(1, pages.max(1));
-        let img = doc.render_preview(page - 1, max_px.clamp(400, 3000))?;
-        let (width, height) = (img.width(), img.height());
-        let mut png = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+        let r = self.rendered(&stored, page, max_px.clamp(400, 3000))?;
+        let (pages, page, width, height) = (r.pages, r.page, r.width, r.height);
         let terms: Vec<Term> = parse_search(query).all_terms();
         let norm = tag.map(sleuth_core::analyzer::norm_form);
         let marks = self.pool.with_file(&stored, |s, id| {
@@ -1189,7 +1312,38 @@ impl Engine {
             Ok(Some((boxes, if ocr { TextSource::Ocr } else { TextSource::TextLayer })))
         })?;
         let (boxes, source) = marks.flatten().unwrap_or((Vec::new(), TextSource::Pending));
-        Ok(Event::Preview { png_base64: base64::engine::general_purpose::STANDARD.encode(png), width, height, pages, boxes, source })
+        Ok(Event::Preview { png_base64: r.png_base64.clone(), width, height, pages, boxes, source })
+    }
+
+    /// A page image for the preview, from the last few made when the file
+    /// has not changed. PNG with fast compression: a 3000 px drawing is
+    /// made in a fraction of the time of the default setting, and lines and
+    /// text stay exact (no JPEG blur on a drawing).
+    fn rendered(&self, stored: &str, page: u32, max_px: u32) -> Result<Arc<Rendered>> {
+        let stamp = std::fs::metadata(stored).map(|m| (m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs()))).unwrap_or((0, 0));
+        let key = format!("{}|{page}|{max_px}|{}|{}", stored.to_lowercase(), stamp.0, stamp.1);
+        if let Some((_, r)) = self.previews.lock().unwrap().iter().find(|(k, _)| *k == key) {
+            return Ok(Arc::clone(r));
+        }
+        let doc = crate::pdf::Doc::open(Path::new(stored))?;
+        let pages = doc.page_count();
+        let page = page.clamp(1, pages.max(1));
+        let img = image::DynamicImage::ImageRgba8(doc.render_preview(page - 1, max_px)?).to_rgb8();
+        let (width, height) = (img.width(), img.height());
+        let mut png = Vec::new();
+        {
+            use image::ImageEncoder;
+            use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+            PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive).write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)?;
+        }
+        let r = Arc::new(Rendered { png_base64: base64::engine::general_purpose::STANDARD.encode(png), width, height, pages, page });
+        let mut cache = self.previews.lock().unwrap();
+        cache.retain(|(k, _)| *k != key);
+        cache.push_back((key, Arc::clone(&r)));
+        while cache.len() > PREVIEW_MEMORY {
+            cache.pop_front();
+        }
+        Ok(r)
     }
 
     /// One page (sheet, slide) of the text read from a file that has no

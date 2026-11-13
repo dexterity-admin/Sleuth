@@ -16,7 +16,84 @@ use sleuth_core::settings::Settings;
 use crate::text::Line;
 
 /// Bump when the parsing code (not the rules) changes.
-pub const PARSER_VERSION: u32 = 2;
+/// 3: a title-block value must fill its whole cell, a label must start its
+/// cell, a REV column of a revision table is not a revision, and status
+/// words count only as whole words on a line of their own.
+pub const PARSER_VERSION: u32 = 3;
+
+/// The part of the title-block rules' identity that goes into the OCR
+/// pipeline fingerprint. Kept at the value 1.1 used, so PCs on different
+/// versions keep sharing readings of the same content.
+const TITLE_OCR_VERSION: u32 = 2;
+
+/// Column headings of revision tables and title blocks. Such a cell is
+/// never the value of a field, even when it is short enough to look like one.
+const HEADINGS: &[&str] = &[
+    "DRN", "DRAWN", "DRWN", "CHK", "CHKD", "CHECKED", "CKD", "APP", "APPD", "APPR", "APPROVED", "BY", "DATE", "DESC", "DESCRIPTION", "REMARKS", "SCALE", "NTS", "ISSUE",
+    "ISSUED", "REVISION", "REV", "NO", "SHEET", "TITLE", "STATUS", "PURPOSE",
+];
+
+/// Trailing punctuation a cell may carry after its value.
+const TAIL: &[char] = &['.', ',', ';', ':', ')', ']', '}', '*'];
+
+/// The current rules, for code that shows stored title-block details
+/// (`Store::metadata`): set by the engine whenever the rules change.
+static CURRENT: std::sync::RwLock<Option<std::sync::Arc<Deriver>>> = std::sync::RwLock::new(None);
+
+pub fn set_current(d: std::sync::Arc<Deriver>) {
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(d);
+}
+
+/// The rules in use (the default rules until the engine sets them).
+pub fn current() -> std::sync::Arc<Deriver> {
+    if let Some(d) = CURRENT.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        return std::sync::Arc::clone(d);
+    }
+    let d = std::sync::Arc::new(Deriver::new(&Settings::default()));
+    let mut g = CURRENT.write().unwrap_or_else(|e| e.into_inner());
+    std::sync::Arc::clone(g.get_or_insert(d))
+}
+
+fn alnum_len(s: &str) -> usize {
+    s.chars().filter(|c| c.is_alphanumeric()).count()
+}
+
+/// A cell that is only a column heading such as DR'N, CHK'D or DATE.
+fn is_heading(text: &str) -> bool {
+    let a: String = text.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_uppercase();
+    !a.is_empty() && HEADINGS.contains(&a.as_str())
+}
+
+/// `word` in `text` as a whole word (not inside a longer word: VOID is not in AVOID).
+fn whole_word(text: &str, word: &str) -> bool {
+    let up = text.to_uppercase();
+    let mut from = 0;
+    while let Some(i) = up[from..].find(word) {
+        let s = from + i;
+        let e = s + word.len();
+        let before = up[..s].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+        let after = up[e..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+        if before && after {
+            return true;
+        }
+        from = s + word.chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// The quoted text an evidence string was taken from: `page 1: "REV. A"`,
+/// `page 1: "A", below the label "REV"`, `page 1: "A1", OCR 93%`. A quote
+/// inside the text (an inch mark) is not taken for its end.
+fn evidence_text(evidence: &str) -> Option<&str> {
+    let rest = evidence.strip_prefix("page ")?;
+    let open = rest.find(": \"")? + 3;
+    let body = &rest[open..];
+    let ends = [", OCR ", ", checked by", ", below the label", ", right of the label"];
+    body.char_indices().filter(|(_, c)| *c == '"').map(|(i, _)| i).find(|&i| {
+        let after = &body[i + 1..];
+        after.is_empty() || ends.iter().any(|e| after.starts_with(e))
+    }).map(|i| &body[..i])
+}
 
 /// Words that look like tag prefixes but are labels.
 const STOP: &[&str] = &[
@@ -90,7 +167,7 @@ impl Deriver {
             }
         }
         let prefixes = s.discipline_prefixes();
-        let fields_hash = blake3::hash(format!("{PARSER_VERSION}{}", serde_json::to_string(&frules).unwrap_or_default()).as_bytes()).to_hex()[..16].to_string();
+        let fields_hash = blake3::hash(format!("{TITLE_OCR_VERSION}{}", serde_json::to_string(&frules).unwrap_or_default()).as_bytes()).to_hex()[..16].to_string();
         let mut h = blake3::Hasher::new();
         h.update(format!("parser={PARSER_VERSION}").as_bytes());
         h.update(serde_json::to_string(&rules).unwrap_or_default().as_bytes());
@@ -194,12 +271,14 @@ impl Deriver {
             }
         }
         if m.status.is_none() {
+            // Longest first: ISSUED FOR CONSTRUCTION before FOR CONSTRUCTION.
+            let mut words: Vec<&str> = STATUS_WORDS.to_vec();
+            words.sort_by_key(|w| std::cmp::Reverse(w.len()));
             'status: for (_, l) in &first {
-                let up = l.text.to_uppercase();
-                for w in STATUS_WORDS {
-                    if up.contains(w) {
+                for w in &words {
+                    if status_line(&l.text, w) {
                         m.status = Some(w.to_string());
-                        m.evidence.push(("status".into(), format!("page 1: \"{}\"", l.text)));
+                        m.evidence.push(("status".into(), format!("page 1: \"{}\"", l.text.trim())));
                         break 'status;
                     }
                 }
@@ -208,70 +287,185 @@ impl Deriver {
         m
     }
 
-    /// Find one field: a label, then its value on the same line after the
-    /// label, or on the line just right of it, or just below it. Lines in the
-    /// title-block area are tried first.
+    /// Take out of stored title-block details every value its own evidence
+    /// does not support under the current rules (a value cut out of a longer
+    /// cell, a column heading, a status word inside another word). Readings
+    /// made with older rules then show "not found" instead of a wrong value;
+    /// nothing is ever added here.
+    pub fn recheck(&self, m: &mut DrawingMeta) {
+        let mut wrong: Vec<String> = Vec::new();
+        for (field, ev) in &m.evidence {
+            let Some(text) = evidence_text(ev) else { continue };
+            let value = match field.as_str() {
+                "drawing_number" => m.drawing_no.as_deref(),
+                "revision" => m.revision.as_deref(),
+                "title" => m.title.as_deref(),
+                "project" => m.project.as_deref(),
+                "sheet" => m.sheet.as_deref(),
+                "discipline" => m.discipline.as_deref(),
+                "status" => m.status.as_deref(),
+                _ => None,
+            };
+            let Some(value) = value else { continue };
+            let Some(f) = self.fields.iter().find(|f| f.name == *field) else { continue };
+            let ok = if field == "status" && self.label_rest(f, text).is_none() {
+                STATUS_WORDS.iter().any(|w| value.eq_ignore_ascii_case(w) && status_line(text, w))
+            } else {
+                self.supports(f, text, value)
+            };
+            if !ok {
+                wrong.push(field.clone());
+            }
+        }
+        if wrong.iter().any(|f| f == "drawing_number") && m.evidence.iter().any(|(f, e)| f == "discipline" && e.starts_with("drawing number")) {
+            wrong.push("discipline".into());
+        }
+        for f in &wrong {
+            match f.as_str() {
+                "drawing_number" => m.drawing_no = None,
+                "revision" => m.revision = None,
+                "title" => m.title = None,
+                "project" => m.project = None,
+                "sheet" => m.sheet = None,
+                "discipline" => m.discipline = None,
+                "status" => m.status = None,
+                _ => {}
+            }
+        }
+        m.evidence.retain(|(f, _)| !wrong.contains(f));
+    }
+
+    /// Whether the line `text` gives `value` for field `f`: as the rest of a
+    /// cell that starts with the field's label, or as a cell of its own.
+    fn supports(&self, f: &Field, text: &str, value: &str) -> bool {
+        let got = match self.label_rest(f, text) {
+            Some(rest) => self.cell_value(f, rest, true),
+            None => (!self.is_label(text)).then(|| self.cell_value(f, text, false)).flatten(),
+        };
+        got.is_some_and(|v| v.eq_ignore_ascii_case(value.trim()))
+    }
+
+    /// The text after a label of `f` that starts the cell `text` (only
+    /// punctuation before it). `None` when no label starts it: "CLIENT
+    /// DRAWING NO" is not a DRAWING NO cell, "NOTE ... REV B" is no REV cell.
+    fn label_rest<'t>(&self, f: &Field, text: &'t str) -> Option<&'t str> {
+        let text = text.trim();
+        let rest = |end: usize| text[end..].trim_start_matches(|c: char| c == ':' || c == '.' || c == '#' || c == '-' || c.is_whitespace());
+        f.labels.iter().find_map(|label| {
+            label.find_iter(text).find_map(|m| {
+                let before = &text[..m.start()];
+                // The label starts the cell, or follows a whole cell of another
+                // field on the same text line ("DRAWING NO. ISO-1001-01 REV 2").
+                let starts = before.chars().all(|c| !c.is_alphanumeric());
+                let after_cell = !starts && self.fields.iter().filter(|g| g.name != f.name).any(|g| self.label_rest(g, before).is_some_and(|r| self.cell_value(g, r, false).is_some()));
+                (starts || after_cell).then(|| rest(m.end()))
+            })
+        })
+    }
+
+    /// The value of `f` that `cell` holds, if the cell holds nothing else:
+    /// only punctuation may follow it, or (when `more` is allowed: the rest
+    /// of a line after a label) the next cell's label or heading.
+    fn cell_value(&self, f: &Field, cell: &str, more: bool) -> Option<String> {
+        let cell = cell.trim();
+        let m = f.value.find(cell)?;
+        let v = m.as_str().trim().trim_end_matches([',', ';']).trim();
+        if v.is_empty() || is_heading(v) || (f.name == "drawing_number" && !v.chars().any(|c| c.is_ascii_digit())) {
+            return None;
+        }
+        let after = cell[m.end()..].trim();
+        let after_bare = after.trim_matches(|c: char| TAIL.contains(&c) || c.is_whitespace());
+        let ends_here = after_bare.is_empty();
+        let next_cell = more && (self.starts_with_label(after) || after.split_whitespace().next().is_some_and(is_heading));
+        (ends_here || next_cell).then(|| v.to_string())
+    }
+
+    /// Text that starts with a label of any field.
+    fn starts_with_label(&self, text: &str) -> bool {
+        self.fields.iter().any(|f| self.label_rest(f, text).is_some())
+    }
+}
+
+/// A line that states a status: the word stands on its own (VOID is not in
+/// AVOID) and the line is little more than it (a stamp or a title-block
+/// cell, not a sentence of a note).
+fn status_line(text: &str, word: &str) -> bool {
+    whole_word(text, word) && alnum_len(text) <= alnum_len(word) + 12
+}
+
+impl Deriver {
+    /// Find one field: a cell that starts with its label, then its value as
+    /// the rest of that cell, or as the whole of the cell just right of it,
+    /// or just below it. Lines in the title-block area are tried first.
+    /// Anything less certain gives no value: a blank is checked by a person,
+    /// a wrong value is believed.
     fn field_value(&self, name: &str, lines: &[(u32, &Line)]) -> Option<(String, String)> {
         let f = self.fields.iter().find(|f| f.name == name)?;
         let mut order: Vec<&(u32, &Line)> = lines.iter().collect();
         order.sort_by_key(|(_, l)| if TITLE_BLOCK.overlap(&l.bbox) > 0.5 { 0 } else { 1 });
         for (page, l) in order {
             let text = l.text.trim();
-            for label in &f.labels {
-                let Some(m) = label.find(text) else { continue };
-                let rest = text[m.end()..].trim_start_matches(|c: char| c == ':' || c == '.' || c == '#' || c == '-' || c.is_whitespace());
-                let (value, from) = if !rest.is_empty() && f.value.is_match(rest) {
-                    (rest, *l)
-                } else if let Some(n) = neighbour(l, lines, &f.value, &|t| self.is_label(t)) {
-                    (n.text.trim(), n)
-                } else {
-                    continue;
-                };
-                let Some(v) = f.value.find(value) else { continue };
-                let v = v.as_str().trim().trim_end_matches([',', ';']).to_string();
-                if v.is_empty() || (name == "drawing_number" && !v.chars().any(|c| c.is_ascii_digit())) {
-                    continue;
-                }
-                let how = match from.source {
-                    TextSource::Ocr => format!(", OCR {}%", (from.conf * 100.0).round()),
-                    TextSource::Verified => ", checked by a person".into(),
-                    _ => String::new(),
-                };
-                return Some((v, format!("page {page}: \"{}\"{how}", from.text.trim())));
+            let Some(rest) = self.label_rest(f, text) else { continue };
+            let how = |from: &Line| match from.source {
+                TextSource::Ocr => format!(", OCR {}%", (from.conf * 100.0).round()),
+                TextSource::Verified => ", checked by a person".into(),
+                _ => String::new(),
+            };
+            if let Some(v) = self.cell_value(f, rest, true) {
+                return Some((v, format!("page {page}: \"{text}\"{}", how(l))));
             }
+            // The label is followed by other words ("SHEET 1 TO 6"): a note, not a cell.
+            if !rest.is_empty() && !self.starts_with_label(rest) && !rest.split_whitespace().next().is_some_and(is_heading) {
+                continue;
+            }
+            let Some((n, place)) = self.neighbour(f, l, lines) else { continue };
+            let Some(v) = self.cell_value(f, &n.text, false) else { continue };
+            return Some((v, format!("page {page}: \"{}\", {place} the label \"{text}\"{}", n.text.trim(), how(n))));
         }
         None
     }
-}
 
-impl Deriver {
     /// Text that holds a label of any field (so it is not a value).
     fn is_label(&self, text: &str) -> bool {
         self.fields.iter().any(|f| f.labels.iter().any(|r| r.is_match(text)))
     }
-}
 
-/// The nearest line to the right on the same row, else the nearest below,
-/// whose text starts with a value and is not itself a label.
-fn neighbour<'a>(l: &Line, lines: &'a [(u32, &'a Line)], value: &Regex, is_label: &dyn Fn(&str) -> bool) -> Option<&'a Line> {
-    let cy = l.bbox.y + l.bbox.h / 2.0;
-    let h = l.bbox.h.max(0.004);
-    let right = lines
-        .iter()
-        .map(|(_, n)| *n)
-        .filter(|n| ((n.bbox.y + n.bbox.h / 2.0) - cy).abs() < h * 0.6 && n.bbox.x > l.bbox.x + l.bbox.w - h && n.bbox.x - (l.bbox.x + l.bbox.w) < h * 12.0)
-        .filter(|n| value.is_match(n.text.trim()) && !is_label(&n.text))
-        .min_by(|a, b| a.bbox.x.total_cmp(&b.bbox.x));
-    if right.is_some() {
-        return right;
+    /// The cell next to a label cell: the nearest one to the right on the
+    /// same row, else the nearest one below in the same column. It must be
+    /// a value of its own; a nearer cell is never skipped for a farther one.
+    /// For a revision, a value with more values under it is a column of a
+    /// revision table, where the current revision is not certain: none.
+    fn neighbour<'a>(&self, f: &Field, l: &Line, lines: &'a [(u32, &'a Line)]) -> Option<(&'a Line, &'static str)> {
+        let cy = l.bbox.y + l.bbox.h / 2.0;
+        let h = l.bbox.h.max(0.004);
+        let is_value = |n: &Line| !self.is_label(&n.text) && self.cell_value(f, &n.text, false).is_some();
+        let right = lines
+            .iter()
+            .map(|(_, n)| *n)
+            .filter(|n| !std::ptr::eq(*n, l))
+            .filter(|n| ((n.bbox.y + n.bbox.h / 2.0) - cy).abs() < h * 0.6 && n.bbox.x > l.bbox.x + l.bbox.w - h && n.bbox.x - (l.bbox.x + l.bbox.w) < h * 12.0)
+            .min_by(|a, b| a.bbox.x.total_cmp(&b.bbox.x));
+        if let Some(r) = right {
+            return is_value(r).then_some((r, "right of"));
+        }
+        let column = |top: &Line| {
+            let th = top.bbox.h.max(0.004);
+            lines
+                .iter()
+                .map(|(_, n)| *n)
+                .filter(move |n| n.bbox.y > top.bbox.y + th * 0.5 && n.bbox.y - (top.bbox.y + top.bbox.h) < th * 2.5)
+                .filter(move |n| n.bbox.x < l.bbox.x + l.bbox.w + h * 4.0 && n.bbox.x + n.bbox.w > l.bbox.x - h * 2.0)
+                .min_by(|a, b| a.bbox.y.total_cmp(&b.bbox.y))
+        };
+        let below = column(l)?;
+        if !is_value(below) {
+            return None;
+        }
+        if f.name == "revision" && column(below).is_some_and(|n| is_value(n)) {
+            return None;
+        }
+        Some((below, "below"))
     }
-    lines
-        .iter()
-        .map(|(_, n)| *n)
-        .filter(|n| n.bbox.y > l.bbox.y + h * 0.5 && n.bbox.y - (l.bbox.y + l.bbox.h) < h * 2.5)
-        .filter(|n| n.bbox.x < l.bbox.x + l.bbox.w + h * 4.0 && n.bbox.x + n.bbox.w > l.bbox.x - h * 2.0)
-        .filter(|n| value.is_match(n.text.trim()) && !is_label(&n.text))
-        .min_by(|a, b| a.bbox.y.total_cmp(&b.bbox.y))
 }
 
 #[cfg(test)]
@@ -339,6 +533,85 @@ mod tests {
         assert_eq!(m.drawing_no.as_deref(), Some("PID-0101"));
         assert_eq!(m.revision.as_deref(), Some("C"));
         assert!(m.evidence.iter().filter(|(f, _)| f == "drawing_number" || f == "revision").all(|(_, e)| e.contains("file name")));
+    }
+
+    /// What was found wrong on a real isometric (12 Nov 2026): Revision "DR"
+    /// from the DR'N. heading of the revision table, Status "VOID" from
+    /// "AVOID" in a note, Sheet "1" out of "(SHEET 1 TO 6)".
+    #[test]
+    fn values_cut_out_of_other_cells_are_not_taken() {
+        let lines = vec![
+            l("REV", 0.60, 0.80, 0.02),
+            l("DR'N.", 0.63, 0.80, 0.03),
+            l("CHK'D", 0.67, 0.80, 0.03),
+            l("HCV IS SIZED TO AVOID CLOSED DRAIN OVERLOADING AND LOCATED AS CLOSE AS", 0.05, 0.30, 0.4),
+            l("(SHEET 1 TO 6)", 0.20, 0.40, 0.06),
+            l("PROJECT No. P12513", 0.70, 0.95, 0.1),
+        ];
+        let refs: Vec<(u32, &Line)> = lines.iter().map(|x| (1, x)).collect();
+        let m = d().metadata("P12513-12-99-08-1608.pdf", &refs);
+        assert_eq!(m.revision, None, "{:?}", m.evidence);
+        assert_eq!(m.status, None, "{:?}", m.evidence);
+        assert_eq!(m.sheet, None, "{:?}", m.evidence);
+        assert_eq!(m.project.as_deref(), Some("P12513"));
+    }
+
+    #[test]
+    fn a_revision_table_column_gives_no_revision() {
+        let table = vec![l("REV", 0.60, 0.80, 0.02), l("0", 0.60, 0.815, 0.01), l("A", 0.60, 0.83, 0.01)];
+        let refs: Vec<(u32, &Line)> = table.iter().map(|x| (1, x)).collect();
+        assert_eq!(d().metadata("x.pdf", &refs).revision, None);
+        // One cell under its label is the title block's revision.
+        let cell = vec![l("REV", 0.90, 0.95, 0.02), l("B", 0.90, 0.965, 0.01)];
+        let refs: Vec<(u32, &Line)> = cell.iter().map(|x| (1, x)).collect();
+        let m = d().metadata("x.pdf", &refs);
+        assert_eq!(m.revision.as_deref(), Some("B"));
+        assert!(m.evidence.iter().any(|(f, e)| f == "revision" && e == "page 1: \"B\", below the label \"REV\""), "{:?}", m.evidence);
+        // A value followed by the next cell's label on the same line.
+        let row = vec![l("DRAWING NO. ISO-1001-01 REV 2", 0.6, 0.9, 0.3)];
+        let refs: Vec<(u32, &Line)> = row.iter().map(|x| (1, x)).collect();
+        let m = d().metadata("x.pdf", &refs);
+        assert_eq!(m.drawing_no.as_deref(), Some("ISO-1001-01"));
+        assert_eq!(m.revision.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn stored_values_their_evidence_does_not_support_are_taken_out() {
+        let ev = |f: &str, e: &str| (f.to_string(), e.to_string());
+        let mut m = DrawingMeta {
+            drawing_no: Some("P12513-12-99-08-1608".into()),
+            revision: Some("DR".into()),
+            project: Some("P12513".into()),
+            sheet: Some("1".into()),
+            status: Some("VOID".into()),
+            evidence: vec![
+                ev("drawing_number", "page 1: \"P12513-12-99-08-1608\""),
+                ev("revision", "page 1: \"DR'N.\""),
+                ev("project", "page 1: \"PROJECT No. P12513\""),
+                ev("sheet", "page 1: \"(SHEET 1 TO 6)\""),
+                ev("status", "page 1: \"HCV IS SIZED TO AVOID CLOSED DRAIN OVERLOADING AND LOCATED AS CLOSE AS\""),
+            ],
+            ..Default::default()
+        };
+        d().recheck(&mut m);
+        assert_eq!(m.drawing_no.as_deref(), Some("P12513-12-99-08-1608"));
+        assert_eq!(m.project.as_deref(), Some("P12513"));
+        assert_eq!((m.revision, m.sheet, m.status), (None, None, None));
+        assert_eq!(m.evidence.len(), 2);
+        // Values found under the new rules pass unchanged, OCR notes and inch marks included.
+        let mut ok = DrawingMeta { revision: Some("B".into()), title: Some("6\"-P-1001 TIE-IN".into()), ..Default::default() };
+        ok.evidence = vec![ev("revision", "page 1: \"B\", below the label \"REV\", OCR 91%"), ev("title", "page 1: \"TITLE: 6\"-P-1001 TIE-IN\"")];
+        let before = ok.clone();
+        d().recheck(&mut ok);
+        assert_eq!(ok, before);
+    }
+
+    #[test]
+    fn status_words_are_whole_words() {
+        assert!(whole_word("VOID", "VOID") && whole_word("- VOID -", "VOID"));
+        assert!(!whole_word("AVOID", "VOID") && !whole_word("VOIDED", "VOID"));
+        assert!(status_line("ISSUED FOR CONSTRUCTION", "ISSUED FOR CONSTRUCTION"));
+        assert!(!status_line("THIS LINE WAS VOID UNTIL THE PUMP WAS MOVED TO AREA 2", "VOID"));
     }
 
     #[test]

@@ -70,6 +70,10 @@ pub struct Store {
     pub conn: Connection,
 }
 
+/// Bytes SQLite may hold in this process before it reuses cached pages
+/// instead of allocating more (`PRAGMA soft_heap_limit`, process-wide).
+pub const PAGE_CACHE_CEILING: i64 = 384 << 20;
+
 /// One reading as the pool needs it to know what a part covers.
 #[derive(Debug, Clone)]
 pub struct ReadingRow {
@@ -343,7 +347,17 @@ impl Store {
         use rusqlite::OpenFlags;
         let conn = Connection::open_with_flags(sqlite_uri(path, "immutable=1&mode=ro"), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .with_context(|| format!("open part {}", path.display()))?;
-        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA cache_size=-32768;")?;
+        // Hundreds of parts are open at once, each with its own page cache:
+        // at 32 MB each, a few searches across the office held 3 GB and
+        // more. Each part keeps a small cache, and every SQLite cache in
+        // this process together stays under one ceiling (SQLite reuses
+        // cached pages instead of taking more memory once it is reached).
+        // Windows' own file cache still holds the parts' pages beyond that.
+        static CEILING: std::sync::Once = std::sync::Once::new();
+        CEILING.call_once(|| {
+            let _ = conn.execute_batch(&format!("PRAGMA soft_heap_limit={PAGE_CACHE_CEILING};"));
+        });
+        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA cache_size=-2048;")?;
         let s = Store { conn };
         let level: i64 = s.get_meta("schema")?.and_then(|v| v.parse().ok()).unwrap_or(1);
         if level > SCHEMA_LEVEL {
@@ -1048,8 +1062,10 @@ impl Store {
                     },
                 ))
             })?;
+            let rules = crate::derive::current();
             for row in rows {
-                let (id, m) = row?;
+                let (id, mut m) = row?;
+                rules.recheck(&mut m);
                 out.insert(id, m);
             }
         }
@@ -1588,7 +1604,24 @@ impl Store {
                 },
             )
             .optional()?
+            .map(|mut m| {
+                crate::derive::current().recheck(&mut m);
+                m
+            })
             .unwrap_or_default())
+    }
+
+    /// Title-block details under the rules in use now: read again from the
+    /// stored page-1 text when the stored ones were made with other rules
+    /// (published parts never change, so they keep what was found then).
+    pub fn metadata_now(&self, file_id: i64, d: &Deriver) -> Result<DrawingMeta> {
+        let (name, derived): (String, Option<String>) = self.conn.query_row("SELECT name, derived FROM files WHERE id=?1", [file_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        if derived.as_deref() == Some(d.hash.as_str()) || !sleuth_core::kinds::FileKind::of(&name).has_title_block() {
+            return self.metadata(file_id);
+        }
+        let pages = stored_lines(&self.conn, file_id, Some(1))?;
+        let lines = usable_lines(&pages);
+        Ok(d.metadata(&name, &lines))
     }
 
     // ---- status -----------------------------------------------------------
@@ -1757,18 +1790,29 @@ impl Store {
 /// Names of file types without a title block, as SQL on `f.name`.
 const NO_TITLE_BLOCK_SQL: &str = "lower(f.name) LIKE '%.msg' OR lower(f.name) LIKE '%.eml' OR lower(f.name) LIKE '%.txt' OR lower(f.name) LIKE '%.csv' OR lower(f.name) LIKE '%.tsv' OR lower(f.name) LIKE '%.log'";
 
+/// A file's stored lines, in reading order (one page, or all).
+fn stored_lines(conn: &Connection, file_id: i64, page: Option<u32>) -> Result<Vec<(u32, Line)>> {
+    let mut st = conn.prepare_cached("SELECT page, text, conf, source, alt, x, y, w, h FROM lines WHERE file_id=?1 AND (?2 IS NULL OR page=?2) ORDER BY page, id")?;
+    let rows = st.query_map(params![file_id, page], |r| {
+        Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: r.get::<_, f64>(2)? as f32, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// The lines derived data is taken from: not a second reading of a line
+/// (`alt`), and not an OCR line a person corrected (the correction stands
+/// for it).
+fn usable_lines(pages: &[(u32, Line)]) -> Vec<(u32, &Line)> {
+    let verified: Vec<(u32, NormBox)> = pages.iter().filter(|(_, l)| l.source == TextSource::Verified).map(|(p, l)| (*p, l.bbox)).collect();
+    let corrected = |p: u32, l: &Line| l.source == TextSource::Ocr && verified.iter().any(|(vp, b)| *vp == p && b.overlap(&l.bbox) >= 0.8);
+    pages.iter().filter(|(p, l)| !l.alt && !corrected(*p, l)).map(|(p, l)| (*p, l)).collect()
+}
+
 /// Replace a file's tags and title-block details from its stored lines.
 fn derive_into(tx: &rusqlite::Transaction, file_id: i64, name: &str, d: &Deriver) -> Result<()> {
     tx.execute("DELETE FROM tag_occurrences WHERE file_id=?1", [file_id])?;
     tx.execute("DELETE FROM drawing_metadata WHERE file_id=?1", [file_id])?;
-    let pages: Vec<(u32, Line)> = {
-        let mut st = tx.prepare_cached("SELECT page, text, conf, source, alt, x, y, w, h FROM lines WHERE file_id=?1 ORDER BY page, id")?;
-        st.query_map([file_id], |r| {
-            Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: r.get::<_, f64>(2)? as f32, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
-        })?
-        .collect::<rusqlite::Result<_>>()?
-    };
-    // An OCR line a person corrected is represented by the correction.
+    let pages = stored_lines(tx, file_id, None)?;
     let verified: Vec<(u32, NormBox)> = pages.iter().filter(|(_, l)| l.source == TextSource::Verified).map(|(p, l)| (*p, l.bbox)).collect();
     let corrected = |p: u32, l: &Line| l.source == TextSource::Ocr && verified.iter().any(|(vp, b)| *vp == p && b.overlap(&l.bbox) >= 0.8);
     {
@@ -1786,7 +1830,7 @@ fn derive_into(tx: &rusqlite::Transaction, file_id: i64, name: &str, d: &Deriver
             }
         }
     }
-    let lines: Vec<(u32, &Line)> = pages.iter().filter(|(p, l)| !l.alt && !corrected(*p, l)).map(|(p, l)| (*p, l)).collect();
+    let lines = usable_lines(&pages);
     let m = if sleuth_core::kinds::FileKind::of(name).has_title_block() { d.metadata(name, &lines) } else { DrawingMeta::default() };
     if m.drawing_no.is_some() || m.revision.is_some() || m.title.is_some() {
         tx.execute(
@@ -1877,6 +1921,10 @@ mod tests {
             (pdf, eml)
         };
         let part = Store::open_part(&p).unwrap();
+        // a part keeps a small page cache, under one ceiling for the process
+        let cache: i64 = part.conn.query_row("PRAGMA cache_size", [], |r| r.get(0)).unwrap();
+        let ceiling: i64 = part.conn.query_row("PRAGMA soft_heap_limit", [], |r| r.get(0)).unwrap();
+        assert_eq!((cache, ceiling), (-2048, PAGE_CACHE_CEILING));
         assert_eq!(part.metadata(pdf).unwrap().revision.as_deref(), Some("4"));
         let m = part.metadata(eml).unwrap();
         assert!(m.drawing_no.is_none() && m.revision.is_none(), "{m:?}");

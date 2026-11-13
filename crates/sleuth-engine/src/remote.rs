@@ -219,6 +219,47 @@ pub struct DocReply {
     pub tags: u32,
 }
 
+/// What a PC sends to get its own access key (`POST /api/v1/join`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinRequest {
+    /// The join code from the server's card in the office index folder.
+    pub code: String,
+    pub pc: String,
+    pub user: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinReply {
+    /// The PC's new access key (shown nowhere; stored encrypted).
+    pub key: String,
+    /// The name the server knows this PC by, e.g. `DDS-030\vikram`.
+    pub name: String,
+    pub projects: Vec<String>,
+    pub server_version: String,
+}
+
+/// Ask the server at `url` (trusted through `ca_pem`) for this PC's key.
+pub fn join(url: &str, ca_pem: &[u8], req: &JoinRequest) -> Result<JoinReply> {
+    let base = url.trim().trim_end_matches('/');
+    if !base.starts_with("https://") {
+        bail!("the server address must start with https://");
+    }
+    let cert = ureq::tls::Certificate::from_pem(ca_pem).map_err(|e| anyhow!("the server certificate is not a PEM certificate: {e}"))?;
+    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::Specific(std::sync::Arc::new(vec![cert]))).build();
+    let agent: ureq::Agent = ureq::Agent::config_builder().tls_config(tls).timeout_connect(Some(Duration::from_secs(4))).timeout_global(Some(Duration::from_secs(30))).http_status_as_error(false).build().into();
+    let mut resp = agent.post(&format!("{base}/api/v1/join")).header("Content-Type", "application/json").send(serde_json::to_string(req)?).map_err(|e| anyhow!("{}", describe(&e)))?;
+    let status = resp.status().as_u16();
+    let body = resp.body_mut().read_to_string().context("reading the server's answer")?;
+    if status == 404 {
+        bail!("the office server is older than this Sleuth and cannot connect PCs by itself; update the server, or type an access key");
+    }
+    if status >= 400 {
+        let e: Option<ApiError> = serde_json::from_str(&body).ok();
+        bail!("{}", e.map(|e| e.message).unwrap_or_else(|| format!("the server answered {status}")));
+    }
+    serde_json::from_str(&body).context("the server's answer was not understood")
+}
+
 fn describe(e: &ureq::Error) -> String {
     let s = e.to_string();
     if s.contains("certificate") || s.contains("Certificate") || s.contains("UnknownIssuer") {

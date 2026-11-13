@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/sleuth-core", "crates/sleuth-office", "crates/sleuth-extract", "crates/sleuth-lanes", "crates/sleuth-engine", "apps/worker", "apps/desktop/src-tauri", "apps/server"]
 
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2024"
 authors = ["Dexterity Design Services Pvt. Ltd."]
 license = "LicenseRef-Proprietary"
@@ -24,6 +24,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Security_Authorization",
   "Win32_NetworkManagement_WNet",
   "Win32_Storage_FileSystem",
   "Win32_System_Threading",
@@ -31,6 +32,7 @@ windows = { version = "0.62", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_Shell",
+  "Win32_System_Console",
   "Win32_System_Power",
   "Win32_System_WinRT",
   "Win32_System_IO",

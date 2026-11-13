@@ -50,6 +50,13 @@ pub fn extension(name: &str) -> String {
 
 impl FileKind {
     pub fn of(name: &str) -> FileKind {
+        // `~$report.docx` is the owner file Word, Excel and PowerPoint keep
+        // beside a document someone has open: a few bytes holding a user
+        // name, never a document. Reading it always fails, so it is found by
+        // name only. (Called with a bare name or a whole path.)
+        if name.rsplit(['\\', '/']).next().is_some_and(|n| n.starts_with("~$")) {
+            return FileKind::Other;
+        }
         let ext = extension(name);
         match ext.as_str() {
             "pdf" => FileKind::Pdf,
@@ -154,6 +161,17 @@ mod tests {
         assert_eq!(FileKind::of("no extension"), FileKind::Other);
         assert_eq!(FileKind::of(".gitignore"), FileKind::Other);
         assert_eq!(FileKind::of("Ölleitung €.pdf"), FileKind::Pdf);
+    }
+
+    #[test]
+    fn office_owner_files_are_not_read() {
+        assert_eq!(FileKind::of("~$ATT 1.docx"), FileKind::Other);
+        assert_eq!(FileKind::of(r"\\srv\Project\J124\~$Check list.xlsx"), FileKind::Other);
+        assert_eq!(FileKind::of("~$deck.pptx"), FileKind::Other);
+        // Only the owner-file prefix: a tilde alone or `$` mid-name is fine.
+        assert_eq!(FileKind::of("~rev B.pdf"), FileKind::Pdf);
+        assert_eq!(FileKind::of(r"\\srv\~$share\ISO-1001.pdf"), FileKind::Pdf);
+        assert_eq!(FileKind::of("cost $~1.xlsx"), FileKind::Excel);
     }
 
     #[test]

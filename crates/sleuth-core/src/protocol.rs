@@ -163,6 +163,9 @@ pub enum Request {
     /// Save the office server connection (the key is stored encrypted for
     /// this Windows user). An empty `url` returns to standalone use.
     SetServer { url: String, token: String, ca_file: String },
+    /// "Connect this PC": get this PC's own access key from the office
+    /// server whose card is in the office index folder. Answers `Server`.
+    JoinServer,
     /// Pause or resume one background stage on this PC. It stays paused
     /// across restarts until resumed; other PCs carry on.
     SetPaused { stage: Stage, paused: bool },
@@ -397,12 +400,20 @@ pub struct Status {
     /// PDFs found outside the folders chosen for reading (names only).
     #[serde(default)]
     pub pdfs_unread: u64,
-    /// Pages still to read in the waiting PDFs, where known (0 = unknown).
+    /// Time left for the waiting documents at the whole office's pace
+    /// (this PC's plus every PC seen working), in seconds; 0 = unknown.
     #[serde(default)]
     pub reading_eta_secs: u64,
+    /// The office's pace that time is worked out from: documents an hour.
+    #[serde(default)]
+    pub office_docs_per_hour: u64,
     /// Plain-language reason for the reader's state, e.g. why it waits.
     #[serde(default)]
     pub reader_note: String,
+    /// The reader runs with administrator rights (until it stops), so it can
+    /// list and read folders that need them, on C:, D: and elsewhere.
+    #[serde(default)]
+    pub elevated: bool,
     /// Reading folders as chosen, each with its document counts.
     #[serde(default)]
     pub scopes: Vec<ScopeProgress>,
@@ -582,6 +593,18 @@ pub struct OfficeServerCard {
     /// Unix seconds when it was written.
     pub at: i64,
     pub version: String,
+    /// The server's certificate authority (PEM): a desktop that reads this
+    /// card needs no certificate file. Public, not a secret.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ca_pem: String,
+    /// SHA-256 of `ca_pem`, shown so a person can compare it with the
+    /// server's window.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ca_sha256: String,
+    /// Set when PCs may connect themselves: proves to the server that the
+    /// PC asking can open the office index folder.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub join_code: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -618,7 +641,7 @@ pub struct Occurrence {
     pub revision: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DrawingMeta {
     pub drawing_no: Option<String>,
     pub title: Option<String>,
@@ -795,12 +818,34 @@ pub struct Monitor {
     pub office_docs_per_hour: u64,
     #[serde(default)]
     pub office_eta_secs: u64,
+    /// Pages the working PCs read in their last hour, added up.
+    #[serde(default)]
+    pub office_pages_per_hour: u64,
+    /// PCs reading now (heartbeat in the last 20 minutes), this one included.
+    #[serde(default)]
+    pub office_readers: u32,
+    /// PCs whose heartbeat counted towards the office's pace.
+    #[serde(default)]
+    pub office_pcs_counted: u32,
+    /// Documents whose reading reached the office index in the last hour
+    /// (by any PC or the server, whatever its version).
+    #[serde(default)]
+    pub office_arrived_last_hour: u64,
+    /// How long the waiting documents would take at this PC's pace alone.
+    #[serde(default)]
+    pub this_eta_secs: u64,
+    /// This PC's part of the office's pace, in percent.
+    #[serde(default)]
+    pub this_share_pct: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum Event {
     Hello { protocol: u32, version: String },
+    /// Rows found by file name alone, shown while the read documents are
+    /// searched; the first `Hits` of the same search replaces them.
+    Provisional { hits: Vec<Hit>, millis: u64 },
     Hits { hits: Vec<Hit> },
     /// A previously reported pending file was read; replaces its row.
     Resolved { path: String, hits: Vec<Hit> },

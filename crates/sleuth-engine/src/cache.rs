@@ -330,7 +330,10 @@ pub fn check_cache(dir: Option<&str>, enabled: bool, drives: &DriveMap) -> Cache
             std::fs::write(&probe, b"ok")?;
             std::fs::remove_file(&probe)
         },
-        Duration::from_secs(10),
+        // A busy share (this PC opening hundreds of parts from it at start)
+        // can take over 10 s for this write and still be fine: only a folder
+        // that answers nothing for half a minute is reported as gone.
+        Duration::from_secs(30),
     );
     match written {
         Some(Ok(())) => check(S::Ok, &unc, "working"),

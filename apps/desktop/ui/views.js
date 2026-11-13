@@ -494,7 +494,8 @@ function drawIndexing() {
     ["Reading speed", p.speed ? (p.speed === "full" ? speedNote(p) : SPEED_LABEL[p.speed]) : null],
     ["Reading at once", readers ? `${plural(readers, "document")}` + (s.ocr_workers ? ` (${fmtNum(s.ocr_workers)} by OCR)` : "") : null],
     ["Pace on this PC", pace || null],
-    ["Time left", s.reading_eta_secs > 0 ? fmtLeft(s.reading_eta_secs) : (p.waiting > 0 && !p.readPaused ? "Not known yet" : null)],
+    ["Pace of the office", s.office_docs_per_hour ? `${plural(s.office_docs_per_hour, "document")} an hour, every PC together` : null],
+    ["Time left", s.reading_eta_secs > 0 ? `${fmtLeft(s.reading_eta_secs)} for the whole office` : (p.waiting > 0 && !p.readPaused ? "Not known yet" : null)],
   ], manual ? stageButtons("read", p) : null));
   monIndex.append(stages);
 
@@ -617,29 +618,81 @@ function renderOffice(m) {
     if (m.local_bytes !== undefined) g.append(statCard("Kept on this PC's disk", fmtSize(m.local_bytes), "settings and readings not yet published"));
     monOffice.append(g);
   }
-  if (m.office_waiting !== undefined) {
-    const left = Number(m.office_waiting) || 0, rate = Number(m.office_docs_per_hour) || 0;
-    const line = !left ? "Nothing is waiting to be read."
-      : `${plural(left, "document")} still to read` + (rate ? ` · the office reads ${plural(rate, "document")} an hour` : "")
-        + (m.office_eta_secs > 0 ? ` · ${fmtLeft(m.office_eta_secs)} left at the office's current pace` : " · time left not known yet");
-    monOffice.append(el("p", "office-pace", line));
-  }
+  if (m.office_waiting !== undefined) monOffice.append(officeProgress(m));
   if (pcs.length) {
     const roots = Array.isArray(s.index?.roots) ? s.index.roots : [];
+    const office = Number(m.office_docs_per_hour) || 0;
     const t = el("table", "grid pcs-table");
-    t.append(trow(["PC", "User", "Version", "Doing", "Documents an hour", "Last seen"], "th"));
+    t.append(trow(["PC", "User", "Version", "Doing", "Documents an hour", "Pages an hour", "Share of the office", "Last seen"], "th"));
+    let docs = 0, pages = 0;
     pcs.forEach((pc, i) => {
       const name = el("span");
       name.append(el("span", "mono", pc.name || ""));
       if (i === 0) name.append(" ", stateCell("idle", "This PC"));
       if (pc.server) { const tag = el("span", "origin", "Server"); tag.title = "The office server: it reads all day and answers searches for the office"; name.append(" ", tag); }
-      const tr = trow([name, pc.user || "", pc.version || "", pcDoing(pc, roots), fmtNum(pc.docs_per_hour), fmtAgo(pc.last_seen)]);
-      // The office counts a PC as working while it was seen in the last 3 minutes.
-      if (nowSecs() - (Number(pc.last_seen) || 0) > 180) { tr.classList.add("away"); tr.title = "Not seen in the last 3 minutes"; }
+      // Counted while seen in the last 20 minutes (PCs on 1.1 report only every ten minutes or so).
+      const away = i > 0 && nowSecs() - (Number(pc.last_seen) || 0) > OFFICE_ACTIVE_SECS;
+      const d = i === 0 ? Number(s.docs_per_hour) || 0 : Number(pc.docs_per_hour) || 0;
+      const p = i === 0 ? Number(s.pages_per_hour) || 0 : Number(pc.pages_per_hour) || 0;
+      if (!away) { docs += d; pages += p; }
+      const share = !away && office ? `${Math.min(100, Math.round((d * 100) / office))} %` : "";
+      const tr = trow([name, pc.user || "", pc.version || "", pcDoing(pc, roots), fmtNum(d), fmtNum(p), share, i === 0 ? "now" : fmtAgo(pc.last_seen)]);
+      if (away) { tr.classList.add("away"); tr.title = "Not seen in the last 20 minutes: not counted in the office's pace"; }
       t.append(tr);
     });
+    const total = trow([el("b", null, "Office"), "", "", `${plural(Number(m.office_readers) || 0, "PC")} reading`, el("b", null, fmtNum(docs)), el("b", null, fmtNum(pages)), "100 %", ""]);
+    total.classList.add("total");
+    t.append(total);
     monOffice.append(el("h4", null, `PCs seen in the last day (${fmtNum(pcs.length)})`), t);
   }
+}
+
+const OFFICE_ACTIVE_SECS = 20 * 60;
+
+/** Where reading stands for the whole office, and this PC's part in it. */
+function officeProgress(m) {
+  const s = m.status || {};
+  const read = Number(s.pdfs_read) || 0, waiting = Number(m.office_waiting) || 0, failed = Number(s.pdfs_failed) || 0;
+  const total = read + waiting + failed;
+  const rate = Number(m.office_docs_per_hour) || 0, mine = Number(s.docs_per_hour) || 0;
+  const box = el("div", "office-progress");
+  const pct = total ? Math.floor((read * 1000) / total) / 10 : 0;
+  const head = el("div", "op-head");
+  head.append(el("b", null, waiting ? `${pct} % of the office's documents are read` : "Every document in the reading folders is read"),
+    el("span", "dim", ` ${fmtNum(read)} of ${fmtNum(total)}` + (failed ? ` · ${fmtNum(failed)} could not be read` : "")));
+  const bar = el("div", "op-bar"); const fill = el("div", "op-fill"); fill.style.width = `${pct}%`; bar.append(fill);
+  box.append(head, bar);
+  const finish = (secs) => {
+    if (!(secs > 0)) return "not known yet";
+    const at = new Date(Date.now() + secs * 1000);
+    return `${fmtLeft(secs)} · done ${at.toLocaleString(undefined, { weekday: "short", day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}`;
+  };
+  const cols = el("div", "op-cols");
+  const officeCol = el("div", "op-col");
+  officeCol.append(el("h5", null, "Whole office"));
+  const g1 = el("div", "stats");
+  g1.append(
+    statCard("Still to read", fmtNum(waiting), Number(s.ocr_waiting) ? `${fmtNum(s.ocr_waiting)} of them need OCR` : ""),
+    statCard("Documents an hour", fmtNum(rate), `${plural(Number(m.office_readers) || 0, "PC")} reading`),
+    statCard("Pages an hour", fmtNum(m.office_pages_per_hour)),
+    statCard("Reached the index", fmtNum(m.office_arrived_last_hour), "in the last hour, from every PC"),
+  );
+  const dl1 = el("dl", "kv"); kvAdd(dl1, "Time left", waiting ? finish(Number(m.office_eta_secs)) : "nothing left");
+  officeCol.append(g1, dl1);
+  const pcCol = el("div", "op-col");
+  pcCol.append(el("h5", null, "This PC"));
+  const g2 = el("div", "stats");
+  g2.append(
+    statCard("Documents an hour", fmtNum(mine)),
+    statCard("Pages an hour", fmtNum(s.pages_per_hour)),
+    statCard("Share of the office", rate ? `${Number(m.this_share_pct) || 0} %` : "–"),
+  );
+  const dl2 = el("dl", "kv"); kvAdd(dl2, "Alone it would take", waiting ? finish(Number(m.this_eta_secs)) : "nothing left");
+  pcCol.append(g2, dl2);
+  cols.append(officeCol, pcCol);
+  box.append(cols);
+  box.append(el("p", "hint", "The office's pace adds up what every PC seen in the last 20 minutes read in its last hour, and is never taken below what actually reached the office index in the last hour. Time left = documents still to read ÷ that pace; it shortens as more PCs read."));
+  return box;
 }
 
 function renderMonitor(m) {

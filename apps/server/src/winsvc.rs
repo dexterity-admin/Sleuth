@@ -89,16 +89,30 @@ fn manager(create: bool) -> Result<ServiceManager> {
 }
 
 /// Allow only Administrators, SYSTEM and the service into the data folder.
+///
+/// The folder alone gets the permissions; everything in it then inherits
+/// them. (1.2.0 ran the same command over every file with `/T`: on a file
+/// it removed the inherited permissions and granted nothing, so the service
+/// could not read its own server.json and stopped at once.)
 fn lock_down(data: &Path) -> Result<()> {
-    let out = std::process::Command::new("icacls")
-        .arg(data)
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F", &format!("{SERVICE_ACCOUNT}:(OI)(CI)M"), "/T", "/Q"])
-        .output()
-        .context("running icacls")?;
-    if !out.status.success() {
-        bail!("icacls could not set the data folder's permissions: {}", String::from_utf8_lossy(&out.stdout).trim());
-    }
-    Ok(())
+    let run = |args: &[&std::ffi::OsStr]| -> Result<()> {
+        let out = std::process::Command::new("icacls").args(args).output().context("running icacls")?;
+        if !out.status.success() {
+            bail!("icacls could not set the data folder's permissions: {}", String::from_utf8_lossy(&out.stdout).trim());
+        }
+        Ok(())
+    };
+    let account = format!("{SERVICE_ACCOUNT}:(OI)(CI)M");
+    run(&[data.as_os_str(), "/inheritance:r".as_ref(), "/grant:r".as_ref(), "*S-1-5-32-544:(OI)(CI)F".as_ref(), "*S-1-5-18:(OI)(CI)F".as_ref(), account.as_ref(), "/Q".as_ref()])?;
+    // Whatever is inside takes the folder's permissions (and only those).
+    let inside = data.join("*");
+    run(&[inside.as_os_str(), "/reset".as_ref(), "/T".as_ref(), "/C".as_ref(), "/Q".as_ref()])
+}
+
+/// Repair a data folder locked down by 1.2.0 (files nobody could read):
+/// run on every start of the server window and of `service install`.
+pub fn repair_permissions(data: &Path) -> Result<()> {
+    if data.exists() { lock_down(data) } else { Ok(()) }
 }
 
 pub fn install(data: &Path) -> Result<()> {
@@ -135,6 +149,35 @@ pub fn start() -> Result<()> {
     let svc = manager(false)?.open_service(SERVICE_NAME, ServiceAccess::START).map_err(|e| anyhow!("no service {SERVICE_NAME}: {e}"))?;
     svc.start::<&str>(&[]).map_err(|e| anyhow!("cannot start the service (see the log in the data folder): {e}"))?;
     Ok(())
+}
+
+/// "not installed", "running", "stopped", "starting", "stopping".
+pub fn state() -> &'static str {
+    let Ok(m) = manager(false) else { return "unknown" };
+    let Ok(svc) = m.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) else { return "not installed" };
+    match svc.query_status().map(|s| s.current_state) {
+        Ok(ServiceState::Running) => "running",
+        Ok(ServiceState::Stopped) => "stopped",
+        Ok(ServiceState::StartPending) => "starting",
+        Ok(ServiceState::StopPending) => "stopping",
+        Ok(_) => "paused",
+        Err(_) => "unknown",
+    }
+}
+
+/// Stop and wait until it has stopped (up to `secs`).
+pub fn stop_and_wait(secs: u64) -> Result<()> {
+    if matches!(state(), "not installed" | "stopped") {
+        return Ok(());
+    }
+    let _ = stop();
+    for _ in 0..secs * 2 {
+        if matches!(state(), "stopped" | "not installed") {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    bail!("the service did not stop within {secs} s")
 }
 
 pub fn stop() -> Result<()> {

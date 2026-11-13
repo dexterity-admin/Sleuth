@@ -448,6 +448,22 @@ impl Lease {
         self.done = true;
     }
 
+    /// Let go, but keep the lease for `hold` from now (a document that was
+    /// read stays its reader's until the reading is surely seen by every PC).
+    /// Written only while the lease is still ours; otherwise it is left as
+    /// it is. Older versions judge the term from the file the same way.
+    pub fn leave_for(mut self, hold: Duration) {
+        if !self.lost && Instant::now() < self.good_until
+            && let Ok(found) = read_lease(&self.path)
+            && self.is_ours(&found)
+        {
+            self.ttl_s = hold.as_secs().max(1);
+            self.n += 1;
+            let _ = replace(&beside(&self.path, &self.token, "tmp"), &self.path, &self.content());
+        }
+        self.done = true;
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -699,6 +715,22 @@ mod tests {
         held(a.acquire("doc/aa/1", ttl));
         std::thread::sleep(Duration::from_millis(5500));
         mine(b.acquire("doc/aa/1", ttl));
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn a_lease_left_for_longer_holds_past_its_term() {
+        let d = scratch("lease-leave-for");
+        let (a, b) = (Leases::new(&d, pc("PC-A")), Leases::new(&d, pc("PC-B")));
+        let ttl = Duration::from_secs(1);
+        mine(a.acquire("doc/bb/1", ttl)).leave_for(Duration::from_secs(3600));
+        std::thread::sleep(Duration::from_millis(3500));
+        let h = held(b.acquire("doc/bb/1", ttl));
+        assert_eq!(h.host, "PC-A");
+        assert!(h.until > local_ms() / 1000 + 3000, "held for the hour: {h:?}");
+        // As an older version sees it: the term is in the file.
+        let f: LeaseFile = serde_json::from_slice(&std::fs::read(d.join("doc").join("bb").join("1.lease")).unwrap()).unwrap();
+        assert_eq!(f.ttl, 3600);
         let _ = std::fs::remove_dir_all(d);
     }
 

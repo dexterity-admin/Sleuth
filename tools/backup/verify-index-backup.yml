@@ -1,0 +1,118 @@
+# Copy to .github/workflows/verify-index-backup.yml in the PRIVATE backup
+# repository (e.g. dexterity-admin/sleuth-index-backup).
+#
+# Checks the Sleuth office index backup that sleuth-index-backup.ps1 writes:
+# - on every new manifest.json and daily: every live part (and catalog
+#   snapshot) has its asset(s) in its release, with the recorded size;
+# - weekly (Sunday) and on request: every asset is downloaded and its
+#   SHA-256 compared with the manifest (streamed, nothing kept on the runner);
+# - the backup is fresh (manifest written in the last 3 days) and its size
+#   and growth are reported; a problem fails the run, which GitHub e-mails
+#   to the repository's owner.
+name: Verify index backup
+
+on:
+  push:
+    paths: [manifest.json]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Download every asset and compare its SHA-256"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # On request: as asked. Daily run: hashes on Sundays. On a push: sizes.
+      FULL: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.full) || (github.event_name == 'schedule' && 'weekday' || 'false') }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the manifest, the assets and their hashes
+        shell: python
+        run: |
+          import datetime, hashlib, json, os, subprocess, sys, urllib.request
+
+          repo = os.environ["REPO"]
+          full = os.environ["FULL"]
+          if full == "weekday":
+              full = "true" if datetime.datetime.utcnow().weekday() == 6 else "false"
+          full = full == "true"
+          m = json.load(open("manifest.json", encoding="utf-8"))
+          problems = []
+
+          def gh(*args):
+              return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+
+          written = datetime.datetime.fromisoformat(m["written"].replace("Z", "+00:00"))
+          age = datetime.datetime.now(datetime.timezone.utc) - written
+          if age > datetime.timedelta(days=3):
+              problems.append(f"the last backup is {age.days} days old")
+          for k in ("corrupted_found", "missing_found"):
+              if m.get(k):
+                  problems.append(f"{k}: {', '.join(m[k])}")
+
+          releases = {}
+          def assets(tag):
+              if tag not in releases:
+                  try:
+                      data = json.loads(gh("api", f"repos/{repo}/releases/tags/{tag}"))
+                      releases[tag] = {a["name"]: a for a in data["assets"]}
+                  except subprocess.CalledProcessError:
+                      releases[tag] = None
+              return releases[tag]
+
+          def check(label, entry):
+              have = assets(entry["release"])
+              if have is None:
+                  problems.append(f"{label}: release {entry['release']} is missing")
+                  return
+              whole = hashlib.sha256()
+              for pc in entry["pieces"]:
+                  a = have.get(pc["asset"])
+                  if a is None:
+                      problems.append(f"{label}: asset {pc['asset']} is missing")
+                      return
+                  if a["size"] != pc["size"]:
+                      problems.append(f"{label}: {pc['asset']} is {a['size']} bytes, manifest says {pc['size']}")
+                      return
+                  if full:
+                      req = urllib.request.Request(a["url"], headers={"Accept": "application/octet-stream", "Authorization": f"Bearer {os.environ['GH_TOKEN']}"})
+                      h = hashlib.sha256()
+                      with urllib.request.urlopen(req) as r:
+                          while chunk := r.read(8 << 20):
+                              h.update(chunk); whole.update(chunk)
+                      if h.hexdigest() != pc["sha256"]:
+                          problems.append(f"{label}: {pc['asset']} SHA-256 differs from the manifest")
+                          return
+              if full and whole.hexdigest() != entry["sha256"]:
+                  problems.append(f"{label}: joined SHA-256 differs from the manifest")
+
+          live = {n: e for n, e in m["parts"].items() if not e.get("retired")}
+          for name, e in live.items():
+              check(name, e)
+          for c in m.get("catalogs", []):
+              check(c["release"], c)
+
+          total = sum(e["size"] for e in live.values())
+          every = sum(e["size"] for e in m["parts"].values())
+          summary = [
+              f"## Sleuth index backup",
+              f"- written {m['written']} ({age.days} d {age.seconds // 3600} h ago)",
+              f"- live parts {len(live)}, {total / 2**30:.2f} GiB; all parts kept {len(m['parts'])}, {every / 2**30:.2f} GiB",
+              f"- catalog snapshots {len(m.get('catalogs', []))}",
+              f"- hashes {'downloaded and compared' if full else 'not downloaded this run (sizes checked)'}",
+          ]
+          summary += [f"- **PROBLEM:** {p}" for p in problems] or ["- no problems"]
+          open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8").write("\n".join(summary) + "\n")
+          print("\n".join(summary))
+          sys.exit(1 if problems else 0)

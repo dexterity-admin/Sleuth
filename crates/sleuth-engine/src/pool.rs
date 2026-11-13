@@ -28,6 +28,15 @@ use tracing::{info, warn};
 const RETIRED_KEEP_SECS: u64 = 24 * 3600;
 /// Parts above this size are never merged again.
 const BIGGEST_MERGED: u64 = 2 * 1024 * 1024 * 1024;
+/// One merge takes at most this many parts and this many bytes, so it
+/// ends in minutes. Taking every small part at once (182 of them on a busy
+/// office, 12 Nov 2026) made merges that ran for hours over the network and
+/// were cut off by PCs being restarted, so the parts were never merged and
+/// every search had to look through all of them.
+const MERGE_MAX_PARTS: usize = 16;
+const MERGE_MAX_BYTES: u64 = 512 << 20;
+/// Parts opened at the same time by [`Pool::refresh`].
+const OPEN_AT_ONCE: usize = 16;
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -208,6 +217,12 @@ impl Pool {
         *self.dirs.write().unwrap() = dirs;
     }
 
+    /// A part failed on I/O (the office folder dropped) and waits to be
+    /// opened again.
+    pub fn any_broken(&self) -> bool {
+        self.parts.read().unwrap().iter().any(|p| p.broken.load(Ordering::SeqCst))
+    }
+
     pub fn parts(&self) -> Vec<Arc<Part>> {
         self.parts.read().unwrap().clone()
     }
@@ -313,15 +328,29 @@ impl Pool {
             changed |= !keep;
             keep
         });
-        // Open what is new.
-        for path in &on_disk {
-            if parts.iter().any(|p| p.path == *path) {
-                continue;
+        // Open what is new, many at once: one by one over the network, a few
+        // hundred parts kept search empty for minutes after a start or after
+        // the office folder came back.
+        let new: Vec<&PathBuf> = on_disk.iter().filter(|path| !parts.iter().any(|p| p.path == **path) && !retired.get(*path).is_some_and(|into| names.contains(into))).collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let opened: Mutex<Vec<(PathBuf, Result<Part>)>> = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            for _ in 0..OPEN_AT_ONCE.min(new.len()) {
+                sc.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::SeqCst);
+                        let Some(path) = new.get(i) else { break };
+                        let r = self.open_published(path);
+                        opened.lock().unwrap().push(((*path).clone(), r));
+                    }
+                });
             }
-            if retired.get(path).is_some_and(|into| names.contains(into)) {
-                continue;
-            }
-            match self.open_published(path) {
+        });
+        let mut opened = opened.into_inner().unwrap();
+        opened.sort_by(|a, b| a.0.cmp(&b.0));
+        for (path, r) in opened {
+            let path = &path;
+            match r {
                 Ok(p) => {
                     self.refused.lock().unwrap().remove(path);
                     parts.push(Arc::new(p));
@@ -422,6 +451,12 @@ impl Pool {
         self.cover.read().unwrap().get(&path_key(path)).copied()
     }
 
+    /// Documents read at or after `t` (unix seconds) that this PC can see:
+    /// the office's real output, whoever read them.
+    pub fn read_since(&self, t: i64) -> u64 {
+        self.cover.read().unwrap().values().filter(|c| c.state == state::READ && c.read_at >= t).count() as u64
+    }
+
     /// How a file stands: read, failed, waiting for OCR, or (None) still to
     /// open. A file whose size or date changed since is to be read again.
     pub fn state_of(&self, path: &str, size: u64, mtime: i64) -> Option<i64> {
@@ -431,6 +466,11 @@ impl Pool {
     /// [`Pool::state_of`] by a key already worked out ([`PathKeyer`]).
     pub fn state_of_key(&self, key: u64, size: u64, mtime: i64) -> Option<i64> {
         self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime).map(|c| c.state)
+    }
+
+    /// As [`Pool::state_of_key`], with when that state was recorded.
+    pub fn state_at_key(&self, key: u64, size: u64, mtime: i64) -> Option<(i64, i64)> {
+        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime).map(|c| (c.state, c.read_at))
     }
 
     /// Whether a newer reading of the same path replaced this one.
@@ -535,9 +575,22 @@ pub fn merge_candidates(parts: &[Arc<Part>]) -> Vec<Arc<Part>> {
     const TIERS: [(u64, usize); 3] = [(32 << 20, 8), (256 << 20, 6), (BIGGEST_MERGED, 4)];
     let mut lower = 0u64;
     for (upper, enough) in TIERS {
-        let tier: Vec<Arc<Part>> = parts.iter().filter(|p| !p.work && p.bytes >= lower && p.bytes < upper).cloned().collect();
+        let mut tier: Vec<Arc<Part>> = parts.iter().filter(|p| !p.work && p.bytes >= lower && p.bytes < upper).cloned().collect();
         if tier.len() >= enough {
-            return tier;
+            // Smallest first (oldest among equals), up to one merge's worth.
+            tier.sort_by(|a, b| a.bytes.cmp(&b.bytes).then(a.name.cmp(&b.name)));
+            let mut take = Vec::new();
+            let mut bytes = 0u64;
+            for p in tier {
+                if take.len() >= MERGE_MAX_PARTS || (take.len() >= 2 && bytes + p.bytes > MERGE_MAX_BYTES) {
+                    break;
+                }
+                bytes += p.bytes;
+                take.push(p);
+            }
+            if take.len() >= 2 {
+                return take;
+            }
         }
         lower = upper;
     }
@@ -549,12 +602,17 @@ pub fn merge_candidates(parts: &[Arc<Part>]) -> Vec<Arc<Part>> {
 /// that are gone are kept: hiding them is undone if the file comes back, a
 /// merge could not be. `keep_going` is asked between documents (it renews
 /// the caller's lease); false abandons the merge. Returns the new part.
-pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Path, pc: &str, deriver: &Deriver, keep_going: &dyn Fn() -> bool) -> Result<Option<PathBuf>> {
+///
+/// The new part is built in `build_dir` on this PC's own disk (thousands of
+/// small writes are slow over the network) and then copied into `dir` under
+/// a temporary name and renamed, as a published part is.
+pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Path, build_dir: &Path, pc: &str, deriver: &Deriver, keep_going: &dyn Fn() -> bool) -> Result<Option<PathBuf>> {
     if sources.len() < 2 {
         return Ok(None);
     }
     let name = format!("m-{:011}-{}-{:04x}", now(), safe(pc), unique());
-    let tmp = dir.join(format!("{name}.tmp"));
+    std::fs::create_dir_all(build_dir).with_context(|| format!("create {}", build_dir.display()))?;
+    let tmp = build_dir.join(format!("{name}.building"));
     let mut kept = 0u64;
     let built = (|| -> Result<bool> {
         let mut target = Store::create_bulk(&tmp)?;
@@ -587,8 +645,21 @@ pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Pa
             return Err(e.context("merging parts"));
         }
     }
+    let upload = dir.join(format!("{name}.tmp"));
     let dest = dir.join(format!("{name}.db"));
-    std::fs::rename(&tmp, &dest)?;
+    let copied = std::fs::copy(&tmp, &upload).with_context(|| format!("copy the merged part to {}", upload.display()));
+    let _ = std::fs::remove_file(&tmp);
+    if let Err(e) = copied.and_then(|_| {
+        // Checked where it landed, as a published part is.
+        let copy = Store::open_part(&upload)?;
+        let ok: String = copy.conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        anyhow::ensure!(ok == "ok", "the merged part failed its check: {ok}");
+        drop(copy);
+        std::fs::rename(&upload, &dest).with_context(|| format!("publish {}", dest.display()))
+    }) {
+        let _ = std::fs::remove_file(&upload);
+        return Err(e.context("merging parts"));
+    }
     for src in sources {
         let marker = src.path.with_extension("retired");
         let body = serde_json::to_vec(&Retired { into: name.clone(), at: now() })?;
@@ -689,7 +760,7 @@ mod tests {
         let sources: Vec<Arc<Part>> = pool.parts().into_iter().filter(|p| !p.work).collect();
         let d = Deriver::new(&Settings::default());
         let current = |slot: u32, id: i64| !pool.is_superseded(slot, id);
-        assert!(merge(&sources, &current, &text, "PC-ONE", &d, &|| true).unwrap().is_some());
+        assert!(merge(&sources, &current, &text, &text.join("..").join("build"), "PC-ONE", &d, &|| true).unwrap().is_some());
         pool.refresh();
         pool.recover(&here);
         assert_eq!(pool.stats().parts, 1);

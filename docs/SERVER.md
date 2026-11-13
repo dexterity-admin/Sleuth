@@ -51,22 +51,36 @@ choose another with `--data "<folder>"` on every command):
 
 1. On the office PC that stays on, right-click the zip > **Extract All...**
    (do not run it from inside the zip).
-2. Double-click **sleuth-server.exe**. Windows asks for administrator rights.
-3. Setup offers to copy itself to `C:\Program Files\Sleuth Server` (the
-   service runs from there), then walks through five steps:
-   - **Office index folder**: the shared folder every Sleuth PC uses. Its
-     network path is offered (the service cannot see mapped drives like U:).
-   - **Projects**: a name and its folders. Drive letters are turned into
-     network paths, and each folder is checked.
-   - **Certificates**: made for you. The certificate is copied into the office
-     index folder, with `sleuth-server.json` holding the server's address.
-   - **Access keys**: one per person, shown once and copied to the clipboard.
-   - **Windows service**: installed, started, and checked to answer.
-4. The window ends with what to enter on each PC (see Connecting a desktop).
+2. Double-click **sleuth-server.exe**. Windows asks for administrator rights;
+   the **Sleuth Server** window opens. It copies itself to
+   `C:\Program Files\Sleuth Server` (the service runs from there). Opening a
+   newer version the same way later updates that copy: the service is
+   stopped, the files replaced and the service started again.
+3. Fill in the one setup form: the **office index folder** (the shared folder
+   every Sleuth PC uses; drive letters become network paths) and the
+   **projects** with their folders (each can be checked), then press
+   **Set up the server**. It makes the certificates, installs and starts the
+   Windows service, checks that it answers, and leaves the server's address,
+   its certificate and a join code in the office index folder
+   (`sleuth-server.json`).
+4. On each PC: **Sleuth > Settings > Office server > Connect this PC.** Sleuth
+   reads those details and the server gives that PC its own access key.
+   Nothing is typed; IT sends no keys and copies no certificate file.
 
-Run `sleuth-server.exe` again at any time for a menu: show the connection
-details, add or remove a person, add a project, check everything, restart the
-service, renew the certificate. The commands below do the same from scripts.
+The window then shows Overview (service, address, what the server reads),
+People and PCs (every key, PCs that connected themselves, removing one,
+switching self-connection off or limiting its projects, a new join code, a
+key made by hand), Projects, Certificate (fingerprint, expiry, renew) and the
+Log. `sleuth-server setup` still offers the console setup and menu.
+
+Who may connect themselves: any PC that can open the office index folder
+(the join code is there). Those PCs already read the office index; the
+projects given to them are set under People and PCs. A key by hand works as
+before for PCs that cannot open that folder.
+
+The service account may not be allowed to write to the shared folder. The
+server then logs it, and the window shows "not in the office index folder
+yet" with **Write them now**, which writes them as the signed-in person.
 
 ## Installing (IT, by command)
 

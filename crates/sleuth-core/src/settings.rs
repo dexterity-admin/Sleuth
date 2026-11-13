@@ -139,6 +139,10 @@ pub struct ServerSettings {
     /// The server's certificate authority (PEM). Empty: look for
     /// `sleuth-server-ca.pem` in the shared cache folder.
     pub ca_file: String,
+    /// The server's CA certificate itself (PEM, public), saved when this PC
+    /// connected itself from the server's card; used when `ca_file` is empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ca_pem: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -275,6 +279,11 @@ pub fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
 }
 
+/// The last settings saved in full, beside `path`.
+fn good_copy(path: &Path) -> PathBuf {
+    path.with_file_name("settings.good.json")
+}
+
 /// Bring an older settings document up to [`SCHEMA_VERSION`]. Each step only
 /// adds or renames keys.
 fn migrate(mut doc: Map<String, Value>) -> Map<String, Value> {
@@ -312,39 +321,69 @@ impl Settings {
         (norm(dir) == norm(OFFICE_CACHE_DIR)).then(|| OFFICE_CACHE_UNC.to_string())
     }
 
+    /// Load the settings. A file that is missing, empty or damaged (a PC
+    /// switched off while it was written) is replaced by the last good copy
+    /// (`settings.good.json`), so the reading folders and everything else
+    /// chosen survive restarts, updates and power cuts. Defaults only when
+    /// there is no good copy either.
     pub fn load_from(path: &Path) -> anyhow::Result<Settings> {
+        if let Ok(Some(s)) = Self::load_one(path, true) {
+            return Ok(s);
+        }
+        if path.exists() {
+            // Kept for inspection.
+            let _ = std::fs::copy(path, path.with_extension("damaged.json"));
+        }
+        match Self::load_one(&good_copy(path), false) {
+            Ok(Some(s)) => {
+                let _ = s.save_to(path);
+                Ok(s)
+            }
+            _ => Ok(Settings::default()),
+        }
+    }
+
+    /// `None`: no usable settings in this file.
+    fn load_one(path: &Path, upgrade: bool) -> anyhow::Result<Option<Settings>> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e.into()),
         };
         // Notepad and PowerShell 5.1 save UTF-8 with a byte-order mark.
         let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-        let doc: Map<String, Value> = match serde_json::from_str(text) {
-            Ok(d) => d,
-            Err(_) => {
-                // A damaged file is kept for inspection and defaults are used.
-                let _ = std::fs::copy(path, path.with_extension("damaged.json"));
-                return Ok(Settings::default());
-            }
-        };
+        let Ok(doc) = serde_json::from_str::<Map<String, Value>>(text) else { return Ok(None) };
         let old_version = doc.get("schema_version").and_then(Value::as_u64).unwrap_or(0) as u32;
         let migrated = migrate(doc);
-        let settings: Settings = serde_json::from_value(Value::Object(migrated))?;
-        if old_version < SCHEMA_VERSION {
+        let Ok(settings) = serde_json::from_value::<Settings>(Value::Object(migrated)) else { return Ok(None) };
+        if upgrade && old_version < SCHEMA_VERSION {
             let _ = std::fs::copy(path, path.with_file_name(format!("settings.v{old_version}.bak")));
             settings.save_to(path)?;
         }
-        Ok(settings)
+        Ok(Some(settings))
     }
 
+    /// Flushed to disk before it replaces the old file (a power cut cannot
+    /// leave an empty file), and kept as the last good copy too.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
+        use std::io::Write;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        let body = serde_json::to_vec_pretty(self)?;
+        let write = |p: &Path| -> std::io::Result<()> {
+            let mut f = std::fs::File::create(p)?;
+            f.write_all(&body)?;
+            f.sync_all()
+        };
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        write(&tmp)?;
         std::fs::rename(&tmp, path)?;
+        let good = good_copy(path);
+        let gtmp = good.with_extension("json.tmp");
+        if write(&gtmp).is_ok() {
+            let _ = std::fs::rename(&gtmp, &good);
+        }
         Ok(())
     }
 
@@ -420,5 +459,18 @@ mod tests {
         let p = tmp("damaged");
         std::fs::write(&p, "{not json").unwrap();
         assert_eq!(Settings::load_from(&p).unwrap(), Settings::default());
+    }
+
+    /// A PC switched off while saving left an empty settings.json; the
+    /// reading folders came back as none (Nov 2026).
+    #[test]
+    fn an_emptied_file_comes_back_from_the_good_copy() {
+        let p = tmp("emptied").with_file_name("settings.json");
+        let _ = std::fs::remove_file(good_copy(&p));
+        let s = Settings { content_scopes: vec![r"P:\P12513".into()], ..Default::default() };
+        s.save_to(&p).unwrap();
+        std::fs::write(&p, "").unwrap();
+        assert_eq!(Settings::load_from(&p).unwrap().content_scopes, vec![r"P:\P12513".to_string()]);
+        assert_eq!(Settings::load_from(&p).unwrap().content_scopes.len(), 1, "and settings.json is whole again");
     }
 }

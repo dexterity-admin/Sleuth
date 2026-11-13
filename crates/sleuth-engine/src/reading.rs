@@ -28,6 +28,10 @@ use sleuth_core::paths::root_key;
 use sleuth_core::protocol::{Failed, KindCount, ScopeProgress, SpeedMode};
 use sleuth_lanes::{CpuMeter, Event, Governor, Inputs, ProcessGroup, Spawn, Speed, Workers};
 use sleuth_office::{Acquire, Leases};
+
+/// A document that could not be read is tried again after this long, once
+/// nothing else waits.
+const RETRY_FAILED_AFTER: i64 = 12 * 3600;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,6 +136,8 @@ impl Engine {
         let mut kinds: HashMap<FileKind, KindCount> = HashMap::new();
         let mut fast: Vec<(bool, i64, Item)> = Vec::new();
         let mut ocr: Vec<(bool, i64, Item)> = Vec::new();
+        // Documents that could not be read, long enough ago to try again.
+        let mut again: Vec<(bool, Item, bool)> = Vec::new();
         let trim = |v: &mut Vec<(bool, i64, Item)>| {
             if v.len() > QUEUE_KEEP * 2 {
                 v.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
@@ -173,7 +179,8 @@ impl Engine {
                     return true;
                 }
                 let key = keyer.key(dir, name);
-                let st = self.pool.state_of_key(key, size, mtime);
+                let at = self.pool.state_at_key(key, size, mtime);
+                let st = at.map(|(s, _)| s);
                 sc.pdfs += 1;
                 let k = kinds.entry(kind).or_insert(KindCount { kind, found: 0, read: 0, waiting: 0, failed: 0 });
                 if !nested {
@@ -190,6 +197,10 @@ impl Engine {
                         sc.failed += 1;
                         if !nested {
                             k.failed += 1;
+                            // Tried again once nothing else waits (below).
+                            if at.is_some_and(|(_, when)| when < t - RETRY_FAILED_AFTER) && !deferred.contains(&key) && again.len() < QUEUE_KEEP {
+                                again.push((dir_mine, Item { path: crate::service::join(dir, name), size, mtime }, kind.needs_ocr()));
+                            }
                         }
                     }
                     _ => {
@@ -234,6 +245,16 @@ impl Engine {
         let mut kinds: Vec<KindCount> = kinds.into_values().collect();
         kinds.sort_by(|a, b| b.found.cmp(&a.found));
         snap.kinds = kinds;
+        // Every reading folder done: what failed gets another go (a newer
+        // reader, a file that was locked or half-copied, a share that dropped).
+        // Each failure at most every RETRY_FAILED_AFTER; the document lease
+        // keeps two PCs from trying the same one.
+        if fast.is_empty() && ocr.is_empty() {
+            for (mine, item, needs_ocr) in again {
+                let mtime = item.mtime;
+                if needs_ocr { ocr.push((mine, mtime, item)) } else { fast.push((mine, mtime, item)) }
+            }
+        }
         let ready = |mut v: Vec<(bool, i64, Item)>| -> VecDeque<Item> {
             // This PC's own folders first, newest files first.
             v.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
@@ -579,6 +600,7 @@ impl Engine {
                 self.claims_waited.fetch_add(1, Ordering::Relaxed);
                 self.defer(key, (until - now()).clamp(60, 900), 0, &format!("being read by {host}; its result will be shared"));
             }
+            Outcome::Later { reason } => self.defer(key, 120, 0, &reason),
             Outcome::NotHere { reason } => {
                 // Another PC may have what this one lacks; ask again later.
                 self.defer(key, 6 * 3600, 0, &reason);
@@ -761,7 +783,14 @@ impl Engine {
                 !e.stopping()
             };
             let deriver = e.deriver();
-            match pool::merge(&sources, &|slot, id| !e.pool.is_superseded(slot, id), &dir, &e.pc, &deriver, &keep_going) {
+            // Built on this PC's disk; what an earlier, interrupted merge left there goes first.
+            let build = e.data.join("merging");
+            if let Ok(rd) = std::fs::read_dir(&build) {
+                for f in rd.flatten() {
+                    let _ = std::fs::remove_file(f.path());
+                }
+            }
+            match pool::merge(&sources, &|slot, id| !e.pool.is_superseded(slot, id), &dir, &build, &e.pc, &deriver, &keep_going) {
                 Ok(Some(_)) => {
                     e.pool.refresh();
                     e.pool.recover(&|p| e.presence(p));

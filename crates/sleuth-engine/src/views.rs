@@ -126,6 +126,7 @@ impl Engine {
     /// Compare the tags of two read documents: their title-block details,
     /// the changes, and how many tags are unchanged.
     pub fn compare_paths(&self, old: &str, new: &str) -> Result<(DrawingMeta, DrawingMeta, Vec<TagChange>, u32)> {
+        let rules = self.deriver();
         let side = |path: &str| -> Result<(Vec<crate::workflows::Occ>, DrawingMeta)> {
             let stored = self.stored_path(path);
             self.pool
@@ -133,7 +134,7 @@ impl Engine {
                     if s.file_by_id(id)?.is_none_or(|f| f.read_state != state::READ) {
                         bail!("{path} has not been read yet");
                     }
-                    Ok((s.file_occurrences(id)?, s.metadata(id)?))
+                    Ok((s.file_occurrences(id)?, s.metadata_now(id, &rules)?))
                 })?
                 .ok_or_else(|| anyhow!("{path} has not been read yet"))
         };
@@ -193,10 +194,11 @@ impl Engine {
     /// many tags it carries.
     pub fn doc_detail(&self, path: &str) -> Result<(DrawingMeta, Vec<PageInfo>, Provenance, u32)> {
         let stored = self.stored_path(path);
+        let rules = self.deriver();
         self.pool
             .with_file(&stored, |s, id| {
                 let tags: u32 = s.conn.query_row("SELECT COUNT(*) FROM tag_occurrences WHERE file_id=?1", [id], |r| r.get(0))?;
-                Ok((s.metadata(id)?, s.page_info(id)?, s.provenance(id)?, tags))
+                Ok((s.metadata_now(id, &rules)?, s.page_info(id)?, s.provenance(id)?, tags))
             })?
             .ok_or_else(|| anyhow!("not read yet"))
     }
@@ -355,12 +357,27 @@ impl Engine {
         errors.extend(self.pool.refused());
         errors.truncate(20);
         let pcs = self.pcs.lock().unwrap().clone();
-        let office_rate: u64 = pcs.iter().filter(|p| now() - p.last_seen < 180).map(|p| p.docs_per_hour).sum::<u64>().max(status.docs_per_hour);
+        // The office's pace: what every working PC says it read in its last
+        // hour (this PC's own figure is always the current one), checked
+        // against what reached the office index in the last hour.
+        let active: Vec<&PcStatus> = pcs.iter().enumerate().filter(|(i, p)| *i == 0 || now() - p.last_seen < crate::indexing::ACTIVE_SECS).map(|(_, p)| p).collect();
+        let mut office_rate: u64 = active.iter().skip(1).map(|p| p.docs_per_hour).sum::<u64>() + status.docs_per_hour;
+        let office_pages: u64 = active.iter().skip(1).map(|p| p.pages_per_hour).sum::<u64>() + status.pages_per_hour;
+        let arrived = self.pool.read_since(now() - 3600);
+        office_rate = office_rate.max(arrived);
+        let waiting = status.pdfs_waiting;
+        let eta = |rate: u64| if rate > 0 && waiting > 0 { waiting * 3600 / rate } else { 0 };
         m.db_bytes = status.store.bytes;
         m.local_bytes = dir_bytes(&self.data);
-        m.office_waiting = status.pdfs_waiting;
+        m.office_waiting = waiting;
         m.office_docs_per_hour = office_rate;
-        m.office_eta_secs = if office_rate > 0 && status.pdfs_waiting > 0 { status.pdfs_waiting * 3600 / office_rate } else { 0 };
+        m.office_pages_per_hour = office_pages;
+        m.office_eta_secs = eta(office_rate);
+        m.office_readers = active.iter().filter(|p| p.state.starts_with("reading") || p.docs_per_hour > 0).count().max(1) as u32;
+        m.office_arrived_last_hour = arrived;
+        m.office_pcs_counted = active.len() as u32;
+        m.this_eta_secs = eta(status.docs_per_hour);
+        m.this_share_pct = if office_rate > 0 { ((status.docs_per_hour * 100) / office_rate).min(100) as u32 } else { 0 };
         m.cache_hits = self.cache_hits.load(Ordering::Relaxed);
         m.cache_misses = self.cache_misses.load(Ordering::Relaxed);
         m.cache_claims_waited = self.claims_waited.load(Ordering::Relaxed);

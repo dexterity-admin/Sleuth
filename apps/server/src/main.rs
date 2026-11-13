@@ -17,6 +17,8 @@ use sleuth_server::tls;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(windows)]
+mod gui;
 mod setup;
 
 #[derive(Parser)]
@@ -37,7 +39,9 @@ enum RoleArg {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Guided setup and menu (what a double-click opens).
+    /// The Sleuth Server window (what a double-click opens).
+    Gui,
+    /// Guided setup and menu in this console.
     Setup,
     /// Create server.json and the certificates.
     Init {
@@ -82,6 +86,12 @@ enum Cmd {
     RenewCert,
     /// Check the configuration, the project folders and the certificate.
     Check,
+    /// Check office index parts (`.db` files) are whole SQLite databases, for
+    /// the backup scripts: one line per file, `ok<TAB>path` or `bad<TAB>path<TAB>why`.
+    /// Exits 1 when any is bad.
+    CheckParts {
+        files: Vec<PathBuf>,
+    },
     /// Entry point used by the Windows service.
     #[command(hide = true)]
     ServiceRun,
@@ -120,15 +130,16 @@ fn main() -> Result<()> {
         // Started by the server's own engine as a reader process.
         return sleuth_engine::readjob::serve();
     }
-    // Double-clicked in Explorer: no arguments. Open the guided setup instead of
-    // printing usage into a window that closes at once.
+    // Double-clicked in Explorer: no arguments. Open the window instead of
+    // printing usage into a console that closes at once.
     if std::env::args_os().len() == 1 {
-        return guided(sleuth_server::data_dir(None));
+        return open_window(sleuth_server::data_dir(None));
     }
     let cli = Cli::parse();
     let data = sleuth_server::data_dir(cli.data);
     sleuth_server::use_data_dir(&data);
     match cli.cmd {
+        Cmd::Gui => open_window(data),
         Cmd::Setup => guided(data),
         Cmd::Init { projects, listen, hostnames, shared_cache } => init(&data, &projects, listen, hostnames, shared_cache),
         Cmd::AddProject { project } => change(&data, "add project", &project, |c| {
@@ -186,12 +197,23 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Check => check(&data),
+        Cmd::CheckParts { files } => check_parts(&files),
         Cmd::ServiceRun => {
             file_logging(&data);
             std::panic::set_hook(Box::new(|p| tracing::error!("panic: {p}")));
             run_service(data)
         }
     }
+}
+
+#[cfg(windows)]
+fn open_window(data: PathBuf) -> Result<()> {
+    gui::run(data)
+}
+
+#[cfg(not(windows))]
+fn open_window(data: PathBuf) -> Result<()> {
+    guided(data)
 }
 
 /// The guided setup; keeps the window open at the end (and after an error) so it can be read.
@@ -306,7 +328,7 @@ fn create_user(data: &Path, name: &str, role: Role, projects: &[String]) -> Resu
         if c.user(name).is_some() {
             bail!("there is already a user called {name} (remove-user first to issue a new key)");
         }
-        c.users.push(UserCfg { name: name.trim().to_string(), token_sha256: config::hash_key(&key), role, projects: projects.to_vec() });
+        c.users.push(UserCfg { name: name.trim().to_string(), token_sha256: config::hash_key(&key), role, projects: projects.to_vec(), pc: String::new(), since: sleuth_engine::service::now() });
         Ok(())
     })?;
     Ok(key)
@@ -325,6 +347,28 @@ fn add_user(data: &Path, name: &str, role: RoleArg, projects: &str) -> Result<()
     println!("    {key}");
     println!();
     println!("Enter it in Sleuth: Settings > Office server > Access key.");
+    Ok(())
+}
+
+fn check_parts(files: &[PathBuf]) -> Result<()> {
+    let mut bad = 0;
+    for f in files {
+        let r = sleuth_engine::store::Store::open_part(f).and_then(|s| {
+            let ok: String = s.conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+            anyhow::ensure!(ok == "ok", "{ok}");
+            Ok(())
+        });
+        match r {
+            Ok(()) => println!("ok\t{}", f.display()),
+            Err(e) => {
+                bad += 1;
+                println!("bad\t{}\t{}", f.display(), format!("{e:#}").replace(['\t', '\n'], " "));
+            }
+        }
+    }
+    if bad > 0 {
+        std::process::exit(1);
+    }
     Ok(())
 }
 

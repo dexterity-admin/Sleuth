@@ -49,10 +49,10 @@ fn office_server_end_to_end() {
         listen: "127.0.0.1:0".into(),
         projects: vec![Project { name: "P1".into(), roots: vec![s(&proj)] }, Project { name: "P2".into(), roots: vec![s(&proj2)] }],
         users: vec![
-            UserCfg { name: "ana".into(), token_sha256: hash_key("slk_ana"), role: Role::User, projects: vec!["P1".into()] },
-            UserCfg { name: "ben".into(), token_sha256: hash_key("slk_ben"), role: Role::User, projects: vec!["P2".into()] },
-            UserCfg { name: "cai".into(), token_sha256: hash_key("slk_cai"), role: Role::User, projects: vec!["P1".into()] },
-            UserCfg { name: "it".into(), token_sha256: hash_key("slk_it"), role: Role::Admin, projects: vec!["*".into()] },
+            UserCfg { name: "ana".into(), token_sha256: hash_key("slk_ana"), role: Role::User, projects: vec!["P1".into()], pc: String::new(), since: 0 },
+            UserCfg { name: "ben".into(), token_sha256: hash_key("slk_ben"), role: Role::User, projects: vec!["P2".into()], pc: String::new(), since: 0 },
+            UserCfg { name: "cai".into(), token_sha256: hash_key("slk_cai"), role: Role::User, projects: vec!["P1".into()], pc: String::new(), since: 0 },
+            UserCfg { name: "it".into(), token_sha256: hash_key("slk_it"), role: Role::Admin, projects: vec!["*".into()], pc: String::new(), since: 0 },
         ],
         reader: serde_json::from_str(r#"{"ocr_backend":"cpu","name_rescan_minutes":15}"#).unwrap(),
         ..Default::default()
@@ -79,6 +79,30 @@ fn office_server_end_to_end() {
     let (st, body) = raw(&ca, &format!("{url}/api/v1/capabilities"), "slk_wrong");
     assert_eq!((st, body["code"].as_str()), (401, Some("unauthorized")));
     assert!(Client::new(&url, "slk_wrong", &ca).unwrap().capabilities().is_err());
+
+    // A PC connects itself with the join code from the office index folder
+    // (here read from server.json, which the server gave a code at start).
+    {
+        use sleuth_engine::remote::{JoinRequest, join};
+        let code = Config::load(&data).unwrap().join_code;
+        assert!(code.starts_with("join-"), "a join code was made at start");
+        let req = |code: &str| JoinRequest { code: code.into(), pc: "TESTPC".into(), user: "tester".into() };
+        let e = join(&url, &ca, &req("join-wrong")).unwrap_err();
+        assert!(format!("{e:#}").contains("join code"), "{e:#}");
+        let first = join(&url, &ca, &req(&code)).unwrap();
+        assert_eq!(first.name, r"TESTPC\tester");
+        let me = Client::new(&url, &first.key, &ca).unwrap().capabilities().unwrap();
+        assert_eq!((me.user.as_str(), me.role.as_str()), (r"TESTPC\tester", "user"));
+        assert_eq!(me.projects.len(), 2, "joined PCs get the join projects (all by default)");
+        // Joining again gives a new key; the old one stops at once.
+        let second = join(&url, &ca, &req(&code)).unwrap();
+        assert_ne!(first.key, second.key);
+        assert!(Client::new(&url, &first.key, &ca).unwrap().capabilities().is_err());
+        assert!(Client::new(&url, &second.key, &ca).unwrap().capabilities().is_ok());
+        // An admin added by hand cannot be taken over by joining under its name.
+        let e = join(&url, &ca, &JoinRequest { code: code.clone(), pc: "it".into(), user: String::new() }).unwrap_err();
+        assert!(format!("{e:#}").contains("by hand"), "{e:#}");
+    }
 
     let caps = ana.capabilities().unwrap();
     assert_eq!(caps.api_version, 1);

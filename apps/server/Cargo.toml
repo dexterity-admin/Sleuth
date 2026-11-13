@@ -37,6 +37,11 @@ x509-parser = "0.18"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+windows.workspace = true
+# The server window (Sleuth Server): WebView2 in a native window, the same
+# libraries the desktop app uses through Tauri.
+wry = "0.57"
+tao = "0.37"
 
 [dev-dependencies]
 ureq = "3"

@@ -51,6 +51,25 @@ pub struct UserCfg {
     pub role: Role,
     /// Project names, or `["*"]` for all of them.
     pub projects: Vec<String>,
+    /// The PC that got this key by itself ("Connect this PC"); empty for a
+    /// person added by an administrator.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pc: String,
+    /// Unix seconds the key was made (0: before 1.3).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub since: i64,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn all_projects() -> Vec<String> {
+    vec!["*".into()]
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,6 +89,18 @@ pub struct Config {
     /// Passed through to the engine's settings.
     #[serde(default)]
     pub reader: Map<String, Value>,
+    /// Office PCs may connect themselves ("Connect this PC" in Sleuth): a PC
+    /// that can open the office index folder reads the join code there and
+    /// gets its own key, with no one typing or sending keys.
+    #[serde(default = "yes")]
+    pub self_registration: bool,
+    /// The projects a PC that connected itself may search (`*` = all).
+    #[serde(default = "all_projects")]
+    pub join_projects: Vec<String>,
+    /// The join code left in the office index folder. A new code stops
+    /// joining with the old one; keys already given keep working.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub join_code: String,
 }
 
 fn default_listen() -> String {
@@ -78,8 +109,31 @@ fn default_listen() -> String {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { listen: default_listen(), hostnames: Vec::new(), projects: Vec::new(), users: Vec::new(), shared_cache_dir: None, reader: Map::new() }
+        Config {
+            listen: default_listen(),
+            hostnames: Vec::new(),
+            projects: Vec::new(),
+            users: Vec::new(),
+            shared_cache_dir: None,
+            reader: Map::new(),
+            self_registration: true,
+            join_projects: all_projects(),
+            join_code: String::new(),
+        }
     }
+}
+
+/// A new join code (128 bits), for the office index folder.
+pub fn new_join_code() -> Result<String> {
+    use base64::Engine as _;
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).map_err(|e| anyhow::anyhow!("no random numbers from Windows: {e}"))?;
+    Ok(format!("join-{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)))
+}
+
+/// Whether `code` is the join code, compared in constant time.
+pub fn join_code_matches(c: &Config, code: &str) -> bool {
+    !c.join_code.is_empty() && same(&hash_key(&c.join_code), &hash_key(code))
 }
 
 /// `%ProgramData%\Sleuth Server`.
@@ -203,6 +257,11 @@ impl Config {
                 if p != "*" && !names.contains(&p.trim().to_lowercase()) {
                     bail!("user \"{n}\": no project called \"{p}\"");
                 }
+            }
+        }
+        for p in &self.join_projects {
+            if p != "*" && !names.contains(&p.trim().to_lowercase()) {
+                bail!("join_projects: no project called \"{p}\"");
             }
         }
         for k in self.reader.keys() {
@@ -347,8 +406,8 @@ mod tests {
         Config {
             projects: vec![Project { name: "P1".into(), roots: roots(&[r"\\srv\proj"]) }, Project { name: "P2".into(), roots: roots(&[r"\\srv\project2"]) }],
             users: vec![
-                UserCfg { name: "ana".into(), token_sha256: hash_key("slk_a"), role: Role::User, projects: vec!["p1".into()] },
-                UserCfg { name: "it".into(), token_sha256: hash_key("slk_b"), role: Role::Admin, projects: vec!["*".into()] },
+                UserCfg { name: "ana".into(), token_sha256: hash_key("slk_a"), role: Role::User, projects: vec!["p1".into()], pc: String::new(), since: 0 },
+                UserCfg { name: "it".into(), token_sha256: hash_key("slk_b"), role: Role::Admin, projects: vec!["*".into()], pc: String::new(), since: 0 },
             ],
             ..Default::default()
         }

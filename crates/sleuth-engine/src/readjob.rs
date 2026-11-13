@@ -38,6 +38,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// noticing (every minute) take together. Long OCR jobs renew it.
 const DOC_LEASE: Duration = Duration::from_secs(30 * 60);
 
+/// How long a document stays its reader's once it is read, so that nobody
+/// opens it again before that reading is in the office index on every PC.
+/// Publishing takes up to ten minutes, but a PC with hundreds of parts to
+/// look through can take many more to notice a new one (seen at 11 minutes
+/// on a busy office, 12 Nov 2026), which a 30-minute term did not cover.
+/// A PC switched off before publishing delays such a document by this much.
+const DONE_HOLD: Duration = Duration::from_secs(3 * 3600);
+
 fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -105,6 +113,12 @@ pub enum Outcome {
     NotHere {
         reason: String,
     },
+    /// Not opened: it could not be made sure that no other PC reads it at
+    /// the same time (the office index folder did not answer). Asked again
+    /// in a few minutes; it is not a failure of the file.
+    Later {
+        reason: String,
+    },
     Failed {
         reason: String,
         /// May go away by itself (share unreachable, file locked).
@@ -155,7 +169,7 @@ impl ReaderState {
             match &outcome {
                 // Done with for good: nobody opens it again before its
                 // reading (or its failure) is in the office index.
-                Outcome::Read { .. } | Outcome::Reused { .. } | Outcome::Failed { transient: false, .. } => lease.leave(),
+                Outcome::Read { .. } | Outcome::Reused { .. } | Outcome::Failed { transient: false, .. } => lease.leave_for(DONE_HOLD),
                 // Somebody else's turn, now or later.
                 _ => lease.release(),
             }
@@ -323,7 +337,8 @@ fn take_lease(init: &Init, path: &str) -> Result<Option<Lease>, Outcome> {
     match Leases::new(Path::new(store).join("leases"), me).acquire(&doc_lease(path_key(path)), DOC_LEASE) {
         Acquire::Mine(l) => Ok(Some(l)),
         Acquire::HeldBy(h) => Err(Outcome::HeldBy { host: h.host, until: h.until }),
-        Acquire::Unavailable(_) => Ok(None),
+        // Reading it anyway could read it twice; the folder is usually back in a minute.
+        Acquire::Unavailable(why) => Err(Outcome::Later { reason: format!("the office index folder did not answer ({why}); trying again shortly") }),
     }
 }
 

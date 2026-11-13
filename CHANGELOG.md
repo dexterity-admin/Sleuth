@@ -1,5 +1,110 @@
 # Changelog
 
+## 1.3.0
+
+13 November 2026.
+
+- **A third of the memory:** the Sleuth reader kept a cache of up to 32 MB
+  for every part of the office index it searched, and after a few searches
+  across the office it held 3 GB or more; on a PC with little free memory it
+  then stopped. Each part now keeps 2 MB, and all of them together stay under
+  384 MB. Measured on the office index (218 parts, 21 GB, five searches): 1.0
+  GB at most instead of 3.0 GB; a first search takes as long as before, a
+  repeated one up to a few seconds longer.
+- **No false "can't be reached" for a busy share:** while a PC opens the
+  office index at start, the share can take over 10 seconds for Sleuth's
+  test write, and Settings said the office index folder could not be
+  reached. It now waits up to 30 seconds before saying so.
+- **Sleuth Server is a window:** double-clicking `sleuth-server.exe` opens
+  the Sleuth Server window instead of a console: first-time setup in one
+  form (office index folder, projects, then one button for certificates,
+  service and checks), then Overview (service, address, what it reads),
+  People and PCs, Projects, Certificate and Log. Opened from a new version's
+  folder it stops the service, updates the installed copy and starts it
+  again. The console setup stays as `sleuth-server setup`, and every command
+  for scripts is unchanged.
+- **Connect this PC:** one button in Settings > Office server. The server
+  leaves its address, its certificate and a join code in the office index
+  folder; Sleuth reads them and the server gives the PC its own access key.
+  Nothing is typed and IT sends no keys. Only PCs that can open the office
+  index folder can join; joining can be switched off, limited to some
+  projects, or given a new join code in the server window. Keys typed by
+  hand still work.
+- **No certificate file to copy:** the certificate travels in the office
+  index folder with the address and is kept by each PC that connected. The
+  server writes these details itself whenever it starts. (Copying the file
+  by hand failed with "You need permission" even for an administrator,
+  because the server's data folder is locked to elevated administrators.)
+- **Whole-office reading progress:** the Monitor shows how far the whole
+  office is (per cent read, still to read, documents and pages an hour from
+  every PC together, PCs reading, time left with a finish date) next to this
+  PC's own pace, share and time alone; the PC table adds pages an hour, share
+  and an office total. The status bar's time left is the office's. Fixed: the
+  office's pace showed only this PC's, because PCs reported every ten minutes
+  or so while the office counted only those seen in the last three; PCs now
+  report every minute and are counted for twenty.
+- **No document read twice:** a document stays its reader's for three hours
+  after it is read (it was 30 minutes, shorter than other PCs could take to
+  see the reading on a busy office), and a PC that cannot reach the lease
+  folder waits instead of reading without a lease.
+- **Faster search:** rows found by file name show at once, from memory, while
+  the text inside the read documents is searched; a search no longer runs
+  twice when the index changed while it ran. Small parts of the office index
+  are merged a few at a time on the PC's own disk (all of them at once over
+  the network never finished, so searches had to look through hundreds).
+- **Preview marks you cannot mistake for red-line:** matches are shown with
+  a cyan-to-violet lens instead of red (drawings carry red clouds and
+  comments): every match tinted, the current one ringed with lock-on corners
+  and the rest of the page dimmed; stepping glides to the next mark. A quick
+  page appears first and the sharp one replaces it; the last pages shown are
+  kept, so going back is instant.
+- **Title-block details you can rely on:** a value must fill its cell (no
+  more Revision "DR" out of "DR'N.", or Sheet "1" out of "(SHEET 1 TO 6)"), a
+  label must start its cell, a REV column of a revision table gives no
+  revision, and status words count only as whole words on a line of their
+  own (no "VOID" from "AVOID"). Values already in the office index that their
+  own evidence does not support are no longer shown; the Details pane works
+  them out again from the stored text. The evidence names the label a value
+  was found next to.
+- **Tray:** closing the window keeps Sleuth in the tray, reading on. Click
+  the tray icon to open it; **Exit Sleuth** in its menu stops Sleuth and the
+  reader in the background.
+- **Settings never fall back to defaults:** settings are flushed to disk
+  before they replace the old file and kept as a last good copy, which is
+  used when the file is found empty or damaged (a PC switched off while
+  saving). Reading folders survive installs, updates, restarts and power
+  cuts. The window no longer saves settings it has not finished loading.
+- **Back by itself after the office folder drops:** while U: (or the office
+  index folder) is away, Sleuth checks it every 10 seconds instead of every
+  two minutes and carries on as soon as it answers; the office index's parts
+  are opened 16 at a time (one by one, a few hundred of them left search
+  empty for minutes). A search made while it is still opening says so and
+  runs again by itself. The office server is tried every 15 seconds while
+  offline.
+- **Failed documents tried again:** once a reading folder has nothing else
+  waiting, documents that could not be read are read again (each at most
+  every 12 hours), so text missed through a locked file, a half-copied file
+  or a dropped share is captured.
+- **Office lock files not read:** `~$name.docx` / `.xlsx` / `.pptx`, the
+  small files Office keeps beside a document someone has open, are found by
+  name only and no longer counted as failed documents.
+- **This PC's disks:** **Read C:**, **Read D:** under "Folders being read" add
+  a local disk as a reading folder. **Read folders that need administrator
+  rights...** restarts the reader with administrator rights; Windows asks
+  for them (Sleuth never sees the password). Without them, folders Windows
+  keeps closed are skipped as before. The rights last until Sleuth exits.
+- **Fixed: the office server stopped at once after setup** ("cannot read
+  server.json: Access is denied"). Setup's lock-down of the data folder left
+  every file in it with no permissions at all. The folder now gets the
+  permissions and its files inherit them; opening the new Sleuth Server
+  window repairs a folder set up by 1.2.0 and starts the service.
+- **Office index backup to GitHub** (`tools/backup`): a daily script on the
+  server PC copies every new part, byte for byte, to a private GitHub
+  repository (release assets, SHA-256 in a manifest), checks the parts on the
+  share are still identical and puts back a damaged one; a workflow there
+  checks every asset's size daily and its hash weekly; a restore script puts
+  back whatever is missing. New: `sleuth-server check-parts`.
+
 ## 1.2.0
 
 - **Office server setup by double-click:** `sleuth-server.exe` opened with no

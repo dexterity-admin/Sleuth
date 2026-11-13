@@ -29,6 +29,8 @@ struct Worker {
     /// Set while an update is being installed, so the worker that was just
     /// stopped is not started again under the installer's feet.
     updating: AtomicBool,
+    /// Set by Exit in the tray: the window really closes.
+    exiting: AtomicBool,
 }
 
 impl Worker {
@@ -374,20 +376,136 @@ where
     Ok(())
 }
 
+/// Bring the window back from the tray (or from behind other windows).
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// The tray icon: click to open; the menu opens Sleuth or exits it for good.
+fn tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    let open = MenuItem::with_id(app, "open", "Open Sleuth", true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "exit", "Exit Sleuth (stop reading on this PC)", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &exit])?;
+    let mut b = TrayIconBuilder::with_id("sleuth")
+        .tooltip("Sleuth: searching and reading in the background")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, ev| match ev.id().as_ref() {
+            "open" => show_main(app),
+            "exit" => exit_all(app.clone()),
+            _ => {}
+        })
+        .on_tray_icon_event(|t, ev| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } = ev {
+                show_main(t.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        b = b.icon(icon.clone());
+    }
+    b.build(app)?;
+    Ok(())
+}
+
+/// Exit from the tray: the reader in the background stops too (it is
+/// started again with Sleuth, or at sign-in when "keep reading" is on).
+fn exit_all(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let worker = app.state::<Worker>();
+        worker.exiting.store(true, Ordering::SeqCst);
+        // Not started again by the connection loop while it stops.
+        worker.updating.store(true, Ordering::SeqCst);
+        let id = worker.next_id();
+        if worker.send(id, json!({"req": "shutdown"})).is_ok() {
+            // Let it finish its current write and release its files.
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if worker.tx.lock().unwrap().is_none() {
+                    break;
+                }
+            }
+        } else {
+            // Not connected: a reader may still run on its own; stop it by name.
+            stop_worker_process();
+        }
+        app.exit(0);
+    });
+}
+
+/// The reader started from this install, if it runs without a connection.
+fn stop_worker_process() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = worker_exe();
+    let name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sleuth-worker.exe".into());
+    let _ = std::process::Command::new("taskkill").args(["/IM", &name, "/FI", &format!("USERNAME eq {}", std::env::var("USERNAME").unwrap_or_default())]).creation_flags(CREATE_NO_WINDOW).status();
+}
+
+/// "Read folders that need administrator rights": restart the reader with
+/// administrator rights. Windows asks for them (an administrator's password
+/// where this account is not one); Sleuth never sees or keeps it. Declined,
+/// the reader starts again as before. Lasts until the reader stops.
+#[tauri::command]
+async fn read_as_admin(worker: State<'_, Worker>) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let sid = {
+        let out = std::process::Command::new("whoami").args(["/user", "/fo", "csv", "/nh"]).creation_flags(CREATE_NO_WINDOW).output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        text.split(',').nth(1).map(|s| s.trim().trim_matches('"').to_string()).filter(|s| s.starts_with("S-1-")).ok_or("could not tell who is signed in")?
+    };
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    // Stop the reader that runs now, and keep it from being started again meanwhile.
+    worker.updating.store(true, Ordering::SeqCst);
+    let id = worker.next_id();
+    let _ = worker.send(id, json!({"req": "shutdown"}));
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if worker.tx.lock().unwrap().is_none() {
+            break;
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let q = |v: &str| format!("'\"{}\"'", v.replace('\'', "''"));
+    let args = [q("--elevated"), q("--user"), q(&env("USERNAME")), q("--sid"), q(&sid), q("--appdata"), q(&env("APPDATA")), q("--localappdata"), q(&env("LOCALAPPDATA"))].join(",");
+    let cmd = format!("Start-Process -FilePath {} -ArgumentList {args} -Verb RunAs -WindowStyle Hidden", q(&worker_exe().display().to_string()));
+    let ok = std::process::Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &cmd]).creation_flags(CREATE_NO_WINDOW).status().is_ok_and(|s| s.success());
+    // Either way the connection loop may start a reader again: an elevated one
+    // already running keeps the plain one from starting.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    worker.updating.store(false, Ordering::SeqCst);
+    if ok { Ok(()) } else { Err("administrator rights were not given; Sleuth reads as before".into()) }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            show_main(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(Worker::default())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connection_loop(handle));
+            tray(app)?;
             Ok(())
+        })
+        // Closing the window keeps Sleuth in the tray, reading on; only Exit
+        // in the tray menu stops it (and the reader in the background).
+        .on_window_event(|w, ev| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = ev
+                && w.label() == "main"
+                && !w.app_handle().state::<Worker>().exiting.load(Ordering::SeqCst)
+            {
+                api.prevent_close();
+                let _ = w.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             call,
@@ -398,6 +516,7 @@ fn main() {
             pick_file,
             export_table,
             set_autostart,
+            read_as_admin,
             app_version,
             check_update,
             prepare_update,

@@ -30,7 +30,7 @@ use axum::{Json, Router};
 use serde::Serialize;
 use sleuth_core::protocol::{Event, NormBox, TextSource};
 use sleuth_core::settings::Project;
-use sleuth_engine::remote::{ApiError, Capabilities, CompareReply, DocLookup, DocReply, PageReply, SearchReply};
+use sleuth_engine::remote::{ApiError, Capabilities, CompareReply, DocLookup, DocReply, JoinReply, JoinRequest, PageReply, SearchReply};
 use sleuth_engine::service::Engine;
 use sleuth_engine::store::Scope;
 use std::collections::HashMap;
@@ -54,7 +54,14 @@ pub struct AppState {
     pub cfg: RwLock<Arc<Config>>,
     pub audit: Audit,
     limits: Mutex<HashMap<String, Limit>>,
+    /// One join at a time: each reads, changes and saves `server.json`.
+    join_lock: Mutex<()>,
+    /// Joins asked per address in the current minute.
+    joins: Mutex<HashMap<std::net::IpAddr, (Instant, u32)>>,
 }
+
+/// Joins one address may ask for in a minute (a PC needs one).
+pub const JOINS_PER_MINUTE: u32 = 6;
 
 struct Limit {
     busy: Arc<Semaphore>,
@@ -64,7 +71,58 @@ struct Limit {
 
 impl AppState {
     pub fn new(engine: Arc<Engine>, data: PathBuf, cfg: Config, audit: Audit) -> AppState {
-        AppState { engine, data, cfg: RwLock::new(Arc::new(cfg)), audit, limits: Mutex::new(HashMap::new()) }
+        AppState { engine, data, cfg: RwLock::new(Arc::new(cfg)), audit, limits: Mutex::new(HashMap::new()), join_lock: Mutex::new(()), joins: Mutex::new(HashMap::new()) }
+    }
+
+    /// A PC that showed the join code from the office index folder gets
+    /// its own access key (a new one each time it asks; the old one stops).
+    /// Only the projects set for joining are given, and never the admin role.
+    fn join(&self, req: &JoinRequest, peer: SocketAddr) -> Result<JoinReply, ApiErr> {
+        {
+            let mut m = self.joins.lock().unwrap();
+            m.retain(|_, (at, _)| at.elapsed().as_secs() < 60);
+            let e = m.entry(peer.ip()).or_insert((Instant::now(), 0));
+            e.1 += 1;
+            if e.1 > JOINS_PER_MINUTE {
+                return Err(ApiErr::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "too many tries from this PC; wait a minute"));
+            }
+        }
+        let clean = |s: &str, max: usize| -> String { s.trim().chars().filter(|c| c.is_alphanumeric() || "-_. $".contains(*c)).take(max).collect::<String>().trim().to_string() };
+        let (pc, user) = (clean(&req.pc, 63), clean(&req.user, 64));
+        if pc.is_empty() {
+            return Err(ApiErr::bad("the PC's name is missing"));
+        }
+        let _g = self.join_lock.lock().unwrap();
+        let mut cfg = Config::load(&self.data)?;
+        let from = format!("{pc} at {}", peer.ip());
+        if !cfg.self_registration {
+            self.audit.record(&format!("{pc}\\{user}"), "join", &from, "refused: PCs may not connect themselves");
+            return Err(ApiErr::forbidden("this office server does not let PCs connect themselves; ask IT for an access key"));
+        }
+        if !crate::config::join_code_matches(&cfg, &req.code) {
+            self.audit.record(&format!("{pc}\\{user}"), "join", &from, "refused: wrong join code");
+            return Err(ApiErr::new(StatusCode::UNAUTHORIZED, "unauthorized", "the join code is not this server's; the office index folder may hold an old one"));
+        }
+        let name = if user.is_empty() { pc.clone() } else { format!("{pc}\\{user}") };
+        if cfg.user(&name).is_some_and(|u| u.pc.is_empty()) {
+            self.audit.record(&name, "join", &from, "refused: a person of that name was added by hand");
+            return Err(ApiErr::forbidden(format!("\"{name}\" was added by hand on the server; ask IT for its key")));
+        }
+        let key = crate::config::new_key()?;
+        cfg.users.retain(|u| !u.name.eq_ignore_ascii_case(&name));
+        cfg.users.push(crate::config::UserCfg {
+            name: name.clone(),
+            token_sha256: crate::config::hash_key(&key),
+            role: Role::User,
+            projects: cfg.join_projects.clone(),
+            pc: pc.clone(),
+            since: sleuth_engine::service::now(),
+        });
+        cfg.save(&self.data)?;
+        let projects = cfg.join_projects.clone();
+        *self.cfg.write().unwrap() = Arc::new(cfg);
+        self.audit.record(&name, "join", &from, "ok");
+        Ok(JoinReply { key, name, projects, server_version: env!("CARGO_PKG_VERSION").into() })
     }
 
     pub fn config(&self) -> Arc<Config> {
@@ -535,6 +593,13 @@ async fn audit_log(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectIn
     Ok(Json(st.audit.recent(limit)?))
 }
 
+/// `POST /join`: no access key; the join code from the office index folder
+/// instead. Answers with the PC's new key.
+async fn join(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, body: Result<Json<JoinRequest>, axum::extract::rejection::JsonRejection>) -> Reply<JoinReply> {
+    let Json(req) = body.map_err(|e| ApiErr::bad(format!("the request is not understood: {e}")))?;
+    blocking(move || st.join(&req, peer)).await.map(Json)
+}
+
 async fn no_route() -> ApiErr {
     ApiErr::not_found("no such address in the office server API (v1)")
 }
@@ -542,6 +607,7 @@ async fn no_route() -> ApiErr {
 pub fn router(state: Arc<AppState>) -> Router {
     let v1 = Router::new()
         .route("/health", get(health))
+        .route("/join", post(join))
         .route("/capabilities", get(capabilities))
         .route("/projects", get(projects))
         .route("/search", get(search))

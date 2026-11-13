@@ -46,7 +46,55 @@ fn single_instance() -> bool {
     }
 }
 
+/// Started as administrator for a signed-in user ("Read folders that need
+/// administrator rights"): that user's SID, which alone may open the pipe.
+static ELEVATED_FOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// `--elevated --user NAME --sid SID --appdata DIR --localappdata DIR`: run
+/// as the user who asked (their settings, index and pipe), with the rights
+/// of the administrator account Windows was given. Before any thread starts.
+fn take_elevated_args() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) != Some("--elevated") {
+        return;
+    }
+    let get = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    let (user, sid) = (get("--user"), get("--sid"));
+    if user.is_empty() || !sid.starts_with("S-1-") || !sid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return;
+    }
+    // SAFETY: called first thing in main, before any other thread exists.
+    unsafe {
+        std::env::set_var("USERNAME", &user);
+        for (k, v) in [("APPDATA", get("--appdata")), ("LOCALAPPDATA", get("--localappdata"))] {
+            if !v.is_empty() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    let _ = ELEVATED_FOR.set(sid);
+}
+
+/// A pipe instance: as Windows makes it, or, when elevated, one the user
+/// who asked can open (an administrator's pipe is closed to them otherwise).
+fn new_pipe(name: &str, first: bool) -> std::io::Result<NamedPipeServer> {
+    let mut o = ServerOptions::new();
+    o.first_pipe_instance(first).reject_remote_clients(true);
+    let Some(sid) = ELEVATED_FOR.get() else { return o.create(name) };
+    use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1};
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    let sddl = HSTRING::from(format!("D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;{sid})"));
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: valid SDDL string and out pointer; the descriptor is kept for
+    // the life of the process (a few pipe instances' worth).
+    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(&sddl, SDDL_REVISION_1, &mut sd, None) }.map_err(std::io::Error::other)?;
+    let mut sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
+    // SAFETY: `sa` points at a valid security descriptor for this call.
+    unsafe { o.create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut std::ffi::c_void) }
+}
+
 fn main() -> Result<()> {
+    take_elevated_args();
     if std::env::args().nth(1).as_deref() == Some("--reader") {
         // A reader process: no pipe, no index, no log file of its own.
         return sleuth_engine::readjob::serve();
@@ -70,7 +118,7 @@ fn main() -> Result<()> {
 async fn serve(engine: Arc<Engine>) -> Result<()> {
     let name = pipe_name();
     let clients = Arc::new(AtomicUsize::new(0));
-    let mut server = ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&name)?;
+    let mut server = new_pipe(&name, true)?;
     info!("listening on {name}");
     // Leave when the window has been closed for a while and background
     // reading is switched off.
@@ -94,7 +142,7 @@ async fn serve(engine: Arc<Engine>) -> Result<()> {
     loop {
         server.connect().await?;
         let conn = server;
-        server = ServerOptions::new().reject_remote_clients(true).create(&name)?;
+        server = new_pipe(&name, false)?;
         let engine = Arc::clone(&engine);
         let clients = Arc::clone(&clients);
         clients.fetch_add(1, Ordering::SeqCst);
@@ -212,8 +260,20 @@ fn dispatch(req: Envelope<Request>, engine: &Arc<Engine>, tx: &EventTx) {
         Request::SetServer { url, token, ca_file } => {
             tokio::task::spawn_blocking(move || reply(&tx, id, e.set_server(&url, &token, &ca_file).map(|_| Event::Ok)));
         }
+        Request::JoinServer => {
+            tokio::task::spawn_blocking(move || reply(&tx, id, e.join_server().map(|server| Event::Server { server })));
+        }
         Request::Status => {
-            tokio::task::spawn_blocking(move || reply(&tx, id, e.status().map(|(status, failed)| Event::Status { status, failed })));
+            tokio::task::spawn_blocking(move || {
+                reply(
+                    &tx,
+                    id,
+                    e.status().map(|(mut status, failed)| {
+                        status.elevated = ELEVATED_FOR.get().is_some();
+                        Event::Status { status, failed }
+                    }),
+                )
+            });
         }
         Request::Drives => {
             tokio::task::spawn_blocking(move || {

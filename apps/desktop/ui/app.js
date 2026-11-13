@@ -418,10 +418,16 @@ function showServerCard(card) {
   const box = $("s-srvFound");
   const url = $("s-srvUrl").value.trim();
   if (!card?.address || url.toLowerCase() === card.address.toLowerCase()) { box.hidden = true; return; }
-  const use = el("button", "small primary", "Use it"); use.type = "button";
-  use.onclick = () => { $("s-srvUrl").value = card.address; box.hidden = true; $("s-srvKey").focus(); };
   const when = card.at ? ` (set up ${new Date(card.at * 1000).toLocaleDateString()})` : "";
-  box.replaceChildren(el("span", null, `Found the office server on ${card.pc || "the server PC"}${when}: `), el("b", "mono", card.address), use);
+  if (card.join_code) {
+    const go = el("button", "small primary", "Connect this PC"); go.type = "button";
+    go.onclick = () => joinServer();
+    box.replaceChildren(el("span", null, `Found the office server on ${card.pc || "the server PC"}${when}: `), el("b", "mono", card.address), go);
+    return;
+  }
+  const use = el("button", "small primary", "Use it"); use.type = "button";
+  use.onclick = () => { $("s-srvManual").open = true; $("s-srvUrl").value = card.address; box.hidden = true; $("s-srvKey").focus(); };
+  box.replaceChildren(el("span", null, `Found the office server on ${card.pc || "the server PC"}${when} (it needs a key from IT): `), el("b", "mono", card.address), use);
   box.hidden = false;
 }
 async function testCache() {
@@ -446,6 +452,13 @@ async function loadSettings() {
   renderProjects();
 }
 async function saveSettings(s) {
+  // Never save settings this window has not read whole from the reader: a
+  // partial object would put every missing choice (reading folders too) back
+  // to its default.
+  if (!s || !Array.isArray(s.content_scopes) || s.schema_version === undefined) {
+    await loadSettings();
+    throw new Error("Settings were still loading; nothing was changed. Try again.");
+  }
   await call({ req: "set_settings", settings: s });
   state.settings = s;
   state.updateChannel = s.update_channel;
@@ -575,6 +588,21 @@ $("s-srvSave").onclick = async () => {
   try { await call({ req: "set_server", ...f }); await refreshServerSettings(); toast("Office server saved"); }
   catch (e) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = String(e); }
 };
+/** "Connect this PC": the server gives this PC its own key; nothing is typed. */
+async function joinServer() {
+  const b = $("s-srvJoin");
+  b.disabled = true; $("s-srvState").className = "hint"; $("s-srvState").textContent = "Connecting this PC to the office server…";
+  try {
+    const r = await call({ req: "join_server" });
+    await refreshServerSettings();
+    $("s-srvUrl").value = state.settings.server?.url || ""; $("s-srvCa").value = "";
+    setServer(r.server); showServerState(r.server, false);
+    $("s-srvFound").hidden = true;
+    toast("This PC is connected to the office server");
+  } catch (e) { $("s-srvState").className = "hint error"; $("s-srvState").textContent = String(e); }
+  finally { b.disabled = false; }
+}
+$("s-srvJoin").onclick = () => joinServer();
 $("s-srvOff").onclick = async () => {
   if (!(await confirmBox("Disconnect from the office server?", ["Searches will cover this PC's index only. The saved access key is removed."], "Disconnect"))) return;
   try {

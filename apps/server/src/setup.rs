@@ -6,7 +6,6 @@
 //! office index folder, where Sleuth on every PC finds them.
 
 use anyhow::{Context, Result, bail};
-use sleuth_core::protocol::OfficeServerCard;
 use sleuth_core::settings::OFFICE_CACHE_UNC;
 use sleuth_server::audit::{Audit, cli_user};
 use sleuth_server::config::{self, Config, Role};
@@ -125,20 +124,11 @@ fn listen_port(c: &Config) -> u16 {
     c.listen.parse::<std::net::SocketAddr>().map(|a| a.port()).unwrap_or(8455)
 }
 
-/// What desktops need to find this server, left in the office index folder.
-fn write_card(c: &Config) -> Result<Option<PathBuf>> {
-    let Some(dir) = c.shared_cache_dir.as_deref() else { return Ok(None) };
-    let port = listen_port(c);
-    let card = OfficeServerCard {
-        address: format!("https://{}:{port}", tls::computer_name().to_lowercase()),
-        addresses: tls::local_ipv4().iter().map(|ip| format!("https://{ip}:{port}")).collect(),
-        pc: tls::computer_name(),
-        at: sleuth_engine::service::now(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    let path = Path::new(dir).join(sleuth_engine::remote::SERVER_CARD_FILE);
-    std::fs::write(&path, serde_json::to_string_pretty(&card)?).with_context(|| format!("cannot write {}", path.display()))?;
-    Ok(Some(path))
+/// What desktops need to find and trust this server (address, certificate,
+/// join code), left in the office index folder.
+fn write_card(data: &Path) -> Result<Option<PathBuf>> {
+    let c = sleuth_server::card::ensure_join_code(data)?;
+    sleuth_server::card::publish(data, &c)
 }
 
 fn print_connection(data: &Path, c: &Config) {
@@ -153,15 +143,17 @@ fn print_connection(data: &Path, c: &Config) {
     }
     match c.shared_cache_dir.as_deref() {
         Some(dir) => {
-            println!(" Certificate file leave it empty: Sleuth finds it in the office index folder");
-            println!("                  ({})", Path::new(dir).join(sleuth_engine::remote::CA_FILE_NAME).display());
-            println!("                  Sleuth also fills the address from there: press \"Use it\".");
+            println!(" Nothing to type: in Sleuth > Settings > Office server, press");
+            println!("                  \"Connect this PC\". Sleuth reads the address, the certificate");
+            println!("                  and a join code from the office index folder");
+            println!("                  ({})", Path::new(dir).join(sleuth_engine::remote::SERVER_CARD_FILE).display());
+            println!("                  and the server gives that PC its own access key.");
+            println!(" Sleuth 1.2 PCs   Certificate: leave empty (found in the office index folder).");
         }
         None => println!(" Certificate file {}", data.join(tls::CA_CERT).display()),
     }
-    println!(" Access key       the key made for that person (\"Add a person\" in this menu).");
-    println!("                  Keys are shown once; a lost key is replaced by removing and");
-    println!("                  adding the person again.");
+    println!(" Access key       made per PC by \"Connect this PC\", or by hand here");
+    println!("                  (\"Add a person\"); keys are shown once.");
     println!(" Then press       Connect and save. \"Now: Connected.\" means it works.");
     println!("{RULE}");
 }
@@ -312,7 +304,7 @@ fn first_time(data: &Path, elevated: bool) -> Result<()> {
     let projects: Vec<String> = c.projects.iter().map(|p| format!("{}={}", p.name, p.roots.join(","))).collect();
     crate::init(data, &projects, c.listen.clone(), c.hostnames.clone(), c.shared_cache_dir.clone())?;
     let c = Config::load(data)?;
-    if let Some(p) = write_card(&c)? {
+    if let Some(p) = write_card(data)? {
         say(&format!("Desktops find this server through {}.", p.display()));
     }
 
@@ -352,7 +344,7 @@ fn menu(data: &Path, elevated: bool) -> Result<()> {
         say(" 0  Close");
         let r = match ask("Choose", "0")?.as_str() {
             "1" => {
-                if let Ok(Some(p)) = write_card(&c) {
+                if let Ok(Some(p)) = write_card(data) {
                     say(&format!("(Connection card refreshed: {})", p.display()));
                 }
                 if let Some(d) = c.shared_cache_dir.as_deref() {

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sleuth Server</title>
+<style>
+:root {
+  --bg: #eef1f5; --panel: #fff; --panel-2: #f5f7fa; --line: #d5dbe3; --ink: #16202c; --ink-2: #566373; --ink-3: #7d8999;
+  --accent: #1f5fbf; --accent-soft: #e3ecfa; --ok: #1d7a4a; --ok-soft: #e1f2e8; --warn: #8a5700; --warn-soft: #fbefd6; --bad: #c2262b; --bad-soft: #fbe4e4;
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; --mono: "Cascadia Mono", Consolas, monospace; color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0f141a; --panel: #171e27; --panel-2: #1d2631; --line: #2c3744; --ink: #e6ebf1; --ink-2: #a3afbd; --ink-3: #7a8796;
+  --accent: #78a8f2; --accent-soft: #1c2c45; --ok: #5cc98d; --ok-soft: #173326; --warn: #f0b34a; --warn-soft: #3a2b10; --bad: #ff6066; --bad-soft: #3a1a1c; color-scheme: dark; } }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--sans); display: grid; grid-template-columns: 210px 1fr; }
+nav { background: var(--panel); border-right: 1px solid var(--line); padding: 16px 10px; display: flex; flex-direction: column; gap: 2px; }
+nav .brand { font-weight: 700; font-size: 16px; padding: 0 10px 14px; }
+nav .brand small { display: block; font-weight: 400; color: var(--ink-3); font-size: 12px; }
+nav button { text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 6px; color: var(--ink-2); font: inherit; cursor: pointer; }
+nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+nav button:hover:not(.on) { background: var(--panel-2); }
+nav .grow { flex: 1; }
+main { overflow: auto; padding: 22px 28px 40px; }
+h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 15px; margin: 22px 0 8px; }
+p.hint, .hint { color: var(--ink-2); font-size: 13px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.stat { background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
+.stat .l { font-size: 12px; color: var(--ink-2); } .stat .v { font-size: 18px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.pill { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.warn { background: var(--warn-soft); color: var(--warn); } .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.idle { background: var(--panel-2); color: var(--ink-2); }
+button.b { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer; }
+button.b.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+button.b.danger { color: var(--bad); }
+button.b:disabled { opacity: .55; cursor: default; }
+input[type=text] { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 6px 9px; font: inherit; width: 100%; }
+label { display: block; margin: 8px 0 3px; font-weight: 600; font-size: 13px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row > input { flex: 1; min-width: 200px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--ink-3); font-weight: 600; border-bottom: 1px solid var(--line); padding: 6px; }
+td { border-bottom: 1px solid var(--line); padding: 6px; vertical-align: top; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); font-size: 12.5px; }
+.msg { margin: 10px 0; padding: 9px 12px; border-radius: 8px; }
+.msg.ok { background: var(--ok-soft); color: var(--ok); } .msg.bad { background: var(--bad-soft); color: var(--bad); } .msg.warn { background: var(--warn-soft); color: var(--warn); }
+.key { font-family: var(--mono); background: var(--panel-2); border: 1px dashed var(--accent); padding: 10px; border-radius: 8px; user-select: all; overflow-wrap: anywhere; }
+pre.log { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 12px/1.45 var(--mono); max-height: 62vh; overflow: auto; white-space: pre-wrap; }
+.proj { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; }
+ol.steps li { margin: 4px 0; }
+.toast { position: fixed; bottom: 18px; right: 18px; background: var(--ink); color: var(--panel); padding: 9px 14px; border-radius: 8px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: .95; }
+</style>
+</head>
+<body>
+<nav id="nav">
+  <div class="brand">Sleuth Server <small id="ver"></small></div>
+  <button data-p="overview" class="on">Overview</button>
+  <button data-p="people">People and PCs</button>
+  <button data-p="projects">Projects</button>
+  <button data-p="cert">Certificate</button>
+  <button data-p="log">Log</button>
+  <div class="grow"></div>
+  <div class="hint" id="navpc" style="padding:0 10px"></div>
+</nav>
+<main id="main"><p class="hint">Loading…</p></main>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+let seq = 0; const waiting = new Map();
+window.__reply = (id, ok, v) => { const w = waiting.get(id); if (!w) return; waiting.delete(id); ok ? w.res(v) : w.rej(new Error(v)); };
+function call(cmd, args) { const id = ++seq; return new Promise((res, rej) => { waiting.set(id, { res, rej }); window.ipc.postMessage(JSON.stringify({ id, cmd, args: args || {} })); }); }
+const $ = (id) => document.getElementById(id);
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = text; return e; }
+function btn(text, cls, fn) { const b = el("button", "b " + (cls || ""), text); b.type = "button"; b.onclick = async () => { b.disabled = true; try { await fn(b); } catch (e) { toast(e.message); } finally { b.disabled = false; } }; return b; }
+function toast(t) { const x = $("toast"); x.textContent = t; x.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => x.classList.remove("on"), 3200); }
+function pill(cls, t) { return el("span", "pill " + cls, t); }
+function stat(l, v) { const s = el("div", "stat"); s.append(el("div", "l", l)); const vv = el("div", "v"); vv.append(v); s.append(vv); return s; }
+const fmt = (n) => Number(n || 0).toLocaleString();
+const date = (s) => s ? new Date(s * 1000).toLocaleString(undefined, { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+async function copy(text) { try { await navigator.clipboard.writeText(text); toast("Copied"); } catch { toast("Select the text and press Ctrl+C"); } }
+
+let st = null, page = "overview";
+for (const b of document.querySelectorAll("nav button")) b.onclick = () => { page = b.dataset.p; for (const x of document.querySelectorAll("nav button")) x.classList.toggle("on", x === b); render(); };
+async function load() { st = await call("state"); $("ver").textContent = "version " + st.version; $("navpc").textContent = "On " + st.pc; render(); }
+setInterval(() => { if (st && st.configured && (page === "overview")) load().catch(() => {}); }, 15000);
+
+function render() {
+  const m = $("main"); m.replaceChildren();
+  $("nav").querySelectorAll("button").forEach((b) => b.disabled = !st.configured && b.dataset.p !== "overview");
+  if (!st.configured) return setupPage(m);
+  ({ overview, people, projects, cert, log })[page](m);
+}
+
+// ---------- first-time setup ----------
+function setupPage(m) {
+  m.append(el("h1", null, "Set up the office server"), el("p", "hint", "One form, then Sleuth Server does the rest: certificates, the Windows service, and the details every Sleuth PC needs, left in the office index folder so that PCs connect with one click. Keep this PC switched on: desktops search through it."));
+  const c1 = el("div", "card");
+  c1.append(el("h2", null, "1. Office index folder"), el("p", "hint", "The shared folder every Sleuth PC already uses (Sleuth > Settings > Office index folder). A drive letter is turned into its network path: the service cannot see mapped drives."));
+  const folder = el("input"); folder.type = "text"; folder.value = st.default_folder || ""; folder.spellcheck = false;
+  const fmsg = el("div", "hint");
+  const r1 = el("div", "row"); r1.append(folder, btn("Check", "", async () => { fmsg.textContent = "Checking…"; try { const r = await call("check_folder", { path: folder.value }); fmsg.textContent = `OK: ${r.path} (${r.entries} entries)`; } catch (e) { fmsg.textContent = e.message; } }));
+  c1.append(r1, fmsg);
+  const c2 = el("div", "card");
+  c2.append(el("h2", null, "2. Projects the server reads"), el("p", "hint", "A project is a name and its folders, e.g. P12513 = \\\\fileserver\\Projects\\P12513. Separate several folders with commas."));
+  const list = el("div"); c2.append(list);
+  const addRow = () => {
+    const d = el("div", "proj");
+    const n = el("input"); n.type = "text"; n.placeholder = "Name, e.g. P12513"; n.className = "pname";
+    const f = el("input"); f.type = "text"; f.placeholder = "Folders, e.g. P:\\P12513 or \\\\server\\share\\P12513"; f.className = "pfolders";
+    const msg = el("div", "hint");
+    const r = el("div", "row"); r.append(f, btn("Check", "", async () => { msg.textContent = "Checking…"; const out = []; for (const x of f.value.split(",").map((s) => s.trim()).filter(Boolean)) { try { const c = await call("check_folder", { path: x }); out.push(`OK ${c.path}`); } catch (e) { out.push(e.message); } } msg.textContent = out.join(" · "); }));
+    d.append(n, r, msg); list.append(d);
+  };
+  addRow();
+  c2.append(btn("Add another project", "", async () => addRow()));
+  const c3 = el("div", "card");
+  const out = el("div");
+  c3.append(el("h2", null, "3. Set it up"), el("p", "hint", "Makes the certificates, saves the projects, installs and starts the Windows service SleuthServer, and leaves the address, certificate and join code in the office index folder."), btn("Set up the server", "primary", async () => {
+    out.replaceChildren(el("p", "hint", "Setting up… this takes up to a minute."));
+    const projects = [...list.querySelectorAll(".proj")].map((p) => ({ name: p.querySelector(".pname").value, folders: p.querySelector(".pfolders").value.split(",") }));
+    try {
+      const r = await call("setup", { folder: folder.value, projects });
+      const ol = el("ol", "steps"); for (const s of r.steps) ol.append(el("li", /^WARNING/.test(s) ? "warn" : "", s));
+      out.replaceChildren(el("div", "msg " + (r.listening ? "ok" : "warn"), r.listening ? "The office server is running. On each PC: Sleuth > Settings > Office server > Connect this PC." : "Set up, but the server does not answer yet. See Log."), ol, btn("Open the overview", "primary", load));
+    } catch (e) { out.replaceChildren(el("div", "msg bad", e.message)); }
+  }), out);
+  m.append(c1, c2, c3);
+}
+
+// ---------- overview ----------
+function overview(m) {
+  const svc = st.service;
+  const svcPill = svc === "running" ? (st.listening ? pill("ok", "Running, answering") : pill("warn", "Running, not answering yet")) : svc === "not installed" ? pill("bad", "Not installed") : pill("warn", svc[0].toUpperCase() + svc.slice(1));
+  m.append(el("h1", null, "Overview"), el("p", "hint", "Everything the office server does, and what PCs need to use it."));
+  const c = el("div", "card"); const g = el("div", "grid");
+  const addr = el("span", "mono", st.address);
+  g.append(stat("Service", svcPill), stat("Address", addr), stat("People and PCs", fmt(st.people.length)), stat("Projects", fmt(st.projects.length)));
+  if (st.engine) g.append(stat("Reading now", `${st.engine.state} · ${fmt(st.engine.docs_per_hour)} documents an hour`), stat("Pages an hour", fmt(st.engine.pages_per_hour)));
+  c.append(g);
+  const r = el("div", "row"); r.style.marginTop = "12px";
+  if (svc === "not installed") r.append(btn("Install and start the service", "primary", async () => { await call("service", { action: "install" }); await load(); }));
+  else if (svc === "running") r.append(btn("Restart", "", async () => { const x = await call("service", { action: "restart" }); toast(x.listening ? "Restarted; the server answers" : "Restarted; not answering yet"); await load(); }), btn("Stop", "danger", async () => { await call("service", { action: "stop" }); await load(); }));
+  else r.append(btn("Start", "primary", async () => { const x = await call("service", { action: "start" }); toast(x.listening ? "Started; the server answers" : "Started; not answering yet"); await load(); }));
+  r.append(btn("Refresh", "", load));
+  c.append(r); m.append(c);
+
+  const pcs = el("div", "card");
+  pcs.append(el("h2", null, "How PCs connect"));
+  const card = st.card || {};
+  if (!st.folder) pcs.append(el("div", "msg warn", "No office index folder is set, so PCs cannot find this server by themselves."));
+  else if (!card.found || !card.current) pcs.append(el("div", "msg warn", card.found ? "The details in the office index folder are out of date." : "The details are not in the office index folder yet (the service may not be allowed to write there)."), btn("Write them now", "primary", async () => { await call("publish"); toast("Written to the office index folder"); await load(); }));
+  else pcs.append(el("div", "msg ok", st.self_registration ? "Ready. On each PC: Sleuth > Settings > Office server > Connect this PC. Sleuth reads the address, certificate and join code from the office index folder, and the PC gets its own key." : "PCs find the address and certificate in the office index folder; each needs a key from People and PCs (connecting themselves is switched off)."));
+  pcs.append(el("p", "hint", `Office index folder: ${st.folder || "not set"}`));
+  if (st.addresses?.length) pcs.append(el("p", "hint", `Also reachable at ${st.addresses.join(", ")}`));
+  m.append(pcs);
+}
+
+// ---------- people ----------
+function people(m) {
+  m.append(el("h1", null, "People and PCs"), el("p", "hint", "Every PC or person that may search through this server has its own key. Removing one stops that key at once; the others keep working."));
+  const j = el("div", "card");
+  j.append(el("h2", null, "PCs connect themselves"));
+  const on = el("input"); on.type = "checkbox"; on.checked = !!st.self_registration; on.id = "joinOn";
+  const lab = el("label"); lab.append(on, " Let office PCs connect themselves (\"Connect this PC\" in Sleuth)"); lab.style.fontWeight = "400";
+  const projs = el("input"); projs.type = "text"; projs.value = (st.join_projects || ["*"]).join(", ");
+  j.append(el("p", "hint", "A PC proves it belongs to the office by reading the join code from the office index folder; only PCs that can open that folder can connect. Without this, each key is made here and typed on the PC."), lab, el("label", null, "Projects a PC that connects itself may search (* = all)"), projs);
+  const r = el("div", "row"); r.style.marginTop = "10px";
+  r.append(btn("Save", "primary", async () => { await call("set_join", { enabled: on.checked, projects: projs.value.split(",") }); toast("Saved"); await load(); }),
+    btn("New join code", "", async () => { if (!confirm("Make a new join code? PCs that already connected keep working; only new joins need the new code, which is written to the office index folder.")) return; await call("new_join_code"); toast("New join code written"); await load(); }));
+  j.append(r); m.append(j);
+
+  const t = el("div", "card");
+  t.append(el("h2", null, `Keys (${st.people.length})`));
+  const tab = el("table"); const h = el("tr"); for (const x of ["Name", "How", "Role", "Projects", "Since", ""]) h.append(el("th", null, x)); tab.append(h);
+  for (const u of st.people) {
+    const tr = el("tr");
+    tr.append(el("td", "mono", u.name), el("td", null, u.pc ? `Connected itself (${u.pc})` : "Added here"), el("td", null, u.role), el("td", null, u.projects.join(", ")), el("td", null, date(u.since)));
+    const td = el("td"); td.append(btn("Remove", "danger", async () => { if (!confirm(`Remove ${u.name}? Its key stops working at once.`)) return; await call("remove_person", { name: u.name }); toast("Removed"); await load(); })); tr.append(td);
+    tab.append(tr);
+  }
+  if (!st.people.length) { const tr = el("tr"); const td = el("td", "hint", "No one yet."); td.colSpan = 6; tr.append(td); tab.append(tr); }
+  t.append(tab); m.append(t);
+
+  const a = el("div", "card");
+  a.append(el("h2", null, "Add a person by hand"), el("p", "hint", "For a PC that cannot open the office index folder, or an administrator. The key is shown once."));
+  const n = el("input"); n.type = "text"; n.placeholder = "Name";
+  const adm = el("input"); adm.type = "checkbox"; const al = el("label"); al.style.fontWeight = "400"; al.append(adm, " Administrator (may change the server from Sleuth)");
+  const out = el("div");
+  const rr = el("div", "row"); rr.append(n, btn("Make a key", "primary", async () => {
+    const r = await call("add_person", { name: n.value, admin: adm.checked });
+    const k = el("div", "key", r.key);
+    out.replaceChildren(el("p", "hint", `Key for ${r.name} (shown only now; the server keeps only a fingerprint):`), k, btn("Copy", "", () => copy(r.key)));
+    await load();
+  }));
+  a.append(rr, al, out); m.append(a);
+}
+
+// ---------- projects ----------
+function projects(m) {
+  m.append(el("h1", null, "Projects"), el("p", "hint", "The folders the server reads. Changes apply within a few seconds; new folders are listed and read from then on."));
+  const c = el("div", "card"); const tab = el("table"); const h = el("tr"); for (const x of ["Name", "Folders", ""]) h.append(el("th", null, x)); tab.append(h);
+  for (const p of st.projects) { const tr = el("tr"); tr.append(el("td", null, p.name), el("td", "mono", p.folders.join("\n"))); const td = el("td"); td.append(btn("Remove", "danger", async () => { if (!confirm(`Stop reading ${p.name}?`)) return; await call("remove_project", { name: p.name }); await load(); })); tr.append(td); tab.append(tr); }
+  c.append(tab); m.append(c);
+  const a = el("div", "card"); a.append(el("h2", null, "Add a project"));
+  const n = el("input"); n.type = "text"; n.placeholder = "Name, e.g. P13001";
+  const f = el("input"); f.type = "text"; f.placeholder = "Folders, separated by commas";
+  const msg = el("div", "hint");
+  a.append(el("label", null, "Name"), n, el("label", null, "Folders"), f, msg);
+  const r = el("div", "row"); r.style.marginTop = "10px";
+  r.append(btn("Check folders", "", async () => { const out = []; for (const x of f.value.split(",").map((s) => s.trim()).filter(Boolean)) { try { const c = await call("check_folder", { path: x }); out.push(`OK ${c.path}`); } catch (e) { out.push(e.message); } } msg.textContent = out.join(" · "); }),
+    btn("Add", "primary", async () => { await call("add_project", { name: n.value, folders: f.value.split(",") }); toast("Added"); await load(); }));
+  a.append(r); m.append(a);
+}
+
+// ---------- certificate ----------
+function cert(m) {
+  m.append(el("h1", null, "Certificate"), el("p", "hint", "Desktops trust this server through its own certificate authority. Nobody has to copy the certificate file: it travels in the office index folder with the address, and PCs that connected themselves keep a copy."));
+  const c = el("div", "card"); const g = el("div", "grid");
+  const left = st.cert_expires ? Math.round((st.cert_expires - st.now) / 86400) : 0;
+  g.append(stat("Fingerprint (SHA-256)", el("span", "mono", st.ca_sha256 || "")), stat("Server certificate expires", st.cert_expires ? `${date(st.cert_expires)} (${left} days)` : "unknown"));
+  c.append(g);
+  const r = el("div", "row"); r.style.marginTop = "12px";
+  r.append(btn("Write to the office index folder", "primary", async () => { const x = await call("publish"); toast("Written: " + x.path); await load(); }),
+    btn("Copy the certificate (PEM)", "", async () => copy(await call("ca_pem"))),
+    btn("Renew the server certificate", "", async () => { if (!confirm("Make a new server certificate and restart the service? Desktops keep working (same authority).")) return; await call("renew_cert"); toast("Renewed and restarted"); await load(); }));
+  c.append(r); m.append(c);
+}
+
+// ---------- log ----------
+async function log(m) {
+  m.append(el("h1", null, "Log"), el("p", "hint", "The service's own log, newest at the bottom."));
+  const pre = el("pre", "log", "Loading…"); m.append(btn("Refresh", "", async () => { pre.textContent = await call("log"); pre.scrollTop = pre.scrollHeight; }), pre);
+  pre.textContent = (await call("log")) || "Nothing logged yet."; pre.scrollTop = pre.scrollHeight;
+}
+
+load().catch((e) => { $("main").replaceChildren(el("div", "msg bad", e.message)); });
+</script>
+</body>
+</html>

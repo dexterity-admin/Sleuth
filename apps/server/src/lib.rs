@@ -16,6 +16,7 @@
 
 pub mod api;
 pub mod audit;
+pub mod card;
 pub mod config;
 pub mod tls;
 
@@ -63,7 +64,15 @@ pub struct Running {
 /// (tests use `127.0.0.1:0`).
 pub async fn start(data: &Path, listen: Option<SocketAddr>) -> Result<Running> {
     check_data_dir(data)?;
-    let cfg = Config::load(data)?;
+    let cfg = card::ensure_join_code(data)?;
+    // Desktops find the server, its certificate and the join code here.
+    // The service's account may not be allowed to write to the shared
+    // folder; the server window then writes it.
+    match card::publish(data, &cfg) {
+        Ok(Some(p)) => info!("connection card written to {}", p.display()),
+        Ok(None) => {}
+        Err(e) => warn!("could not write the connection card to the office index folder (open the Sleuth Server window to write it): {e:#}"),
+    }
     let addr: SocketAddr = match listen {
         Some(a) => a,
         None => cfg.listen.parse()?,

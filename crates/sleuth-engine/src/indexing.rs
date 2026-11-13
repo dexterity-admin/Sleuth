@@ -33,6 +33,12 @@ const WALK_LEASE: Duration = Duration::from_secs(600);
 /// Listings are published at least this often during a walk.
 const SEGMENT_EVERY: Duration = Duration::from_secs(60);
 const SEGMENT_LISTINGS: usize = 3000;
+/// How often this PC tells the office what it does.
+const HEARTBEAT_SECS: u64 = 60;
+/// A PC whose last heartbeat is older than this is not counted as working
+/// now. 1.1 PCs write theirs only every ten minutes or so on a busy office
+/// (see `heartbeat_loop`), so the window is generous.
+pub(crate) const ACTIVE_SECS: i64 = 20 * 60;
 
 /// The folder a path is in, in the catalog's form (`C:\` for a drive root).
 pub(crate) fn parent_dir(path: &str) -> Option<String> {
@@ -140,6 +146,9 @@ impl Engine {
                 self.pool.set_dirs(Vec::new());
             }
             let changed = self.pool.refresh();
+            if self.store_dir().is_some() && !self.pool_ready.swap(true, Ordering::SeqCst) {
+                self.stats_signal.raise();
+            }
             let catalog_now = self.catalog.generation();
             if changed || catalog_now != last_catalog {
                 last_catalog = catalog_now;
@@ -147,7 +156,6 @@ impl Engine {
                 self.stats_signal.raise();
                 self.reader_signal.raise();
             }
-            self.heartbeat();
             if last_sweep.is_none_or(|t| t.elapsed() > Duration::from_secs(3600))
                 && let Some(store) = self.store_dir()
             {
@@ -159,7 +167,14 @@ impl Engine {
                 }
             }
             self.maybe_merge();
-            self.follow_signal.wait(Duration::from_secs(60));
+            // After a drop of the office folder, come back within seconds, not a minute.
+            let broken = self.pool.any_broken();
+            if broken {
+                // A part failed on I/O: have the folder checked now, not in two minutes.
+                self.cache_signal.raise();
+            }
+            let wait = if broken || self.store_dir().is_none() { 10 } else { 60 };
+            self.follow_signal.wait(Duration::from_secs(wait));
         }
     }
 
@@ -244,6 +259,24 @@ impl Engine {
         }
     }
 
+    /// The heartbeat on a clock of its own, once a minute. It used to run
+    /// in the follow loop, which with a few hundred parts in the office
+    /// index came round only every ten minutes or so: every PC then looked
+    /// gone to the others, so the office's pace showed only this PC's and
+    /// each PC thought it alone shared out the backlog.
+    pub(crate) fn heartbeat_loop(self: Arc<Self>) {
+        crate::sys::enter_background_mode();
+        while !self.stopping() {
+            let t = Instant::now();
+            self.heartbeat();
+            let spent = t.elapsed();
+            if spent > Duration::from_secs(20) {
+                warn!("heartbeat took {} s", spent.as_secs());
+            }
+            self.heartbeat_signal.wait(Duration::from_secs(HEARTBEAT_SECS).saturating_sub(spent).max(Duration::from_secs(5)));
+        }
+    }
+
     /// Tell the office what this PC is doing, and learn what the others do.
     fn heartbeat(&self) {
         let Some(store) = self.store_dir() else { return };
@@ -313,7 +346,7 @@ impl Engine {
     /// PCs reading right now (heartbeat in the last three minutes), by
     /// name, this one included: how the backlog is shared out.
     pub(crate) fn readers_now(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.pcs.lock().unwrap().iter().filter(|p| now() - p.last_seen < 180 && p.state != "paused" && !p.state.starts_with("paused")).map(|p| p.name.to_lowercase()).collect();
+        let mut names: Vec<String> = self.pcs.lock().unwrap().iter().filter(|p| now() - p.last_seen < ACTIVE_SECS && p.state != "paused" && !p.state.starts_with("paused")).map(|p| p.name.to_lowercase()).collect();
         if !names.contains(&self.pc.to_lowercase()) {
             names.push(self.pc.to_lowercase());
         }

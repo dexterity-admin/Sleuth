@@ -277,8 +277,10 @@ fn workbooks_that_are_something_else() {
     assert_eq!(t.page_info[0].note, "delimited text saved as a workbook");
 
     assert!(error(&s.file("junk.xlsx", &[0x13, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x07, 0x00, 0x00, 0x00])).contains("not a workbook"));
-    // an editing lock file, or any other text under a workbook name, is not a workbook
-    assert_eq!(error(&s.file("~$list.xlsx", b"\x06A. User                    ")), "damaged or not a workbook");
+    // an editing lock file's bytes (a `~$` name is never read now, but its
+    // contents may sit under any name), or any other text under a workbook
+    // name, is not a workbook
+    assert_eq!(error(&s.file("lock list.xlsx", b"\x06A. User                    ")), "damaged or not a workbook");
     assert_eq!(error(&s.file("words.xls", b"just a few words, no cells")), "damaged or not a workbook");
     assert_eq!(error(&s.file("tabs.xlsx", b"Tag\tSize\r\n")), "damaged or not a workbook");
     assert!(error(&s.file("cut.xlsx", b"PK\x03\x04 this is not a whole zip")).contains("damaged"));
@@ -376,8 +378,8 @@ fn docx_paragraphs_tables_headers_notes_and_text_boxes() {
 
     assert!(error(&s.file("no-body.docx", &zip_of(&[("_rels/.rels", &root), ("word/styles.xml", "<w:styles/>")]))).contains("no document part"));
     // an editing lock file carries the name but is no zip; no filter is asked
-    assert_eq!(error(&s.file("~$spec.docx", b"\x06A. User                    ")), "damaged or not the format its name says: a .docx file is a zip, and this is not");
-    assert!(error(&s.file("~$deck.pptx", b"\x06A. User                    ")).contains("a .pptx file is a zip"));
+    assert_eq!(error(&s.file("lock spec.docx", b"\x06A. User                    ")), "damaged or not the format its name says: a .docx file is a zip, and this is not");
+    assert!(error(&s.file("lock deck.pptx", b"\x06A. User                    ")).contains("a .pptx file is a zip"));
 }
 
 #[test]

@@ -18,10 +18,24 @@
   <a href="CHANGELOG.md">What's new</a>
 </h3>
 
-**Sleuth** is the internal drawing search tool of Dexterity Design Services. Type a tag, line number, document number or any text printed on a drawing. Sleuth shows every file that contains it, says **why** each one matched, and opens the page with the text **circled in red**, even when the PDF is a scan.
+**Sleuth** is the internal drawing search tool of Dexterity Design Services. Type a tag, line number, document number or any text printed on a drawing. Sleuth shows every file that contains it, says **why** each one matched, and opens the page with the text **marked by a cyan lens** (never red, so it can't be mistaken for red-line mark-up), even when the PDF is a scan.
 
 <p align="center"><img src="docs/images/v11/search-partial.png" alt="Searching 4&quot;-P-1002-A1B: exact in the line lists (PDF and Excel); on the scanned isometric a pipe crosses the inch mark, so only -P-1002-A1B was read, shown as Partial, verify with the reason" width="100%"></p>
 <p align="center"><sub>On the scanned isometric a pipe line crosses the <code>4"</code>, so only <code>-P-1002-A1B</code> could be read. Sleuth still finds it, marks it on the page, and labels it <b>Partial, verify</b> with the reason. It is never shown as exact.</sub></p>
+
+## New in 1.3: connect with one button, keeps working by itself
+
+| | |
+|---|---|
+| **Sleuth Server window** | Double-clicking `sleuth-server.exe` opens a window: setup in one form, then Overview, People and PCs, Projects, Certificate and Log. |
+| **Connect this PC** | One button in Settings → Office server: no access key to type, no certificate to copy. |
+| **Whole-office progress** | The Monitor shows the whole office's pace and time left, beside this PC's own share. |
+| **Faster search** | Rows found by file name show at once while the text inside documents is searched. |
+| **Marks you can't mistake for red-line** | Matches in the preview are shown with a cyan-to-violet lens instead of red. |
+| **Title-block details you can rely on** | No more Revision "DR" from "DR'N.", Status "VOID" from "AVOID" or Sheet "1" from "(SHEET 1 TO 6)". |
+| **Tray** | Closing the window keeps Sleuth reading in the tray; **Exit Sleuth** in the tray menu stops it. |
+| **Recovers by itself** | Settings and reading folders never fall back to defaults; Sleuth carries on within seconds when U: or the server comes back; failed documents are tried again. |
+| **This PC's disks** | Read C: and D:, with administrator rights for folders Windows keeps closed. |
 
 ## New in 1.2: office server by double-click
 

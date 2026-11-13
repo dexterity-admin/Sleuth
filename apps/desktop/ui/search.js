@@ -66,6 +66,7 @@ function scopeLine(sc) {
 }
 let scopesSig = "";
 function renderScopes() {
+  try { renderLocalDisks(); } catch { /* drives not loaded yet */ }
   const box = $("scopes");
   const scopes = state.settings?.content_scopes || [];
   const known = state.lastStatus?.status?.scopes;
@@ -100,14 +101,60 @@ async function addReadingFolder() {
 }
 $("addScope").onclick = () => addReadingFolder().catch((e) => toast(String(e)));
 
+/** This PC's own disks (C:, D:, ...) as reading folders, and reading the
+ *  folders on them that need administrator rights. */
+async function addDisk(root) {
+  const scopes = state.settings.content_scopes || [];
+  if (scopes.some((s) => s.toLowerCase().replace(/\\$/, "") === root.toLowerCase().replace(/\\$/, ""))) { toast(`${root} is already being read`); return; }
+  await saveSettings({ ...state.settings, content_scopes: [...scopes, root] });
+  await call({ req: "rescan_now" });
+  toast(`${root} added. Folders Windows keeps closed are skipped unless the reader has administrator rights.`);
+  loadStatus();
+}
+function renderLocalDisks() {
+  const box = $("localDisks");
+  const disks = (state.drives || []).filter((d) => d.kind === "fixed");
+  const scopes = (state.settings?.content_scopes || []).map((s) => s.toLowerCase().replace(/\\$/, ""));
+  const elevated = !!state.lastStatus?.status?.elevated;
+  const sig = JSON.stringify([disks.map((d) => d.letter), scopes, elevated]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.replaceChildren();
+  if (!disks.length) return;
+  const row = el("div", "row-inline");
+  row.append(el("span", "dim", "This PC:"));
+  for (const d of disks) {
+    const root = d.letter + "\\";
+    const on = scopes.includes(d.letter.toLowerCase());
+    const b = el("button", "small", on ? `${d.letter} read` : `Read ${d.letter}`); b.type = "button"; b.disabled = on;
+    b.title = on ? `${root} is a reading folder` : `Read the documents on ${root}`;
+    b.onclick = () => addDisk(root).catch((e) => toast(String(e)));
+    row.append(b);
+  }
+  box.append(row);
+  if (elevated) box.append(el("div", "scope-state ok", "Reading with administrator rights (until Sleuth exits)"));
+  else {
+    const a = el("button", "small linkish", "Read folders that need administrator rights…"); a.type = "button";
+    a.title = "Windows asks for an administrator's password; Sleuth never sees or keeps it. Without it, those folders are skipped as now.";
+    a.onclick = async () => {
+      a.disabled = true; toast("Windows will ask for administrator rights…");
+      try { await invoke("read_as_admin"); toast("The reader now runs with administrator rights"); setTimeout(() => { loadStatus(); call({ req: "rescan_now" }).catch(() => {}); }, 4000); }
+      catch (e) { toast(String(e)); }
+      finally { a.disabled = false; }
+    };
+    box.append(a);
+  }
+}
+
 // ---------- searching ----------
 async function runSearch(deep, append) {
   const q = append ? state.query : $("q").value.trim();
   if (state.searchId) { call({ req: "cancel", search_id: state.searchId }).catch(() => {}); }
   closeHistory();
   if (!append) {
+    if (q !== state.query) state.reopenTries = 0;
     state.query = q;
-    state.hits.clear(); state.sel = -1; state.queued = 0; state.lastDone = null;
+    state.hits.clear(); state.sel = -1; state.queued = 0; state.lastDone = null; state.provisional = false;
     state.page = { offset: 0, more: false, deep, loadingMore: false };
     setDeepRunning(false);
     $("deepbar").hidden = true;
@@ -177,15 +224,29 @@ listen("worker-event", (e) => {
   const v = e.payload;
   if (!v.id || v.id !== state.searchId) return;
   switch (v.ev) {
-    case "hits": addHits(v.hits); break;
+    case "provisional":
+      // File names first, from memory; the full answer replaces them.
+      if (state.page.offset === 0 && !state.hits.size) { state.provisional = true; addHits(v.hits); toast(`${fmtNum(v.hits.length)} found by name in ${v.millis} ms · searching inside the documents…`); }
+      break;
+    case "hits":
+      if (state.provisional) { state.provisional = false; state.hits.clear(); }
+      addHits(v.hits); break;
     case "resolved":
       state.queued = Math.max(0, state.queued - 1);
       if (v.hits.length) addHits(v.hits);
       updateSearchStatus();
       break;
     case "progress": renderProgress(v.roots); break;
-    case "notice": showNotice(v.message); break;
+    case "notice":
+      showNotice(v.message);
+      // Searched while the office index was still opening: ask again by itself.
+      if (/still opening/.test(v.message)) {
+        const q = state.query, tries = (state.reopenTries = (state.reopenTries || 0) + 1);
+        if (tries <= 12) setTimeout(() => { if (state.query === q && $("q").value.trim() === q) runSearch(false); }, 6000);
+      } else state.reopenTries = 0;
+      break;
     case "done":
+      if (state.provisional) { state.provisional = false; state.hits.clear(); }
       state.lastDone = v; state.page.more = !!v.more; state.page.loadingMore = false;
       setDeepRunning(false); refreshView(); break;
     case "error": toast(v.message); setDeepRunning(false); state.page.loadingMore = false; break;

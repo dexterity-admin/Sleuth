@@ -263,9 +263,10 @@ function stageRead(p) {
     if (s.ocr_waiting > 0) parts.push(`${fmtNum(s.ocr_waiting)} waiting for OCR`);
     else if (s.ocr_waiting === undefined) parts.push(`${fmtNum(p.waiting)} waiting`);
     parts.push(...tail);
-    if (s.docs_per_hour > 0) parts.push(`${plural(s.docs_per_hour, "document")} an hour`);
+    if (s.office_docs_per_hour > (s.docs_per_hour || 0)) parts.push(`office ${fmtNum(s.office_docs_per_hour)}/h (this PC ${fmtNum(s.docs_per_hour || 0)})`);
+    else if (s.docs_per_hour > 0) parts.push(`${plural(s.docs_per_hour, "document")} an hour`);
     else if (s.docs_per_hour === undefined && s.pages_per_hour) parts.push(`${fmtNum(s.pages_per_hour)} pages/h`);
-    if (s.reading_eta_secs > 0) parts.push(`${fmtLeft(s.reading_eta_secs)} left`);
+    if (s.reading_eta_secs > 0) parts.push(`${fmtLeft(s.reading_eta_secs)} left for the office`);
     return { cls: warnIf("run"), text: parts.join(" · "), title: (s.current_file ? `Now reading ${s.current_file}` : "") + (s.reader_note ? `\n${s.reader_note}` : ""), bar };
   }
   if (p.waiting > 0) {
@@ -491,7 +492,8 @@ class Viewer {
   clear(text) {
     this.doc = null; this.seq++;
     this.img.removeAttribute("src");
-    this.canvas.querySelectorAll(".mark").forEach((m) => m.remove());
+    this.canvas.querySelectorAll(".mark, .lens").forEach((m) => m.remove());
+    this.lens = null; this.boxes = [];
     this.msg.textContent = text || this.o.emptyText; this.msg.hidden = !this.msg.textContent;
     this.hitInfo.textContent = ""; this.pageInfo.textContent = "";
   }
@@ -499,7 +501,8 @@ class Viewer {
   async load(doc, page) {
     const seq = ++this.seq;
     this.doc = doc;
-    this.canvas.querySelectorAll(".mark").forEach((m) => m.remove());
+    this.canvas.querySelectorAll(".mark, .lens").forEach((m) => m.remove());
+    this.lens = null;
     this.msg.hidden = true;
     if (!isPdf(doc.name || doc.path)) {
       this.img.removeAttribute("src");
@@ -511,52 +514,112 @@ class Viewer {
     this.page = pg;
     let loading = this.stage.querySelector(".pv-loading");
     if (!loading) { loading = el("div", "pv-loading", "Loading page…"); this.stage.append(loading); }
-    try {
-      const req = { req: "preview", path: doc.path, page: pg, query: doc.query || "", max_px: 3000, office: !!doc.office };
+    const ask = (px) => {
+      const req = { req: "preview", path: doc.path, page: pg, query: doc.query || "", max_px: px, office: !!doc.office };
       if (doc.tag) req.tag = doc.tag;
-      const r = await call(req);
+      return call(req);
+    };
+    try {
+      // A quick small page first, so the marks are on screen at once; the
+      // sharp page replaces it as soon as it is ready (same marks, same place).
+      const r = await ask(PREVIEW_FAST_PX);
       if (seq !== this.seq) return;
-      this.pages = r.pages;
-      // Boxes we were given (e.g. a comparison's) come first so stepping starts there.
-      const extra = (doc.extra && pg === (doc.page || 1)) ? doc.extra : [];
-      this.boxes = [...extra.map((b) => ({ ...b, extra: true })), ...r.boxes];
-      this.cur = 0;
-      this.img.src = "data:image/png;base64," + r.png_base64;
-      for (const [i, b] of this.boxes.entries()) {
-        const m = el("div", "mark" + (b.extra ? " given" : "") + (i === 0 ? " cur" : ""));
-        // Pad the box a little so a thin line of text is clearly circled.
-        Object.assign(m.style, { left: `calc(${b.x * 100}% - 4px)`, top: `calc(${b.y * 100}% - 4px)`, width: `calc(${b.w * 100}% + 8px)`, height: `calc(${b.h * 100}% + 8px)` });
-        if (b.extra && doc.extraLabel) m.title = doc.extraLabel;
-        this.canvas.append(m);
+      this.show(r, doc, pg);
+      loading.remove();
+      if (r.width < PREVIEW_SHARP_PX * 0.9) {
+        ask(PREVIEW_SHARP_PX).then(async (hi) => {
+          if (seq !== this.seq) return;
+          const im = new Image(); im.src = "data:image/png;base64," + hi.png_base64;
+          try { await im.decode(); } catch { return; }
+          if (seq === this.seq) this.img.src = im.src;
+        }).catch(() => { /* the quick page stays */ });
       }
-      this.pageInfo.textContent = `Page ${pg} of ${r.pages}`;
-      this.hitInfo.textContent = this.boxes.length ? `Mark 1 of ${this.boxes.length}` : (r.source === "pending" ? "Not read yet" : "No mark on this page");
-      this.applyZoom(this.boxes.length > 0);
-      this.o.onLoaded?.(r);
     } catch (e) {
       if (seq !== this.seq) return;
       this.img.removeAttribute("src");
       this.pageInfo.textContent = String(e);
     } finally { if (seq === this.seq) loading.remove(); }
   }
-  applyZoom(zoom) {
+  /** Put a rendered page and its marks on the stage. */
+  show(r, doc, pg) {
+    this.pages = r.pages;
+    this.aspect = r.width ? r.height / r.width : 1.414;
+    // Boxes we were given (e.g. a comparison's) come first so stepping starts there.
+    const extra = (doc.extra && pg === (doc.page || 1)) ? doc.extra : [];
+    this.boxes = [...extra.map((b) => ({ ...b, extra: true })), ...r.boxes];
+    this.cur = 0;
+    this.img.src = "data:image/png;base64," + r.png_base64;
+    this.canvas.querySelectorAll(".mark, .lens").forEach((m) => m.remove());
+    const frag = document.createDocumentFragment();
+    for (const [i, b] of this.boxes.entries()) {
+      const m = el("div", "mark" + (b.extra ? " given" : ""));
+      m.style.setProperty("--i", i);
+      // Pad the box a little so a thin line of text is clearly ringed.
+      Object.assign(m.style, padBox(b, 4));
+      if (b.extra && doc.extraLabel) m.title = doc.extraLabel;
+      frag.append(m);
+    }
+    // The lens: one ring that travels from mark to mark, with the rest of the page dimmed.
+    this.lens = el("div", "lens"); this.lens.hidden = !this.boxes.length;
+    this.lens.setAttribute("aria-hidden", "true");
+    frag.append(this.lens);
+    this.canvas.append(frag);
+    this.pageInfo.textContent = `Page ${pg} of ${r.pages}`;
+    this.hitInfo.textContent = this.boxes.length ? `Mark 1 of ${this.boxes.length}` : (r.source === "pending" ? "Not read yet" : "No mark on this page");
+    this.applyZoom(this.boxes.length > 0, true);
+    this.o.onLoaded?.(r);
+  }
+  /** Point the lens at the current mark and play its lock-on. */
+  aim(fresh) {
+    const b = this.boxes[this.cur];
+    if (!this.lens || !b) return;
+    this.lens.classList.toggle("given", !!b.extra);
+    this.lens.classList.toggle("glide", !fresh);
+    Object.assign(this.lens.style, padBox(b, 7));
+    this.lens.classList.remove("lock");
+    void this.lens.offsetWidth; // restart the animation
+    this.lens.classList.add("lock");
+    this.canvas.querySelectorAll(".mark").forEach((m, i) => m.classList.toggle("cur", i === this.cur));
+  }
+  applyZoom(zoom, fresh) {
     this.zoom = zoom;
     const b = this.boxes[this.cur];
     if (zoom && b) {
       // Show the mark about a third of the stage wide, centred.
       const scale = Math.min(8, Math.max(1.5, 0.33 / Math.max(b.w, 0.01)));
-      this.canvas.style.width = scale * 100 + "%";
-      requestAnimationFrame(() => {
-        const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
-        this.stage.scrollLeft = (b.x + b.w / 2) * W - this.stage.clientWidth / 2;
-        this.stage.scrollTop = (b.y + b.h / 2) * H - this.stage.clientHeight / 2;
-      });
+      this.camera(scale, b.x + b.w / 2, b.y + b.h / 2, fresh);
     } else {
-      this.canvas.style.width = "100%";
-      this.stage.scrollLeft = 0; this.stage.scrollTop = 0;
+      this.camera(1, 0.5, 0, fresh);
     }
-    this.canvas.querySelectorAll(".mark").forEach((m, i) => m.classList.toggle("cur", i === this.cur));
+    this.aim(fresh);
     this.zoomBtn.textContent = zoom ? "Fit page" : "Zoom to mark";
+  }
+  /** Glide the view to `scale` with the page point (cx, cy) in the middle. */
+  camera(scale, cx, cy, instant) {
+    cancelAnimationFrame(this.anim || 0);
+    const st = this.stage, cv = this.canvas;
+    const sw = st.clientWidth, sh = st.clientHeight;
+    const from = { s: (cv.clientWidth / Math.max(sw, 1)) || 1 };
+    from.x = (st.scrollLeft + sw / 2) / Math.max(cv.clientWidth, 1);
+    from.y = (st.scrollTop + sh / 2) / Math.max(cv.clientHeight, 1);
+    const set = (s, x, y) => {
+      cv.style.width = s * 100 + "%";
+      const W = sw * s, H = W * (this.aspect || 1.414);
+      st.scrollLeft = x * W - sw / 2;
+      st.scrollTop = y * H - sh / 2;
+    };
+    const ms = instant || REDUCED_MOTION.matches ? 0 : 420;
+    if (!ms) { set(scale, cx, cy); return; }
+    const t0 = performance.now();
+    const ease = (t) => 1 - Math.pow(1 - t, 3);
+    const tick = (now) => {
+      const t = Math.min(1, (now - t0) / ms), e = ease(t);
+      // Zoom in log space so going 1x to 8x feels even.
+      const s = Math.exp(Math.log(from.s) + (Math.log(scale) - Math.log(from.s)) * e);
+      set(s, from.x + (cx - from.x) * e, from.y + (cy - from.y) * e);
+      if (t < 1) this.anim = requestAnimationFrame(tick);
+    };
+    this.anim = requestAnimationFrame(tick);
   }
   step(d) {
     if (!this.boxes.length) return;
@@ -564,6 +627,13 @@ class Viewer {
     this.hitInfo.textContent = `Mark ${this.cur + 1} of ${this.boxes.length}`;
     this.applyZoom(true);
   }
+}
+
+const PREVIEW_FAST_PX = 1200, PREVIEW_SHARP_PX = 3000;
+const REDUCED_MOTION = window.matchMedia("(prefers-reduced-motion: reduce)");
+/** A page box (0..1) as CSS, padded by `px` pixels all round. */
+function padBox(b, px) {
+  return { left: `calc(${b.x * 100}% - ${px}px)`, top: `calc(${b.y * 100}% - ${px}px)`, width: `calc(${b.w * 100}% + ${2 * px}px)`, height: `calc(${b.h * 100}% + ${2 * px}px)` };
 }
 
 // ---------- text viewer ----------
@@ -699,8 +769,7 @@ class TextViewer {
     this.hits.forEach((d, i) => d.classList.toggle("cur", i === this.cur));
     this.hitInfo.textContent = n ? `Match ${fmtNum(this.cur + 1)} of ${fmtNum(n)}` : this.noHit;
     const d = this.hits[this.cur];
-    this.stage.scrollTop = d ? d.offsetTop - (this.stage.clientHeight - d.offsetHeight) / 2 : 0;
-    this.stage.scrollLeft = 0;
+    this.stage.scrollTo({ top: d ? d.offsetTop - (this.stage.clientHeight - d.offsetHeight) / 2 : 0, left: 0, behavior: REDUCED_MOTION.matches ? "auto" : "smooth" });
   }
   step(d) {
     if (!this.hits.length) return;

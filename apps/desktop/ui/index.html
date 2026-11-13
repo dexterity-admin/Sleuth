@@ -113,6 +113,7 @@
       <h3>Folders being read</h3>
       <div id="scopes" class="scopes"></div>
       <button id="addScope" class="small">Add folder</button>
+      <div id="localDisks" class="local-disks"></div>
     </aside>
 
     <section class="results" aria-label="Results">
@@ -349,26 +350,25 @@
     <section id="serverSection">
       <h3>Office server (optional)</h3>
       <p class="hint">With an office server, searches also cover the drawings it has read. Leave the address empty to use Sleuth on its own.</p>
+      <div class="join-box">
+        <button type="button" id="s-srvJoin" class="primary">Connect this PC</button>
+        <span class="hint">One click: Sleuth reads the server's address, certificate and a join code from the office index folder, and the server gives this PC its own access key. Nothing to type, nothing for IT to send.</span>
+      </div>
       <div id="s-srvFound" class="found" hidden></div>
-      <details class="hint howto">
-        <summary>Where do the address, key and certificate come from?</summary>
-        <ol>
-          <li>On the office PC that stays on, extract <b>Sleuth-Server_…_x64.zip</b> and double-click <b>sleuth-server.exe</b>. Windows asks for administrator rights; a setup window walks through five steps.</li>
-          <li>Setup puts the <b>certificate</b> and the server's <b>address</b> in the office index folder. Sleuth finds both there: leave the certificate empty and press <b>Use it</b> when the address is offered above.</li>
-          <li>Setup shows an <b>access key</b> for each person it adds (also copied to that PC's clipboard). Paste yours under Access key, then press <b>Connect and save</b>. A lost key is replaced by running sleuth-server.exe again: remove the person and add them back.</li>
-        </ol>
+      <details class="hint howto" id="s-srvManual">
+        <summary>Enter the address and key by hand instead</summary>
+        <p>Only needed when the server does not let PCs connect themselves, or this PC cannot open the office index folder. IT makes a key in the Sleuth Server window (People, Add a person).</p>
+        <label class="row">Address <input id="s-srvUrl" type="text" class="wide mono" placeholder="https://sleuth-server:8455" spellcheck="false" autocomplete="off"></label>
+        <label class="row">Access key <input id="s-srvKey" type="password" class="wide" placeholder="Leave blank to keep the saved key" autocomplete="off"></label>
+        <div class="row">Certificate file (optional)
+          <span class="row-inline wide"><input id="s-srvCa" type="text" placeholder="Found automatically in the office index folder" spellcheck="false"><button type="button" id="s-srvCaPick" class="small">Browse</button></span>
+        </div>
+        <div class="row-inline">
+          <button type="button" id="s-srvTest" class="small">Test</button>
+          <button type="button" id="s-srvSave" class="small primary">Connect and save</button>
+        </div>
       </details>
-      <label class="row">Address <input id="s-srvUrl" type="text" class="wide mono" placeholder="https://sleuth-server:8455" spellcheck="false" autocomplete="off"></label>
-      <label class="row">Access key <input id="s-srvKey" type="password" class="wide" placeholder="Leave blank to keep the saved key" autocomplete="off"></label>
-      <div class="row">Certificate file (optional)
-        <span class="row-inline wide"><input id="s-srvCa" type="text" placeholder="Found automatically in the office index folder" spellcheck="false"><button type="button" id="s-srvCaPick" class="small">Browse</button></span>
-      </div>
-      <p class="hint">Without a certificate file, Sleuth looks for sleuth-server-ca.pem in the office index folder.</p>
-      <div class="row-inline">
-        <button type="button" id="s-srvTest" class="small">Test</button>
-        <button type="button" id="s-srvSave" class="small primary">Connect and save</button>
-        <button type="button" id="s-srvOff" class="small">Disconnect</button>
-      </div>
+      <div class="row-inline"><button type="button" id="s-srvOff" class="small">Disconnect</button></div>
       <p id="s-srvState" class="hint"></p>
     </section>
     <section>
