@@ -29,7 +29,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: Rust 1.100 moved build-script output one folder deeper, and
+      # ONNX Runtime's build script (ort-sys 2.0.0-rc.13) then copies its
+      # DLLs to the wrong place and stops ("cannot find the path"). Raise
+      # this together with ort once ort handles the new layout.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
 
       - uses: Swatinem/rust-cache@v2
 
@@ -59,13 +65,6 @@ jobs:
         if: steps.ver.outputs.channel == 'dev'
         shell: pwsh
         run: ./scripts/set-version.ps1 -Version '${{ steps.ver.outputs.version }}'
-
-      # ONNX Runtime's build script (ort-sys) copies its DLLs into these
-      # folders and stops with "cannot find the path" when one is missing,
-      # as a restored build cache leaves examples\ out.
-      - name: Prepare build folders
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force target/release/examples, target/release/deps, target/debug/examples, target/debug/deps | Out-Null
 
       - name: Build and test
         shell: pwsh
