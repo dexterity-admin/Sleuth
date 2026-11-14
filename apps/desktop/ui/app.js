@@ -860,6 +860,8 @@ document.addEventListener("keydown", (e) => {
   $("q").focus();
   if (!(await waitForWorker())) return;
   await Promise.all([loadDrives(), loadSettings(), loadStatus()]).catch((e) => toast(String(e)));
+  // Started from a sleuth://search link: search now that there is a reader and drives to search.
+  invoke("take_pending_search").then((q) => deepSearch(q)).catch(() => {});
   // This PC's name as the office sees it, to tell "listed by this PC" from another PC.
   if (newReader()) call({ req: "monitor" }).then((r) => {
     const name = r.monitor?.pcs?.[0]?.name;

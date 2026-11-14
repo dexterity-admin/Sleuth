@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Dexterity Connect** (the office messenger): right-click a result → *Share to Dexterity Connect…*
+  opens the messenger's share dialog with the file attached and the text Sleuth found in it, ready
+  to send to a colleague or a project Space.
+- **`sleuth://search?q=<tag>` links**: the installer registers the link, and opening one shows
+  Sleuth and runs that search (also when Sleuth is already running). Dexterity Connect turns line
+  numbers (`6"-P-1001-A1B`) and drawing numbers (`ISO-1001-01`) in chat into these links.
+
 ## 1.3.0
 
 13 November 2026.

@@ -2,6 +2,7 @@
 //! drive-letter / UNC map, persisted settings and the worker IPC protocol.
 
 pub mod analyzer;
+pub mod connect;
 pub mod kinds;
 pub mod paths;
 pub mod protocol;
