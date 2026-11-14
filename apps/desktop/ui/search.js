@@ -220,6 +220,16 @@ function addHits(list) {
   refreshView();
 }
 
+// sleuth://search?q=… (from Dexterity Connect): run that search
+function deepSearch(q) {
+  if (!q) return;
+  $("q").value = q;
+  $("q").dispatchEvent(new Event("input"));
+  $("q").focus();
+}
+listen("deep-search", (e) => deepSearch(String(e.payload || "")));
+invoke("take_pending_search").then((q) => deepSearch(q)).catch(() => {});
+
 listen("worker-event", (e) => {
   const v = e.payload;
   if (!v.id || v.id !== state.searchId) return;
@@ -601,6 +611,9 @@ $("ctx").addEventListener("click", async (e) => {
   if (act === "copy") copyText(h.display_path);
   if (act === "copyunc") copyText(h.path);
   if (act === "copytext") copyText(h.found);
+  if (act === "connect") {
+    try { await invoke("share_to_connect", { path: h.display_path, found: h.found || "", query: $("q").value || "" }); } catch (err) { toast(String(err)); }
+  }
   if (act === "read") {
     try { await call({ req: "read_now", path: h.path }); toast("Queued for reading first"); } catch (err) { toast(String(err)); }
   }

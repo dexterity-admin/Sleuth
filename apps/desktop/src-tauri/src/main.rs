@@ -6,6 +6,7 @@
 
 mod update;
 
+use sleuth_core::connect;
 use sleuth_core::protocol::pipe_name;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -160,6 +161,21 @@ fn open_path(path: String) -> Result<(), String> {
     use windows::core::{HSTRING, PCWSTR};
     let r = unsafe { ShellExecuteW(None, &HSTRING::from("open"), &HSTRING::from(path.as_str()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL) };
     if r.0 as isize <= 32 { Err(format!("Windows could not open {path}")) } else { Ok(()) }
+}
+
+/// Open Dexterity Connect's share dialog with this result's file and what was found in it.
+#[tauri::command]
+fn share_to_connect(path: String, found: String, query: String) -> Result<(), String> {
+    open_path(connect::share_url(&path, &found, &query)).map_err(|_| "Dexterity Connect is not installed on this PC".to_string())
+}
+
+/// A search asked for by a sleuth://search?q=… link that started Sleuth (taken once).
+#[derive(Default)]
+struct PendingSearch(Mutex<Option<String>>);
+
+#[tauri::command]
+fn take_pending_search(pending: State<'_, PendingSearch>) -> Option<String> {
+    pending.0.lock().ok().and_then(|mut p| p.take())
 }
 
 #[tauri::command]
@@ -485,11 +501,16 @@ async fn read_as_admin(worker: State<'_, Worker>) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             show_main(app);
+            // a sleuth://search link while Sleuth is already running: search straight away
+            if let Some(q) = connect::search_from_args(&args) {
+                let _ = app.emit("deep-search", q);
+            }
         }))
         .plugin(tauri_plugin_dialog::init())
         .manage(Worker::default())
+        .manage(PendingSearch(Mutex::new(connect::search_from_args(&std::env::args().collect::<Vec<_>>()))))
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(connection_loop(handle));
@@ -512,6 +533,8 @@ fn main() {
             start_search,
             open_path,
             reveal_path,
+            share_to_connect,
+            take_pending_search,
             pick_folder,
             pick_file,
             export_table,
