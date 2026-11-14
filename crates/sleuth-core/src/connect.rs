@@ -29,7 +29,11 @@ pub fn decode(s: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok());
+                // two hex digits only: from_str_radix alone would also take "+F"
+                let hex = match (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                    (Some(hi), Some(lo)) => Some(hi * 16 + lo),
+                    _ => None,
+                };
                 match hex {
                     Some(v) => { out.push(v); i += 3; }
                     None => { out.push(b'%'); i += 1; }
@@ -40,6 +44,10 @@ pub fn decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
 }
 
 /// The share link for one search result.
@@ -97,5 +105,7 @@ mod tests {
         // bad escapes do not panic
         assert_eq!(decode("100%"), "100%");
         assert_eq!(decode("%zz%4"), "%zz%4");
+        assert_eq!(decode("%+F"), "% F"); // not byte 0x0F
+        assert_eq!(decode("%e2%80%b3"), "\u{2033}");
     }
 }

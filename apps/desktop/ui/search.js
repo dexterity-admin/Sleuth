@@ -220,15 +220,16 @@ function addHits(list) {
   refreshView();
 }
 
-// sleuth://search?q=… (from Dexterity Connect): run that search
+// sleuth://search?q=… (from Dexterity Connect): run that search. A link that started
+// Sleuth is taken in start() (app.js) once the reader is up and the drives are loaded.
 function deepSearch(q) {
   if (!q) return;
+  if (state.view_ !== "search") showView("search");
   $("q").value = q;
   $("q").dispatchEvent(new Event("input"));
   $("q").focus();
 }
 listen("deep-search", (e) => deepSearch(String(e.payload || "")));
-invoke("take_pending_search").then((q) => deepSearch(q)).catch(() => {});
 
 listen("worker-event", (e) => {
   const v = e.payload;
