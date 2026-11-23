@@ -335,17 +335,10 @@ pub fn attach_twins(hits: &mut [Hit], pool: &Pool, catalog: &Catalog, drives: &D
             }
         }
     }
-    // The files of the same name, for all rows at once on every core: one
-    // row at a time, a page of rows from folders of tens of thousands of
-    // files took six seconds (each lookup reads its folder's whole list).
+    // The files of the same name, for all rows in one go: each folder's
+    // list (and those beside it) is read once for the whole page.
     let paths: Vec<String> = hits.iter().map(|h| h.path.clone()).collect();
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16);
-    let same_name: Vec<Vec<FileInfo>> = std::thread::scope(|sc| {
-        let jobs: Vec<_> = paths.chunks(paths.len().div_ceil(cores).max(1)).map(|c| sc.spawn(move || c.iter().map(|p| catalog.twins(p)).collect::<Vec<_>>())).collect();
-        jobs.into_iter().flat_map(|j| j.join().unwrap_or_default()).collect()
-    });
-    // Should a lookup thread have failed, the lists would not line up with the rows.
-    let same_name = if same_name.len() == paths.len() { same_name } else { paths.iter().map(|p| catalog.twins(p)).collect() };
+    let same_name: Vec<Vec<FileInfo>> = catalog.twins_many(&paths);
     for (i, h) in hits.iter_mut().enumerate() {
         let mut seen: HashSet<String> = HashSet::from([h.path.to_lowercase()]);
         let mut twins = Vec::new();

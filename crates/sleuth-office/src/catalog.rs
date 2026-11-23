@@ -1520,6 +1520,53 @@ impl Catalog {
         }
         out
     }
+
+    /// [`Catalog::twins`] for many files at once, in the same order. Files
+    /// of one folder, or of folders beside each other, share one reading of
+    /// those folders' lists: asked one by one, a page of 500 results from a
+    /// project of large folders had the same lists read 500 times (six
+    /// seconds, 23 Nov 2026).
+    pub fn twins_many(&self, paths: &[String]) -> Vec<Vec<FileInfo>> {
+        let g = self.r();
+        let mut out: Vec<Vec<FileInfo>> = vec![Vec::new(); paths.len()];
+        // By tree and parent folder (or, at a root, the folder alone):
+        // (row, its folder, the name's stem, the name).
+        let mut groups: HashMap<(usize, u32, u32), Vec<(usize, u32, String, &str)>> = HashMap::new();
+        for (n, path) in paths.iter().enumerate() {
+            let Some((i, d, name)) = Self::locate_file(&g, path) else { continue };
+            let up = g[i].dirs[d as usize].parent;
+            let key = if up < DEAD { (i, up, NONE) } else { (i, NONE, d) };
+            groups.entry(key).or_default().push((n, d, stem_key(name), name));
+        }
+        for ((i, up, alone), rows) in groups {
+            let t = &g[i];
+            let wanted: HashSet<&str> = rows.iter().map(|r| r.2.as_str()).collect();
+            let dirs: Vec<u32> = if alone == NONE { t.children(up).collect() } else { vec![alone] };
+            // Every file with a wanted stem, with its folder, in list order.
+            let mut found: HashMap<String, Vec<(u32, FileInfo)>> = HashMap::new();
+            for d in dirs {
+                let Some(blob) = t.dirs[d as usize].files.as_deref() else { continue };
+                let mut it = Entries::new(blob);
+                let mut dir = None;
+                while let Some((size, mtime)) = it.next() {
+                    let stem = stem_key(&it.name);
+                    if !wanted.contains(stem.as_str()) {
+                        continue;
+                    }
+                    let dir = dir.get_or_insert_with(|| t.path_of(d));
+                    found.entry(stem).or_default().push((d, FileInfo { path: join(dir, &it.name), name: it.name.clone(), size, mtime }));
+                }
+            }
+            for (n, d, stem, name) in rows {
+                let Some(list) = found.get(&stem) else { continue };
+                // Its own folder first, then the folders beside it; never the file itself.
+                let own = list.iter().filter(|(fd, f)| *fd == d && !eq_ci(name, &f.name));
+                let beside = list.iter().filter(|(fd, _)| *fd != d);
+                out[n] = own.chain(beside).map(|(_, f)| f.clone()).collect();
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
