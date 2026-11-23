@@ -558,6 +558,15 @@ impl Pool {
         r
     }
 
+    /// (reading rows held in memory, bytes of their paths): for the log line
+    /// that says where the worker's memory goes.
+    pub fn row_stats(&self) -> (u64, u64) {
+        let parts = self.parts.read().unwrap();
+        let rows = parts.iter().map(|p| p.rows.len() as u64).sum();
+        let bytes = parts.iter().flat_map(|p| p.rows.iter()).map(|r| (r.path.capacity() + std::mem::size_of::<ReadingRow>()) as u64).sum();
+        (rows, bytes)
+    }
+
     /// How the copy on this PC stands.
     pub fn mirror_stats(&self) -> MirrorStats {
         let m = self.mirror.lock().unwrap();

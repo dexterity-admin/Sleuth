@@ -72,7 +72,7 @@ pub struct Store {
 
 /// Bytes SQLite may hold in this process before it reuses cached pages
 /// instead of allocating more (`PRAGMA soft_heap_limit`, process-wide).
-pub const PAGE_CACHE_CEILING: i64 = 128 << 20;
+pub const PAGE_CACHE_CEILING: i64 = 64 << 20;
 
 /// One reading as the pool needs it to know what a part covers.
 #[derive(Debug, Clone)]
@@ -363,7 +363,9 @@ impl Store {
         CEILING.call_once(|| {
             let _ = conn.execute_batch(&format!("PRAGMA soft_heap_limit={PAGE_CACHE_CEILING};"));
         });
-        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA cache_size=-2048;")?;
+        // Half a megabyte each: the parts are on this PC's own disk, where
+        // Windows' file cache does the rest without it counting as Sleuth's.
+        conn.execute_batch("PRAGMA temp_store=MEMORY; PRAGMA cache_size=-512;")?;
         let s = Store { conn };
         let level: i64 = s.get_meta("schema")?.and_then(|v| v.parse().ok()).unwrap_or(1);
         if level > SCHEMA_LEVEL {
@@ -417,7 +419,7 @@ impl Store {
 
     /// Every reading held (hidden ones included): what this part covers.
     pub fn reading_rows(&self) -> Result<Vec<ReadingRow>> {
-        let mut st = self.conn.prepare("SELECT id, path, size, mtime, read_state, COALESCE(read_at, 0), COALESCE(read_error, '') FROM main.files WHERE read_state IN (?1, ?2, ?3)")?;
+        let mut st = self.conn.prepare("SELECT id, path, size, mtime, read_state, COALESCE(read_at, 0), '' FROM main.files WHERE read_state IN (?1, ?2, ?3)")?;
         let rows = st.query_map(params![state::READ, state::FAILED, state::NEEDS_OCR], |r| {
             Ok(ReadingRow { id: r.get(0)?, path: r.get(1)?, size: r.get::<_, i64>(2)? as u64, mtime: r.get(3)?, state: r.get(4)?, read_at: r.get(5)?, error: r.get(6)? })
         })?;
@@ -1948,7 +1950,7 @@ mod tests {
         // a part keeps a small page cache, under one ceiling for the process
         let cache: i64 = part.conn.query_row("PRAGMA cache_size", [], |r| r.get(0)).unwrap();
         let ceiling: i64 = part.conn.query_row("PRAGMA soft_heap_limit", [], |r| r.get(0)).unwrap();
-        assert_eq!((cache, ceiling), (-2048, PAGE_CACHE_CEILING));
+        assert_eq!((cache, ceiling), (-512, PAGE_CACHE_CEILING));
         assert_eq!(part.metadata(pdf).unwrap().revision.as_deref(), Some("4"));
         let m = part.metadata(eml).unwrap();
         assert!(m.drawing_no.is_none() && m.revision.is_none(), "{m:?}");
