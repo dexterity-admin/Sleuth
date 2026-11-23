@@ -135,8 +135,15 @@ long as it worked. The full pass checks a cancel flag between parts.
 ## Sleuth's share of a desktop (1.4)
 
 - Reader processes sit in one Windows job object with a hard ceiling of 8 %
-  of the whole processor and 2 GB of committed memory; 1 % while a search
-  runs. At most one OCR reader and two text readers, in every speed mode.
+  of the whole processor; 1 % while a search runs. At most one OCR reader
+  and two text readers, in every speed mode. No ceiling on their memory (with
+  one, the OCR models did not load); OCR waits while the PC has under 1.5 GB
+  left to give (free memory or commit, whichever is less).
+- A desktop search takes a fixed number of rows per term from all parts
+  together (4,000 in the quick pass, 40,000 in the full pass), shared out by
+  part size, so its work does not grow with the number of parts. Each part
+  still costs about 3 ms of page reads per term: fewer, larger parts (the
+  merge) are what make a search cheaper.
 - A ceiling on the worker process as a whole was tried and removed: once the
   readers had used the share, Windows held back the threads that answer the
   window too, and a request waited over a minute.

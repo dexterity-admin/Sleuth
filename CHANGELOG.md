@@ -33,9 +33,10 @@ Not released yet.
   works new ones out behind it, and keeps each part's figures. A new card
   shows the copy searched on this PC.
 - **A fixed, small share of the PC:** on a desktop the reader processes
-  together never use more than 8 % of the whole processor or 2 GB of memory
-  (a ceiling Windows itself keeps), and 1 % while a search runs; at most one
-  OCR reader and two text readers run, in every mode. Sleuth's own background
+  together never use more than 8 % of the whole processor (a ceiling
+  Windows itself keeps), and 1 % while a search runs; at most one OCR reader
+  and two text readers run, in every mode, and OCR waits while the PC has
+  under 1.5 GB of memory left to give. Sleuth's own background
   work runs on one thread at a time. The office server is not limited and
   carries the bulk of the reading. Pause stops readers at once; a document a
   reader was stopped on is read again later.

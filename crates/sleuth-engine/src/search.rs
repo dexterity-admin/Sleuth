@@ -144,6 +144,8 @@ impl<'a> Limits<'a> {
 
 /// Other files of the same document listed on one row.
 const MAX_TWINS: usize = 8;
+/// Rows of a page whose title-block twins are looked up in the parts.
+const TWIN_ROWS: usize = 60;
 
 /// A file a match belongs to.
 #[derive(Debug, Clone)]
@@ -320,7 +322,11 @@ pub fn search_index_with(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots:
 /// names or the title-block details must be equal.
 pub fn attach_twins(hits: &mut [Hit], pool: &Pool, catalog: &Catalog, drives: &DriveMap) {
     // Title blocks: every read document with one of these drawing numbers.
-    let norms: Vec<String> = hits.iter().filter_map(|h| h.drawing_no.as_deref().map(norm_form)).filter(|n| !n.is_empty()).collect::<HashSet<_>>().into_iter().collect();
+    // For the rows at the top only: asking every part about the drawing
+    // number of every row of a page (up to 500) took up to five seconds
+    // between a search being answered and its rows being sent. Rows further
+    // down still get the files of the same name.
+    let norms: Vec<String> = hits.iter().take(TWIN_ROWS).filter_map(|h| h.drawing_no.as_deref().map(norm_form)).filter(|n| !n.is_empty()).collect::<HashSet<_>>().into_iter().collect();
     let mut by_drawing: HashMap<(String, String), Vec<(String, String)>> = HashMap::new();
     if !norms.is_empty() {
         for (_, rows) in pool.each(|_, s| s.docs_by_drawing(&norms)) {
