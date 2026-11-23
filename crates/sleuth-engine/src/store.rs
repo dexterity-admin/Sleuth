@@ -1096,12 +1096,17 @@ impl Store {
 
     /// Read documents whose title block gives one of these drawing numbers
     /// (normalised): `(drawing_norm, revision_norm, path, name)`.
+    ///
+    /// At most 200 from one part: a row lists eight of them, and a "drawing
+    /// number" that thousands of files share (a project number read as one)
+    /// had 5,000 rows fetched from each of 200 parts, which held a page of
+    /// results back for five seconds.
     pub fn docs_by_drawing(&self, norms: &[String]) -> Result<Vec<(String, Option<String>, String, String)>> {
         let mut out = Vec::new();
         for chunk in norms.chunks(300) {
             let marks = vec!["?"; chunk.len()].join(",");
             let mut st = self.conn.prepare(&format!(
-                "SELECT m.drawing_norm, m.revision_norm, f.path, f.name FROM drawing_metadata m JOIN files f ON f.id=m.file_id WHERE m.drawing_norm IN ({marks}) AND f.read_state={} LIMIT 5000",
+                "SELECT m.drawing_norm, m.revision_norm, f.path, f.name FROM drawing_metadata m JOIN files f ON f.id=m.file_id WHERE m.drawing_norm IN ({marks}) AND f.read_state={} LIMIT 200",
                 state::READ
             ))?;
             for row in st.query_map(params_from_iter(chunk.iter()), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
