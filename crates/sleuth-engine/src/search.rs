@@ -45,12 +45,27 @@ pub struct Limits<'a> {
     /// Set by the caller to abandon the search (the user typed on).
     cancel: Option<&'a std::sync::atomic::AtomicBool>,
     cut: std::sync::atomic::AtomicBool,
+    /// What the file lists gave earlier in the same search.
+    memo: Option<&'a NamesMemo>,
 }
+
+/// The file names found for a term by the passes of one search: the names
+/// alone are shown first, the quick pass adds text, the full pass more, and
+/// none of them scans the file lists again for what an earlier one has
+/// (a scan reads every name of every drive).
+#[derive(Default)]
+pub struct NamesMemo(std::sync::Mutex<HashMap<String, (usize, std::sync::Arc<Vec<FileInfo>>)>>);
 
 impl<'a> Limits<'a> {
     /// Everything, up to [`PER_TERM`] rows per term and part.
     pub fn full(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false) }
+        Limits { per_term: PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+    }
+
+    /// Share the file names found with the other passes of this search.
+    pub fn with_memo(mut self, memo: &'a NamesMemo) -> Limits<'a> {
+        self.memo = Some(memo);
+        self
     }
 
     /// Everything, on one thread that works half the time: for the full
@@ -61,7 +76,7 @@ impl<'a> Limits<'a> {
 
     /// The quick first pass.
     pub fn quick(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: QUICK_PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false) }
+        Limits { per_term: QUICK_PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
     }
 
     /// Some query reached its limit: a fuller search may find more or better.
@@ -77,12 +92,27 @@ impl<'a> Limits<'a> {
 
     /// Run a scan of the file names within these limits: on every core for
     /// the quick pass, on one thread that works half the time behind it.
-    fn names<R>(&self, f: impl FnOnce() -> R) -> R {
-        if self.threads != 1 {
-            return f();
+    ///
+    /// `key` names the scan and `cap` is its row limit: a list an earlier
+    /// pass of this search got for the same scan is used again when it had
+    /// the same limit, or was shorter than its limit (then it is all there is).
+    fn names(&self, key: String, cap: usize, f: impl FnOnce() -> Vec<FileInfo>) -> Vec<FileInfo> {
+        if let Some(memo) = self.memo
+            && let Some((had, rows)) = memo.0.lock().unwrap().get(&key)
+            && (*had == cap || rows.len() < *had)
+        {
+            return rows.as_ref().clone();
         }
-        let _pace = crate::sys::HalfTime::start();
-        sleuth_office::with_scan_threads(1, f)
+        let rows = if self.threads != 1 {
+            f()
+        } else {
+            let _pace = crate::sys::HalfTime::start();
+            sleuth_office::with_scan_threads(1, f)
+        };
+        if let Some(memo) = self.memo {
+            memo.0.lock().unwrap().insert(key, (cap, std::sync::Arc::new(rows.clone())));
+        }
+        rows
     }
 
     fn cancelled(&self) -> bool {
@@ -367,7 +397,7 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
                     c
                 }
                 None => {
-                    let (c, cut) = s.search_lines_cut(t, scope, lim.per_term)?;
+                    let (c, cut) = s.search_lines_cut(t, scope, lim.per_term, lim.per_term != QUICK_PER_TERM)?;
                     lim.note_cut(cut);
                     c
                 }
@@ -408,7 +438,7 @@ fn name_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, lim: &L
     if lim.cancelled() {
         return Vec::new();
     }
-    let rows = lim.names(|| {
+    let rows = lim.names(format!("one\u{1}{}\u{1}{:?}\u{1}{:?}", t.raw, ns.roots, ns.ext), per_term * 4, || {
         if t.is_path() {
             // Up to the first wildcard; the term itself decides after that.
             catalog.candidates_path(t.raw.split(['*', '?']).next().unwrap_or(""), &ns, per_term * 4)
@@ -435,7 +465,8 @@ fn names_all(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, lim:
     if lim.cancelled() {
         return Vec::new();
     }
-    let rows = lim.names(|| match terms.iter().find(|t| t.is_path()) {
+    let key = format!("all\u{1}{}\u{1}{:?}\u{1}{:?}", terms.iter().map(|t| t.raw.as_str()).collect::<Vec<_>>().join("\u{2}"), ns.roots, ns.ext);
+    let rows = lim.names(key, per_term * 4, || match terms.iter().find(|t| t.is_path()) {
         // A piece of a path among the words: start from the files it names.
         Some(p) => catalog.candidates_path(p.raw.split(['*', '?']).next().unwrap_or(""), &ns, per_term * 4),
         None => catalog.candidates_all(terms, &ns, per_term * 4),

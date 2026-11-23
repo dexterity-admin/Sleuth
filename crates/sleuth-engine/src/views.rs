@@ -415,7 +415,12 @@ impl Engine {
     fn monitor_sums(&self) -> Monitor {
         use std::hash::{Hash, Hasher};
         let known = self.part_sums.lock().unwrap().clone();
-        let per_part = self.pool.each(|part, s| {
+        // One thread, half the time, on a desktop: these are counts for a
+        // page nobody waits for. (On 16 threads they took four cores for a
+        // while, and a search made meanwhile waited nine seconds.)
+        let threads = if self.server_mode { crate::pool::QUERY_THREADS } else { 1 };
+        let per_part = self.pool.each_on(threads, |part, s| {
+            let _pace = (threads == 1).then(crate::sys::HalfTime::start);
             let sig = part.hidden_sig();
             if !part.work
                 && let Some((at, sums)) = known.get(&part.name)

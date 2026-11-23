@@ -14,7 +14,7 @@ use crate::derive::Deriver;
 use crate::pool::Pool;
 use crate::readjob::Job;
 use crate::remote;
-use crate::search::{Limits, attach_twins, search_index, search_index_with};
+use crate::search::{Limits, NamesMemo, attach_twins, search_index, search_index_with};
 use crate::store::{Store, state};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -286,7 +286,7 @@ pub struct Engine {
     searches: Mutex<HashMap<u64, Arc<AtomicBool>>>,
     /// (when, pages) of every document read here in the last hour.
     pub(crate) pages_read: Mutex<VecDeque<(Instant, u32)>>,
-    results: Mutex<VecDeque<(String, (u64, u64), Arc<Vec<Hit>>)>>,
+    results: Mutex<VecDeque<(String, (u64, u64), Arc<Vec<Hit>>, Instant)>>,
     /// The last pages rendered for the preview, by file, page, size and
     /// the file's size and date: going back to a result shows it at once.
     previews: Mutex<VecDeque<(String, Arc<Rendered>)>>,
@@ -1187,26 +1187,35 @@ impl Engine {
     /// Ranked hits for `query` inside `roots` (empty = everywhere),
     /// remembered until the catalog or the pool changes.
     pub fn search_hits(&self, query: &str, roots: &[String]) -> Result<Arc<Vec<Hit>>> {
-        self.search_hits_with(query, roots, None)
+        self.search_hits_with(query, roots, None, None)
     }
 
     /// Keep a search's rows until the catalog or the pool changes.
     fn remember(&self, query: &str, roots: &[String], generation: (u64, u64), hits: &Arc<Vec<Hit>>) {
         let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
         let mut mem = self.results.lock().unwrap();
-        mem.retain(|(k, g, _)| *g == generation && *k != key);
-        mem.push_back((key, generation, Arc::clone(hits)));
+        mem.retain(|(k, g, _, at)| Self::still_good(*g, generation, *at) && *k != key);
+        mem.push_back((key, generation, Arc::clone(hits), Instant::now()));
         while mem.len() > RESULT_MEMORY {
             mem.pop_front();
         }
     }
 
+    /// A remembered search answers again while nothing changed, and for a
+    /// minute after it was made whatever changed: while files are listed and
+    /// documents read the index changes every few seconds, and without this
+    /// every repeated search and every further page was searched again in full.
+    fn still_good(made: (u64, u64), now: (u64, u64), at: Instant) -> bool {
+        made == now || at.elapsed() < Duration::from_secs(60)
+    }
+
     /// [`Engine::search_hits`] that `cancel` can abandon; what an abandoned
     /// search found is not everything and is not remembered.
-    fn search_hits_with(&self, query: &str, roots: &[String], cancel: Option<&AtomicBool>) -> Result<Arc<Vec<Hit>>> {
+    fn search_hits_with(&self, query: &str, roots: &[String], cancel: Option<&AtomicBool>, memo: Option<&NamesMemo>) -> Result<Arc<Vec<Hit>>> {
+        let raw_roots = roots;
         let generation = self.generation();
         let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
-        if let Some((_, _, hits)) = self.results.lock().unwrap().iter().find(|(k, g, _)| *k == key && *g == generation) {
+        if let Some((_, _, hits, _)) = self.results.lock().unwrap().iter().find(|(k, g, _, at)| *k == key && Self::still_good(*g, generation, *at)) {
             return Ok(Arc::clone(hits));
         }
         let q = parse_search(query);
@@ -1215,16 +1224,16 @@ impl Engine {
         // On a desktop the full pass takes its time on one thread: the quick
         // pass has already answered.
         let lim = if self.server_mode { Limits::full(cancel) } else { Limits::background(cancel) };
+        let lim = match memo {
+            Some(m) => lim.with_memo(m),
+            None => lim,
+        };
         let hits = Arc::new(search_index_with(&self.pool, &self.catalog, &q, &roots, RESULT_CAP, &drives, &lim)?);
         if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
             return Ok(hits);
         }
-        let mut mem = self.results.lock().unwrap();
-        mem.retain(|(k, g, _)| *g == generation && *k != key);
-        mem.push_back((key, generation, Arc::clone(&hits)));
-        while mem.len() > RESULT_MEMORY {
-            mem.pop_front();
-        }
+        drop(key);
+        self.remember(query, raw_roots, generation, &hits);
         Ok(hits)
     }
 
@@ -1240,11 +1249,11 @@ impl Engine {
     /// One page of a search's rows, each with the other files of its
     /// document, and every row of the search.
     pub fn search_page(&self, query: &str, roots: &[String], offset: usize, limit: usize) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
-        self.search_page_with(query, roots, offset, limit, None)
+        self.search_page_with(query, roots, offset, limit, None, None)
     }
 
-    fn search_page_with(&self, query: &str, roots: &[String], offset: usize, limit: usize, cancel: Option<&AtomicBool>) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
-        let all = self.search_hits_with(query, roots, cancel)?;
+    fn search_page_with(&self, query: &str, roots: &[String], offset: usize, limit: usize, cancel: Option<&AtomicBool>, memo: Option<&NamesMemo>) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
+        let all = self.search_hits_with(query, roots, cancel, memo)?;
         let mut page: Vec<Hit> = all.iter().skip(offset).take(limit).cloned().collect();
         let drives = self.drives.read().unwrap().clone();
         attach_twins(&mut page, &self.pool, &self.catalog, &drives);
@@ -1255,7 +1264,7 @@ impl Engine {
     fn remembered(&self, query: &str, roots: &[String]) -> bool {
         let generation = self.generation();
         let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
-        self.results.lock().unwrap().iter().any(|(k, g, _)| *k == key && *g == generation)
+        self.results.lock().unwrap().iter().any(|(k, g, _, at)| *k == key && Self::still_good(*g, generation, *at))
     }
 
     /// Runs on a blocking thread; streams events to `tx`.
@@ -1298,6 +1307,7 @@ impl Engine {
         while !self.names_ready.load(Ordering::SeqCst) && waited.elapsed() < Duration::from_secs(8) && !self.stopping() && !cancel.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(40));
         }
+        let memo = NamesMemo::default();
         // The quick pass: names and text, a limited number of rows from
         // each part, with the whole processor for the fraction of a second it
         // takes. For a tag or a number no part holds more than that, and this
@@ -1307,7 +1317,16 @@ impl Engine {
             let generation = self.generation();
             let drives = self.drives.read().unwrap().clone();
             let stored: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();
-            let lim = Limits::quick(Some(&cancel));
+            // File names alone come first: they are in memory, and showing
+            // them does not wait for the text.
+            let names = search_index_with(&Pool::new(), &self.catalog, &q, &stored, limit, &drives, &Limits::quick(Some(&cancel)).with_memo(&memo));
+            if let Ok(names) = names
+                && !names.is_empty()
+                && !cancel.load(Ordering::SeqCst)
+            {
+                let _ = tx.send(Envelope { id, body: Event::Provisional { hits: names, millis: started.elapsed().as_millis() as u64 } });
+            }
+            let lim = Limits::quick(Some(&cancel)).with_memo(&memo);
             let quick = search_index_with(&self.pool, &self.catalog, &q, &stored, RESULT_CAP, &drives, &lim);
             if let Ok(quick) = quick
                 && !cancel.load(Ordering::SeqCst)
@@ -1331,7 +1350,7 @@ impl Engine {
                 let _ = tx.send(Envelope { id, body: Event::Notice { message: "The office index folder is not reachable; text is searched in the copy on this PC.".into() } });
             }
         }
-        let (page, all) = self.search_page_with(query, &roots, offset, limit, Some(&cancel))?;
+        let (page, all) = self.search_page_with(query, &roots, offset, limit, Some(&cancel), Some(&memo))?;
         if cancel.load(Ordering::SeqCst) {
             // The user typed on: what was found so far is not the answer.
             self.searches.lock().unwrap().remove(&id);

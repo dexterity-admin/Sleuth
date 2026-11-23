@@ -237,7 +237,8 @@ listen("worker-event", (e) => {
   switch (v.ev) {
     case "provisional":
       // File names first, from memory; the full answer replaces them.
-      if (state.page.offset === 0 && !state.hits.size) { state.provisional = true; addHits(v.hits); toast(`${fmtNum(v.hits.length)} found in ${v.millis} ms · looking for more…`); }
+      // A later, fuller first answer (names, then names and text) replaces the earlier one.
+      if (state.page.offset === 0 && (!state.hits.size || state.provisional)) { state.hits.clear(); state.provisional = true; addHits(v.hits); toast(`${fmtNum(v.hits.length)} found in ${v.millis} ms · looking for more…`); }
       break;
     case "hits":
       if (state.provisional) { state.provisional = false; state.hits.clear(); }

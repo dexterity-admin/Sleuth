@@ -1263,12 +1263,17 @@ impl Store {
     /// Readings that hold only part of a long tag (a few characters hidden at
     /// one end) are fetched separately, so they never crowd out full matches.
     pub fn search_lines(&self, term: &Term, scope: &Scope, limit: usize) -> Result<Vec<Candidate>> {
-        self.search_lines_cut(term, scope, limit).map(|(c, _)| c)
+        self.search_lines_cut(term, scope, limit, true).map(|(c, _)| c)
     }
 
     /// As [`Store::search_lines`], and whether a query reached its row limit
     /// (there may be more, or better, matches than were looked at).
-    pub fn search_lines_cut(&self, term: &Term, scope: &Scope, limit: usize) -> Result<(Vec<Candidate>, bool)> {
+    ///
+    /// `partial` also looks for the term cut short (a tag half hidden by a
+    /// line). That query matches every longer tag sharing the start and is
+    /// by far the dearest part; without it the result counts as cut short,
+    /// so that the caller's full pass makes up for it.
+    pub fn search_lines_cut(&self, term: &Term, scope: &Scope, limit: usize, partial: bool) -> Result<(Vec<Candidate>, bool)> {
         if term.fold.chars().count() < 3 {
             return Ok((Vec::new(), false));
         }
@@ -1285,7 +1290,9 @@ impl Store {
         let mut out = Vec::new();
         let mut queries = vec![(format!("fold : {}", fts_phrase(&term.fold)), limit * 4)];
         let cuts = term.truncations();
-        if !cuts.is_empty() {
+        if !cuts.is_empty() && !partial {
+            cut = true;
+        } else if !cuts.is_empty() {
             queries.push((cuts.iter().map(|c| format!("fold : {}", fts_phrase(c))).collect::<Vec<_>>().join(" OR "), limit));
         }
         for (q, cap) in queries {

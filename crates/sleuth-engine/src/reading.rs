@@ -106,7 +106,8 @@ impl Engine {
             // Failures are listed from the parts; only when those changed.
             if fails_at != self.pool.generation() {
                 fails_at = self.pool.generation();
-                let mut all: Vec<(String, String)> = self.pool.each(|_, s| s.failures(50)).into_iter().flat_map(|(_, f)| f).collect();
+                // One thread: background work, repeated whenever a reading is saved.
+                let mut all: Vec<(String, String)> = self.pool.each_on(1, |_, s| s.failures(50)).into_iter().flat_map(|(_, f)| f).collect();
                 all.truncate(50);
                 snap.fails = all.into_iter().map(|(path, reason)| Failed { path, reason }).collect();
             } else {
