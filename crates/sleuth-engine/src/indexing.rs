@@ -130,32 +130,57 @@ impl Engine {
 
     // ---- following ---------------------------------------------------------
 
+    /// Keeps the file lists current: this PC's own, and what other PCs
+    /// published for the shares. On a thread of its own, so that names are
+    /// searchable a second or two after a start whatever the office index
+    /// is doing (they used to wait until every part of it was opened).
     pub(crate) fn follow_loop(self: Arc<Self>) {
         crate::sys::enter_background_mode();
-        let mut last_catalog = 0u64;
-        let mut last_sweep: Option<Instant> = None;
         while !self.stopping() {
             *self.drives.write().unwrap() = self.current_drives();
             self.sync_roots();
-            // The parts pool: the office folder, and this PC's own for
-            // readings of files on its local disks.
-            if let Some(store) = self.store_dir() {
-                let own = store.join("pcs").join(root_key(&self.pc)).join("text");
-                self.pool.set_dirs(vec![store.join("text"), own]);
-            } else {
-                self.pool.set_dirs(Vec::new());
+            self.names_ready.store(true, Ordering::SeqCst);
+            // The shares' lists are in the office folder: until it was
+            // checked once, look again soon.
+            let wait = if self.store_dir().is_none() { 10 } else { 60 };
+            self.follow_signal.wait(Duration::from_secs(wait));
+        }
+    }
+
+    /// Keeps the parts pool current: what is searched for text.
+    pub(crate) fn pool_loop(self: Arc<Self>) {
+        // Not background mode: that drops disk priority to the lowest, and
+        // opening the parts is what a search after a start waits for.
+        crate::sys::enter_low_priority();
+        let mut last_catalog = 0u64;
+        let mut last_parts = 0u64;
+        let mut last_sweep: Option<Instant> = None;
+        while !self.stopping() {
+            // The office folder, and this PC's own for readings of files on
+            // its local disks; both searched from the copy on this PC.
+            self.pool.set_mirror(self.mirror_dir());
+            let store = self.index_dir();
+            match &store {
+                Some(store) => self.pool.set_dirs(vec![store.join("text"), store.join("pcs").join(root_key(&self.pc)).join("text")]),
+                None => self.pool.set_dirs(Vec::new()),
             }
-            let changed = self.pool.refresh();
-            if self.store_dir().is_some() && !self.pool_ready.swap(true, Ordering::SeqCst) {
+            let t = Instant::now();
+            self.pool.refresh();
+            if store.is_some() && !self.pool_ready.swap(true, Ordering::SeqCst) {
+                let ms = self.pool.mirror_stats();
+                info!("office index: {} part(s) opened from this PC and {} over the network in {} ms; {} to copy", ms.parts, ms.remote_parts, t.elapsed().as_millis(), ms.pending_parts);
                 self.stats_signal.raise();
             }
-            let catalog_now = self.catalog.generation();
-            if changed || catalog_now != last_catalog {
+            self.mirror_signal.raise();
+            let (catalog_now, parts_now) = (self.catalog.generation(), self.pool.parts_rev());
+            if parts_now != last_parts || catalog_now != last_catalog {
                 last_catalog = catalog_now;
+                last_parts = parts_now;
                 self.pool.recover(&|p| self.presence(p));
                 self.stats_signal.raise();
                 self.reader_signal.raise();
             }
+            let copying = self.pool.mirror_stats().pending_parts > 0;
             if last_sweep.is_none_or(|t| t.elapsed() > Duration::from_secs(3600))
                 && let Some(store) = self.store_dir()
             {
@@ -166,15 +191,29 @@ impl Engine {
                     l.sweep();
                 }
             }
-            self.maybe_merge();
+            // Merging reads its sources from this PC's copy: not before it is whole.
+            if !copying {
+                self.maybe_merge();
+            }
             // After a drop of the office folder, come back within seconds, not a minute.
             let broken = self.pool.any_broken();
             if broken {
                 // A part failed on I/O: have the folder checked now, not in two minutes.
                 self.cache_signal.raise();
             }
-            let wait = if broken || self.store_dir().is_none() { 10 } else { 60 };
-            self.follow_signal.wait(Duration::from_secs(wait));
+            // While parts arrive, what they hold becomes current every few seconds.
+            let wait = if broken || copying || self.store_dir().is_none() { 10 } else { 60 };
+            self.pool_signal.wait(Duration::from_secs(wait));
+        }
+    }
+
+    /// Copies parts of the office index to this PC, one after another.
+    pub(crate) fn mirror_loop(self: Arc<Self>) {
+        crate::sys::enter_background_mode();
+        while !self.stopping() {
+            if !self.pool.mirror_step(&self.shutdown) {
+                self.mirror_signal.wait(Duration::from_secs(15));
+            }
         }
     }
 
@@ -209,11 +248,20 @@ impl Engine {
             let Some(dir) = self.catalog_dir(root) else { continue };
             to_load.push((root.clone(), Arc::new(RootFiles::new(dir, root)), self.is_local_root(root)));
         }
+        // This PC's own disks first (their lists are on its disk and load in
+        // a second), then the shares; two at a time, so a start does not
+        // take every core.
+        to_load.sort_by_key(|(_, _, local)| !*local);
         if !to_load.is_empty() {
             self.status.lock().unwrap().index.phase = "loading".into();
+            let next = std::sync::atomic::AtomicUsize::new(0);
             std::thread::scope(|sc| {
-                for (root, files, local) in &to_load {
-                    sc.spawn(move || {
+                for _ in 0..2usize.min(to_load.len()) {
+                    sc.spawn(|| while let Some((root, files, local)) = to_load.get(next.fetch_add(1, Ordering::SeqCst)) {
+                        if !*local {
+                            // This PC's own lists are in: searches need not wait.
+                            self.names_ready.store(true, Ordering::SeqCst);
+                        }
                         let t = Instant::now();
                         self.catalog.add_root(root);
                         match files.load(&self.catalog) {
@@ -759,7 +807,9 @@ impl Engine {
     /// True when every root holding a reading folder has been listed to the
     /// end at least once (by any PC), so everything in them can be queued.
     pub(crate) fn reading_roots_listed(&self) -> bool {
+        let mut lap = crate::service::Lap::new("reading_roots_listed");
         let scopes = self.read_scopes();
+        lap.at("read_scopes");
         // Folders listed by themselves (the office server's projects) are
         // done when their own walk finished, whatever the rest of the share.
         let alone: Vec<(String, bool)> = self
@@ -772,7 +822,9 @@ impl Engine {
                 (key, done)
             })
             .collect();
+        lap.at("targets and local");
         let roots = self.roots.lock().unwrap();
+        lap.at("roots lock");
         scopes.iter().all(|sc| {
             let lower = sc.to_lowercase();
             if let Some((_, done)) = alone.iter().find(|(f, _)| lower == *f || lower.starts_with(&format!("{}\\", f.trim_end_matches('\\')))) {

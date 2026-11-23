@@ -29,6 +29,7 @@ const PANICKED: u32 = 101;
 /// the worker would learn of the crash minutes later.
 pub fn serve<I: DeserializeOwned, J: DeserializeOwned, R: Serialize>(mut handle: impl FnMut(&I, J) -> R) -> Result<()> {
     be_a_quiet_neighbour();
+    die_with_parent();
     let (input, mut output) = take_pipes()?;
     let mut input = BufReader::with_capacity(64 * 1024, input);
     let mut line = Vec::new();
@@ -70,6 +71,29 @@ pub fn serve<I: DeserializeOwned, J: DeserializeOwned, R: Serialize>(mut handle:
         };
         drop(reply);
         output.write_all(&bytes)?;
+    }
+}
+
+/// The variable the worker passes its process id in.
+pub const PARENT_PID: &str = "SLEUTH_PARENT_PID";
+
+/// End this reader as soon as the worker that started it is gone, also in
+/// the middle of a document. The job object does that too, but a reader
+/// that could not be put into it (a warning in the log) would otherwise
+/// read on, unseen, until its document was done.
+fn die_with_parent() {
+    #[cfg(windows)]
+    {
+        let Some(pid) = std::env::var(PARENT_PID).ok().and_then(|v| v.parse::<u32>().ok()) else { return };
+        let _ = std::thread::Builder::new().name("sleuth-parent-watch".into()).spawn(move || unsafe {
+            use windows::Win32::Foundation::CloseHandle;
+            use windows::Win32::System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+            // The worker cannot be opened (already gone): nothing to wait for but the end.
+            let Ok(parent) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) else { die(0) };
+            WaitForSingleObject(parent, INFINITE);
+            let _ = CloseHandle(parent);
+            die(0)
+        });
     }
 }
 

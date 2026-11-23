@@ -72,7 +72,7 @@ pub struct Store {
 
 /// Bytes SQLite may hold in this process before it reuses cached pages
 /// instead of allocating more (`PRAGMA soft_heap_limit`, process-wide).
-pub const PAGE_CACHE_CEILING: i64 = 384 << 20;
+pub const PAGE_CACHE_CEILING: i64 = 128 << 20;
 
 /// One reading as the pool needs it to know what a part covers.
 #[derive(Debug, Clone)]
@@ -317,8 +317,14 @@ fn fts_phrase(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
+/// A line's place on its page. A coordinate that was not a number when it
+/// was saved is stored as NULL (SQLite has no NaN) and reads as 0: one such
+/// line made every search of its part and every merge holding it fail
+/// ("Invalid column type Null at index: 6, name: y", 141 failed merges by
+/// 23 Nov 2026, so small parts were never merged).
 fn bbox_of(r: &rusqlite::Row, i: usize) -> rusqlite::Result<NormBox> {
-    Ok(NormBox { x: r.get::<_, f64>(i)? as f32, y: r.get::<_, f64>(i + 1)? as f32, w: r.get::<_, f64>(i + 2)? as f32, h: r.get::<_, f64>(i + 3)? as f32 })
+    let at = |k: usize| -> rusqlite::Result<f32> { Ok(r.get::<_, Option<f64>>(i + k)?.unwrap_or(0.0) as f32) };
+    Ok(NormBox { x: at(0)?, y: at(1)?, w: at(2)?, h: at(3)? })
 }
 
 fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
@@ -1257,9 +1263,16 @@ impl Store {
     /// Readings that hold only part of a long tag (a few characters hidden at
     /// one end) are fetched separately, so they never crowd out full matches.
     pub fn search_lines(&self, term: &Term, scope: &Scope, limit: usize) -> Result<Vec<Candidate>> {
+        self.search_lines_cut(term, scope, limit).map(|(c, _)| c)
+    }
+
+    /// As [`Store::search_lines`], and whether a query reached its row limit
+    /// (there may be more, or better, matches than were looked at).
+    pub fn search_lines_cut(&self, term: &Term, scope: &Scope, limit: usize) -> Result<(Vec<Candidate>, bool)> {
         if term.fold.chars().count() < 3 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
+        let mut cut = false;
         let (where_, sp) = scope.sql_from(2);
         let sql = format!(
             "SELECT l.id, l.file_id, l.page, l.text, l.conf, l.source, l.x, l.y, l.w, l.h
@@ -1281,8 +1294,10 @@ impl Store {
             let rows = st.query_map(params_from_iter(args), |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, u32>(2)?, r.get::<_, String>(3)?, r.get::<_, f64>(4)? as f32, r.get::<_, i64>(5)?, bbox_of(r, 6)?))
             })?;
+            let mut fetched = 0usize;
             for row in rows {
                 let (id, file_id, page, text, conf, source, bbox) = row?;
+                fetched += 1;
                 if !seen.insert(id) {
                     continue;
                 }
@@ -1290,10 +1305,12 @@ impl Store {
                     out.push(Candidate { file_id, page: Some(page), text, conf, source: source_of(source), bbox: Some(bbox), class: d.class, why: d.why });
                 }
             }
+            cut |= fetched >= cap;
         }
         out.sort_by(|a, b| a.class.cmp(&b.class).then(b.conf.total_cmp(&a.conf)));
+        cut |= out.len() > limit;
         out.truncate(limit);
-        Ok(out)
+        Ok((out, cut))
     }
 
     /// Files whose name matches one term, inside `scope`, best first.

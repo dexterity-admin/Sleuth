@@ -13,6 +13,14 @@
 //! - Small parts are merged into larger ones by one PC at a time; the parts
 //!   merged away get a `.retired` marker and are deleted a day later, when
 //!   no PC still has them open.
+//! - Parts are searched from a copy on this PC's own disk (the *mirror*,
+//!   see [`Pool::set_mirror`]). A part never changes, so a copy of the same
+//!   size is the part. Searching hundreds of SQLite files over the network
+//!   took minutes to open and failed whenever the share was busy (409 parts,
+//!   66 GB, 23 Nov 2026: no text result 7 minutes after a start); from an SSD
+//!   it takes seconds, and it still works while the share is away. A part
+//!   that cannot be copied (no room, mirror switched off) is searched over
+//!   the network as before.
 
 use crate::derive::Deriver;
 use crate::store::{ReadingRow, Store, state};
@@ -37,6 +45,105 @@ const MERGE_MAX_PARTS: usize = 16;
 const MERGE_MAX_BYTES: u64 = 512 << 20;
 /// Parts opened at the same time by [`Pool::refresh`].
 const OPEN_AT_ONCE: usize = 16;
+/// Threads one query uses over all parts ([`Pool::each`]).
+pub(crate) const QUERY_THREADS: usize = 16;
+/// Room left on the mirror's disk whatever the office index grows to.
+const MIRROR_KEEP_FREE: u64 = 8 << 30;
+/// A part that could not be copied this many times is searched over the
+/// network instead, so its documents are not missing from every search.
+const MIRROR_TRIES: u32 = 3;
+/// A copy in progress ends in this; a finished one is renamed to `.db`.
+const COPYING_EXT: &str = "copying";
+
+/// A part waiting to be copied to this PC.
+#[derive(Debug, Clone)]
+struct Pending {
+    path: PathBuf,
+    bytes: u64,
+}
+
+#[derive(Default)]
+struct Mirror {
+    /// The folder parts are copied to; `None` searches over the network.
+    dir: Option<PathBuf>,
+    /// Newest first.
+    pending: Vec<Pending>,
+    /// Parts being copied right now, by office path.
+    in_flight: HashSet<PathBuf>,
+    failed: HashMap<PathBuf, u32>,
+    /// Why parts are not being copied, when they are not.
+    note: String,
+    /// An office folder could not be listed at the last refresh.
+    away: bool,
+}
+
+/// How the copy on this PC stands, for the status.
+#[derive(Debug, Clone, Default)]
+pub struct MirrorStats {
+    pub dir: String,
+    /// Parts searched from this PC's disk, and their size.
+    pub parts: u32,
+    pub bytes: u64,
+    /// Parts searched over the network (no room, or copying failed).
+    pub remote_parts: u32,
+    /// Parts still to copy.
+    pub pending_parts: u32,
+    pub pending_bytes: u64,
+    /// Copied since the worker started.
+    pub copied_bytes: u64,
+    pub note: String,
+    /// The office folder is away: only the copy is searched.
+    pub away: bool,
+}
+
+/// The number in a part's name (`p-01795427712-pc-a95a`): when it was made.
+fn part_time(path: &Path) -> u64 {
+    path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.split('-').nth(1)).and_then(|t| t.parse().ok()).unwrap_or(0)
+}
+
+use crate::sys::free_bytes;
+
+/// Copy `from` to `to` through a temporary name, giving up when `stop` is
+/// set. The copy must be exactly `bytes` long and open as a part, or it is
+/// thrown away.
+fn copy_part(from: &Path, to: &Path, bytes: u64, stop: &AtomicBool, copied: &AtomicU64) -> Result<()> {
+    use std::io::{Read, Write};
+    let dir = to.parent().context("the copy has no folder")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    // Two Windows users on one PC may copy the same part at the same time.
+    let tmp = to.with_extension(format!("{}-{COPYING_EXT}", std::process::id()));
+    let run = || -> Result<()> {
+        let mut src = std::fs::File::open(from).with_context(|| format!("open {}", from.display()))?;
+        let mut dst = std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        let mut buf = vec![0u8; 1 << 20];
+        let mut done = 0u64;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                bail!("stopped");
+            }
+            let n = src.read(&mut buf).with_context(|| format!("read {}", from.display()))?;
+            if n == 0 {
+                break;
+            }
+            dst.write_all(&buf[..n]).with_context(|| format!("write {}", tmp.display()))?;
+            done += n as u64;
+            copied.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        dst.flush()?;
+        drop(dst);
+        if done != bytes {
+            bail!("{} is {done} bytes here and {bytes} in the office index", from.display());
+        }
+        drop(Store::open_part(&tmp)?);
+        let _ = std::fs::remove_file(to);
+        std::fs::rename(&tmp, to).with_context(|| format!("keep {}", to.display()))
+    };
+    let r = run();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r
+}
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -127,7 +234,10 @@ pub struct Part {
     pub slot: u32,
     /// File name without extension; `work` parts are named by their file.
     pub name: String,
+    /// Where the part lives in the office index: what it is known by.
     pub path: PathBuf,
+    /// The file the queries read: the copy on this PC, or `path` itself.
+    pub open_at: PathBuf,
     pub bytes: u64,
     /// This PC's unpublished readings (a live database, not a published part).
     pub work: bool,
@@ -153,6 +263,11 @@ impl Part {
             self.broken.store(true, Ordering::SeqCst);
         }
         r
+    }
+
+    /// Changes when other readings of this part are hidden.
+    pub fn hidden_sig(&self) -> u64 {
+        self.hidden_sig.load(Ordering::SeqCst)
     }
 
     /// As [`Part::with`], for the few operations that need `&mut Store`.
@@ -190,9 +305,16 @@ pub struct Pool {
     next_slot: AtomicU32,
     /// Bumped whenever what a search can see changed.
     generation: AtomicU64,
+    /// Bumped whenever a part was added or closed.
+    parts_rev: AtomicU64,
     /// Parts refused (made by a newer Sleuth, damaged), with the reason, so
     /// each is reported once.
     refused: Mutex<HashMap<PathBuf, String>>,
+    /// One [`Pool::refresh`] at a time.
+    refresh_gate: Mutex<()>,
+    mirror: Mutex<Mirror>,
+    /// Bytes copied to the mirror since the worker started.
+    copied: AtomicU64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -210,6 +332,12 @@ impl Pool {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Changes whenever a part was added or closed: the caller then works
+    /// out again which reading of each document is current.
+    pub fn parts_rev(&self) -> u64 {
+        self.parts_rev.load(Ordering::SeqCst)
     }
 
     /// The folders published parts are looked for in.
@@ -242,6 +370,7 @@ impl Pool {
             slot: self.next_slot.fetch_add(1, Ordering::SeqCst),
             name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
             path: path.to_path_buf(),
+            open_at: path.to_path_buf(),
             bytes: 0,
             work: true,
             store: Mutex::new(store),
@@ -260,6 +389,7 @@ impl Pool {
             slot: self.next_slot.fetch_add(1, Ordering::SeqCst),
             name: name.to_string(),
             path: PathBuf::new(),
+            open_at: PathBuf::new(),
             bytes: 0,
             work: true,
             store: Mutex::new(store),
@@ -271,14 +401,17 @@ impl Pool {
         part
     }
 
-    fn open_published(&self, path: &Path) -> Result<Part> {
-        let store = Store::open_part(path)?;
+    /// Open the part known as `path` from the file `open_at` (its copy on
+    /// this PC, or `path` itself).
+    fn open_published(&self, path: &Path, open_at: &Path) -> Result<Part> {
+        let store = Store::open_part(open_at)?;
         let rows = store.reading_rows()?;
         Ok(Part {
             slot: self.next_slot.fetch_add(1, Ordering::SeqCst),
             name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
             path: path.to_path_buf(),
-            bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            open_at: open_at.to_path_buf(),
+            bytes: std::fs::metadata(open_at).map(|m| m.len()).unwrap_or(0),
             work: false,
             store: Mutex::new(store),
             rows,
@@ -287,76 +420,308 @@ impl Pool {
         })
     }
 
-    /// Bring the pool in line with the folders: open parts that appeared,
-    /// close parts that were merged away or failed. Returns whether anything
-    /// changed; the caller then works out again which reading of each
-    /// document is current ([`Pool::recover`]).
-    pub fn refresh(&self) -> bool {
+    // ---- the copy on this PC -------------------------------------------------
+
+    /// Search parts from copies in `dir` on this PC's own disk (`None`: over
+    /// the network). Takes effect at the next [`Pool::refresh`].
+    pub fn set_mirror(&self, dir: Option<PathBuf>) {
+        let mut m = self.mirror.lock().unwrap();
+        if m.dir != dir {
+            m.dir = dir;
+            m.pending.clear();
+            m.failed.clear();
+            m.note.clear();
+        }
+    }
+
+    /// The mirror's folder for the office folder `dir`: the office's own
+    /// parts and this PC's local-disk parts are kept apart.
+    fn mirror_sub(mirror: &Path, dirs: &[PathBuf], dir: &Path) -> PathBuf {
+        mirror.join(if dirs.first().map(|d| d.as_path()) == Some(dir) { "office" } else { "own" })
+    }
+
+    /// Where the copy of the part `path` is kept, when there is a mirror.
+    fn local_for(&self, path: &Path) -> Option<PathBuf> {
+        let mirror = self.mirror.lock().unwrap().dir.clone()?;
         let dirs = self.dirs.read().unwrap().clone();
-        let mut on_disk: Vec<PathBuf> = Vec::new();
-        let mut retired: HashMap<PathBuf, String> = HashMap::new();
-        let mut listed_ok: HashSet<PathBuf> = HashSet::new();
-        for dir in &dirs {
-            let Ok(rd) = std::fs::read_dir(dir) else { continue };
-            listed_ok.insert(dir.clone());
-            for e in rd.flatten() {
-                let p = e.path();
-                match p.extension().and_then(|x| x.to_str()) {
-                    Some("db") => on_disk.push(p),
-                    Some("retired") => {
-                        if let Some(r) = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Retired>(&b).ok()) {
-                            retired.insert(p.with_extension("db"), r.into);
-                        }
-                    }
-                    _ => {}
+        Some(Self::mirror_sub(&mirror, &dirs, path.parent()?).join(path.file_name()?))
+    }
+
+    /// Start searching a part, unless it is in the pool already.
+    fn add_part(&self, part: Part) {
+        let mut parts = self.parts.write().unwrap();
+        if parts.iter().any(|p| !p.work && p.path == part.path) {
+            return;
+        }
+        self.refused.lock().unwrap().remove(&part.path);
+        parts.push(Arc::new(part));
+        drop(parts);
+        self.parts_rev.fetch_add(1, Ordering::SeqCst);
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Copy one part to this PC and start searching it. With no mirror, or
+    /// no room on its disk, the part is searched where it is.
+    fn bring(&self, job: &Pending, stop: &AtomicBool) -> Result<()> {
+        let mut open_at = job.path.clone();
+        if let Some(local) = self.local_for(&job.path) {
+            let dir = local.parent().map(Path::to_path_buf).unwrap_or_default();
+            let _ = std::fs::create_dir_all(&dir);
+            if free_bytes(&dir) < job.bytes.saturating_add(MIRROR_KEEP_FREE) {
+                let note = format!("Not enough room in {} for the whole office index; the rest is searched over the network (slower).", dir.display());
+                let mut m = self.mirror.lock().unwrap();
+                if m.note != note {
+                    warn!("{note}");
+                    m.note = note;
+                }
+            } else {
+                copy_part(&job.path, &local, job.bytes, stop, &self.copied)?;
+                open_at = local;
+            }
+        }
+        let part = self.open_published(&job.path, &open_at)?;
+        self.add_part(part);
+        Ok(())
+    }
+
+    /// Copy the next waiting part to this PC and start searching it. False
+    /// when nothing waits (or the office folder is away). The engine runs
+    /// this on its mirror threads; `stop` abandons a copy in progress.
+    pub fn mirror_step(&self, stop: &AtomicBool) -> bool {
+        let job = {
+            let mut m = self.mirror.lock().unwrap();
+            if m.dir.is_none() || m.away || m.pending.is_empty() {
+                return false;
+            }
+            let job = m.pending.remove(0);
+            m.in_flight.insert(job.path.clone());
+            job
+        };
+        let r = self.bring(&job, stop);
+        let mut m = self.mirror.lock().unwrap();
+        m.in_flight.remove(&job.path);
+        match r {
+            Ok(()) => {
+                m.failed.remove(&job.path);
+            }
+            Err(_) if stop.load(Ordering::SeqCst) => m.pending.insert(0, job),
+            // The office folder went away in the middle: no fault of the
+            // part. It waits its turn again, and nothing more is tried
+            // until the folder answers (counting these as failed copies
+            // would leave every waiting part to be searched over the
+            // network once the folder is back).
+            Err(_) if job.path.parent().is_none_or(|d| std::fs::metadata(d).is_err()) => {
+                m.pending.insert(0, job);
+                m.away = true;
+                return false;
+            }
+            Err(e) => {
+                let n = {
+                    let n = m.failed.entry(job.path.clone()).or_insert(0);
+                    *n += 1;
+                    *n
+                };
+                warn!("part not copied to this PC (try {n}): {e:#}");
+                // Tried again after the others; then left to `refresh`, which
+                // searches it over the network.
+                if n < MIRROR_TRIES {
+                    m.pending.push(job);
                 }
             }
         }
-        on_disk.sort();
-        let names: HashSet<String> = on_disk.iter().filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
-        let mut changed = false;
-        let mut parts = self.parts.read().unwrap().clone();
-        // Close: merged away (and its replacement is here), broken, or deleted.
-        parts.retain(|p| {
-            if p.work {
-                return true;
+        true
+    }
+
+    /// Have the part `path` (just published or merged by this PC) in the
+    /// pool before returning, so no search misses its documents.
+    pub fn adopt(&self, path: &Path) -> Result<()> {
+        loop {
+            if self.parts.read().unwrap().iter().any(|p| !p.work && p.path == path) {
+                return Ok(());
             }
+            let mut m = self.mirror.lock().unwrap();
+            if m.in_flight.contains(path) {
+                drop(m);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            m.pending.retain(|j| j.path != path);
+            m.in_flight.insert(path.to_path_buf());
+            break;
+        }
+        let job = Pending { path: path.to_path_buf(), bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) };
+        let r = self.bring(&job, &AtomicBool::new(false)).or_else(|e| {
+            warn!("{}: not copied to this PC, searched over the network: {e:#}", job.path.display());
+            self.open_published(path, path).map(|p| self.add_part(p))
+        });
+        self.mirror.lock().unwrap().in_flight.remove(path);
+        r
+    }
+
+    /// How the copy on this PC stands.
+    pub fn mirror_stats(&self) -> MirrorStats {
+        let m = self.mirror.lock().unwrap();
+        let mut st = MirrorStats {
+            dir: m.dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default(),
+            pending_parts: (m.pending.len() + m.in_flight.len()) as u32,
+            pending_bytes: m.pending.iter().map(|j| j.bytes).sum(),
+            copied_bytes: self.copied.load(Ordering::Relaxed),
+            note: m.note.clone(),
+            away: m.away,
+            ..Default::default()
+        };
+        drop(m);
+        for p in self.parts.read().unwrap().iter().filter(|p| !p.work) {
+            if p.open_at == p.path {
+                st.remote_parts += 1;
+            } else {
+                st.parts += 1;
+                st.bytes += p.bytes;
+            }
+        }
+        st
+    }
+
+    /// Bring the pool in line with the folders: open parts that appeared,
+    /// close parts that were merged away or failed, and queue what is not on
+    /// this PC yet for [`Pool::mirror_step`]. While the office folder is
+    /// away, the parts already copied here are searched. Returns whether
+    /// anything changed; the caller then works out again which reading of
+    /// each document is current ([`Pool::recover`]).
+    pub fn refresh(&self) -> bool {
+        let _gate = self.refresh_gate.lock().unwrap_or_else(|p| p.into_inner());
+        let dirs = self.dirs.read().unwrap().clone();
+        let mirror = self.mirror.lock().unwrap().dir.clone();
+        let local_dir = |dir: &Path| mirror.as_ref().map(|m| Self::mirror_sub(m, &dirs, dir));
+        let mut on_disk: Vec<(PathBuf, u64)> = Vec::new();
+        let mut retired: HashMap<PathBuf, String> = HashMap::new();
+        let mut listed_ok: HashSet<PathBuf> = HashSet::new();
+        let mut away = false;
+        for (i, dir) in dirs.iter().enumerate() {
+            match std::fs::read_dir(dir) {
+                Ok(rd) => {
+                    listed_ok.insert(dir.clone());
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        match p.extension().and_then(|x| x.to_str()) {
+                            Some("db") => on_disk.push((p, e.metadata().map(|m| m.len()).unwrap_or(0))),
+                            Some("retired") => {
+                                if let Some(r) = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Retired>(&b).ok()) {
+                                    retired.insert(p.with_extension("db"), r.into);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(_) => {
+                    // The office's folder first: when it cannot be listed the
+                    // share is away. This PC's own folder may just not exist yet.
+                    if i == 0 {
+                        away = true;
+                    }
+                    if !away {
+                        continue;
+                    }
+                    // Away: what was copied to this PC is still searched.
+                    let Some(rd) = local_dir(dir).and_then(|l| std::fs::read_dir(l).ok()) else { continue };
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.extension().and_then(|x| x.to_str()) == Some("db")
+                            && let Some(name) = p.file_name()
+                        {
+                            on_disk.push((dir.join(name), e.metadata().map(|m| m.len()).unwrap_or(0)));
+                        }
+                    }
+                }
+            }
+        }
+        // Newest first: what was read lately is what people look for.
+        on_disk.sort_by(|a, b| part_time(&b.0).cmp(&part_time(&a.0)).then(a.0.cmp(&b.0)));
+        let names: HashSet<String> = on_disk.iter().filter_map(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
+        let here: HashSet<&PathBuf> = on_disk.iter().map(|(p, _)| p).collect();
+        let parts = self.parts.read().unwrap().clone();
+        // Close: merged away (and its replacement is here), broken, or deleted.
+        let mut closed: HashSet<u32> = HashSet::new();
+        // Copies that failed while being searched: copied again.
+        let mut discard: HashSet<PathBuf> = HashSet::new();
+        for p in parts.iter().filter(|p| !p.work) {
             let dir_listed = p.path.parent().is_some_and(|d| listed_ok.contains(d));
             let merged_away = retired.get(&p.path).is_some_and(|into| names.contains(into));
-            let missing = dir_listed && !on_disk.contains(&p.path);
-            let keep = !(merged_away || missing || p.broken.load(Ordering::SeqCst));
-            changed |= !keep;
-            keep
-        });
-        // Open what is new, many at once: one by one over the network, a few
-        // hundred parts kept search empty for minutes after a start or after
-        // the office folder came back.
-        let new: Vec<&PathBuf> = on_disk.iter().filter(|path| !parts.iter().any(|p| p.path == **path) && !retired.get(*path).is_some_and(|into| names.contains(into))).collect();
+            let missing = dir_listed && !here.contains(&p.path);
+            let broken = p.broken.load(Ordering::SeqCst);
+            // The copy was moved to another folder (or switched off): the
+            // part is opened again from where it belongs now.
+            let stray = p.open_at != p.path && mirror.as_ref().is_none_or(|m| !p.open_at.starts_with(m));
+            if merged_away || missing || broken || stray {
+                closed.insert(p.slot);
+                if broken && p.open_at != p.path {
+                    warn!("the copy of part {} on this PC failed; it is copied again", p.name);
+                    discard.insert(p.open_at.clone());
+                }
+            }
+        }
+        // The copy is opened where it is told to be, not where it was.
+        let parts: Vec<Arc<Part>> = parts.into_iter().filter(|p| p.work || !closed.contains(&p.slot)).collect();
+        let (in_flight, failed) = {
+            let m = self.mirror.lock().unwrap();
+            (m.in_flight.clone(), m.failed.clone())
+        };
+        // New parts: from this PC's copy when it is whole, else queued to be
+        // copied; over the network only without a mirror or after copying
+        // failed for good.
+        let mut to_open: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut pending: Vec<Pending> = Vec::new();
+        for (path, bytes) in &on_disk {
+            if in_flight.contains(path) || retired.get(path).is_some_and(|into| names.contains(into)) || parts.iter().any(|p| !p.work && p.path == *path) {
+                continue;
+            }
+            let local = path.parent().and_then(local_dir).zip(path.file_name()).map(|(d, n)| d.join(n));
+            match local {
+                None => to_open.push((path.clone(), path.clone())),
+                Some(local) => {
+                    let whole = *bytes > 0 && !discard.contains(&local) && std::fs::metadata(&local).is_ok_and(|m| m.len() == *bytes);
+                    if whole {
+                        to_open.push((path.clone(), local));
+                    } else if failed.get(path).is_some_and(|n| *n >= MIRROR_TRIES) {
+                        to_open.push((path.clone(), path.clone()));
+                    } else if !away {
+                        pending.push(Pending { path: path.clone(), bytes: *bytes });
+                    }
+                }
+            }
+        }
+        // Open many at once: one by one, a few hundred parts kept search
+        // empty for minutes after a start.
         let next = std::sync::atomic::AtomicUsize::new(0);
         let opened: Mutex<Vec<(PathBuf, Result<Part>)>> = Mutex::new(Vec::new());
         std::thread::scope(|sc| {
-            for _ in 0..OPEN_AT_ONCE.min(new.len()) {
+            for _ in 0..OPEN_AT_ONCE.min(to_open.len()) {
                 sc.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, Ordering::SeqCst);
-                        let Some(path) = new.get(i) else { break };
-                        let r = self.open_published(path);
-                        opened.lock().unwrap().push(((*path).clone(), r));
+                        let Some((path, open_at)) = to_open.get(i) else { break };
+                        let r = self.open_published(path, open_at);
+                        opened.lock().unwrap().push((path.clone(), r));
                     }
                 });
             }
         });
         let mut opened = opened.into_inner().unwrap();
         opened.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut changed = !closed.is_empty();
+        let mut fresh: Vec<Arc<Part>> = Vec::new();
         for (path, r) in opened {
-            let path = &path;
             match r {
                 Ok(p) => {
-                    self.refused.lock().unwrap().remove(path);
-                    parts.push(Arc::new(p));
-                    changed = true;
+                    self.refused.lock().unwrap().remove(&path);
+                    fresh.push(Arc::new(p));
                 }
                 Err(e) => {
+                    // A copy that does not open is copied again next time.
+                    if let Some((_, open_at)) = to_open.iter().find(|(p, o)| *p == path && o != p) {
+                        discard.insert(open_at.clone());
+                    }
                     let why = format!("{e:#}");
                     if self.refused.lock().unwrap().insert(path.clone(), why.clone()).as_ref() != Some(&why) {
                         warn!("part not used: {why}");
@@ -364,8 +729,51 @@ impl Pool {
                 }
             }
         }
-        *self.parts.write().unwrap() = parts;
+        {
+            // Mirror threads may have added parts meanwhile: theirs stay.
+            let mut live = self.parts.write().unwrap();
+            live.retain(|p| !closed.contains(&p.slot));
+            for p in fresh {
+                if !live.iter().any(|q| !q.work && q.path == p.path) {
+                    live.push(p);
+                    changed = true;
+                }
+            }
+        }
+        {
+            let mut m = self.mirror.lock().unwrap();
+            m.away = away;
+            let live = self.parts.read().unwrap();
+            pending.retain(|j| !m.in_flight.contains(&j.path) && !live.iter().any(|p| !p.work && p.path == j.path));
+            m.pending = pending;
+            if m.pending.is_empty() && m.in_flight.is_empty() && !m.note.starts_with("Not enough room") {
+                m.note.clear();
+            }
+        }
+        // Tidy the mirror: copies of parts the office no longer has, failed
+        // copies, and copies abandoned half-way more than an hour ago. (The
+        // parts closed above are let go of first, or Windows keeps their files.)
+        drop(parts);
+        for f in &discard {
+            let _ = std::fs::remove_file(f);
+        }
+        for dir in &listed_ok {
+            let Some(rd) = local_dir(dir).and_then(|l| std::fs::read_dir(l).ok()) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                let stale = if ext == "db" {
+                    p.file_name().is_some_and(|n| !here.contains(&dir.join(n)))
+                } else {
+                    ext.ends_with(COPYING_EXT) && e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() > 3600)
+                };
+                if stale {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
         if changed {
+            self.parts_rev.fetch_add(1, Ordering::SeqCst);
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
         changed
@@ -493,6 +901,11 @@ impl Pool {
     /// Run `f` on every part at once and collect what each returns. A part
     /// that fails is logged and left out: the others still answer.
     pub fn each<T: Send>(&self, f: impl Fn(&Part, &Store) -> Result<T> + Sync) -> Vec<(Arc<Part>, T)> {
+        self.each_on(QUERY_THREADS, f)
+    }
+
+    /// [`Pool::each`] on at most `threads` threads.
+    pub fn each_on<T: Send>(&self, threads: usize, f: impl Fn(&Part, &Store) -> Result<T> + Sync) -> Vec<(Arc<Part>, T)> {
         let parts = self.parts();
         let run = |p: &Arc<Part>| match p.with(|s| f(p, s)) {
             Ok(v) => Some((Arc::clone(p), v)),
@@ -501,12 +914,25 @@ impl Pool {
                 None
             }
         };
-        if parts.len() <= 1 {
+        if parts.len() <= 1 || threads <= 1 {
             return parts.iter().filter_map(run).collect();
         }
+        // A few threads share the parts out: one thread per part was several
+        // hundred threads for every word searched.
+        let next = std::sync::atomic::AtomicUsize::new(0);
         std::thread::scope(|sc| {
-            let handles: Vec<_> = parts.iter().map(|p| sc.spawn(|| run(p))).collect();
-            handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+            let handles: Vec<_> = (0..threads.min(parts.len()))
+                .map(|_| {
+                    sc.spawn(|| {
+                        let mut out = Vec::new();
+                        while let Some(p) = parts.get(next.fetch_add(1, Ordering::SeqCst)) {
+                            out.extend(run(p));
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         })
     }
 
@@ -618,7 +1044,7 @@ pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Pa
         let mut target = Store::create_bulk(&tmp)?;
         for src in sources {
             // Its own connection: every reading is read, hidden or not.
-            let from = Store::open_part(&src.path)?;
+            let from = Store::open_part(&src.open_at)?;
             for row in &src.rows {
                 if !current(src.slot, row.id) {
                     continue;
@@ -777,6 +1203,94 @@ mod tests {
     }
 
     #[test]
+    fn parts_are_searched_from_the_copy_on_this_pc() {
+        let dir = scratch("mirror");
+        let text = dir.join("office").join("text");
+        let mirror = dir.join("copy");
+        let here = |_: &str| Presence::Unknown;
+        let stop = AtomicBool::new(false);
+        let pool = Pool::new();
+        pool.set_dirs(vec![text.clone(), dir.join("office").join("own")]);
+        pool.set_mirror(Some(mirror.clone()));
+        let work_path = dir.join("work.db");
+        let mut work = Store::open(&work_path).unwrap();
+        pool.add_work(&work_path).unwrap();
+
+        // A part published by another PC: queued, copied, then searched here.
+        save(&mut work, r"\\10.0.0.5\p\a.pdf", "PSV-1203", 100);
+        let one = publish(&work, &text, "PC-TWO").unwrap().unwrap();
+        work.clear_readings().unwrap();
+        assert!(!pool.refresh(), "nothing is searched before it is copied");
+        assert_eq!(pool.mirror_stats().pending_parts, 1);
+        assert!(pool.mirror_step(&stop));
+        assert!(!pool.mirror_step(&stop), "nothing left to copy");
+        pool.recover(&here);
+        let st = pool.mirror_stats();
+        assert_eq!((st.parts, st.remote_parts, st.pending_parts), (1, 0, 0));
+        let part = pool.parts().into_iter().find(|p| !p.work).unwrap();
+        assert_eq!(part.path, one, "known by its place in the office index");
+        assert!(part.open_at.starts_with(&mirror), "read from the copy");
+        drop(part);
+        assert_eq!(lines_of(&pool, r"\\10.0.0.5\p\a.pdf"), vec!["PSV-1203"]);
+
+        // This PC's own part is in the pool before `adopt` returns.
+        save(&mut work, r"\\10.0.0.5\p\b.pdf", "FV-2201", 200);
+        let two = publish(&work, &text, "PC-ONE").unwrap().unwrap();
+        pool.adopt(&two).unwrap();
+        work.clear_readings().unwrap();
+        pool.recover(&here);
+        assert_eq!(pool.mirror_stats().parts, 2);
+        assert_eq!(lines_of(&pool, r"\\10.0.0.5\p\b.pdf"), vec!["FV-2201"]);
+        drop(pool);
+
+        // A new start with the office folder away: the copy answers.
+        std::fs::rename(dir.join("office"), dir.join("office-away")).unwrap();
+        let pool = Pool::new();
+        pool.set_dirs(vec![text.clone(), dir.join("office").join("own")]);
+        pool.set_mirror(Some(mirror.clone()));
+        assert!(pool.refresh());
+        pool.recover(&here);
+        let st = pool.mirror_stats();
+        assert_eq!((st.parts, st.away), (2, true));
+        assert_eq!(lines_of(&pool, r"\\10.0.0.5\p\a.pdf"), vec!["PSV-1203"]);
+        // Back again: nothing is copied twice, nothing closes.
+        std::fs::rename(dir.join("office-away"), dir.join("office")).unwrap();
+        assert!(!pool.refresh());
+        assert_eq!((pool.mirror_stats().parts, pool.mirror_stats().pending_parts, pool.mirror_stats().away), (2, 0, false));
+
+        // A part the office no longer has: closed, and its copy deleted.
+        std::fs::remove_file(&one).unwrap();
+        assert!(pool.refresh());
+        pool.recover(&here);
+        assert_eq!(pool.mirror_stats().parts, 1);
+        assert!(!mirror.join("office").join(one.file_name().unwrap()).exists());
+        assert!(pool.covered(r"\\10.0.0.5\p\a.pdf").is_none());
+
+        // A copy cut short (the PC lost power while copying) is not trusted.
+        let local = mirror.join("office").join(two.file_name().unwrap());
+        drop(pool);
+        std::fs::write(&local, b"half").unwrap();
+        let pool = Pool::new();
+        pool.set_dirs(vec![text.clone(), dir.join("office").join("own")]);
+        pool.set_mirror(Some(mirror.clone()));
+        pool.refresh();
+        assert_eq!((pool.mirror_stats().parts, pool.mirror_stats().pending_parts), (0, 1));
+        assert!(pool.mirror_step(&stop));
+        pool.recover(&here);
+        assert_eq!(lines_of(&pool, r"\\10.0.0.5\p\b.pdf"), vec!["FV-2201"]);
+
+        // The copy switched off: the same part, read where it is.
+        pool.set_mirror(None);
+        assert!(pool.refresh());
+        pool.recover(&here);
+        let st = pool.mirror_stats();
+        assert_eq!((st.parts, st.remote_parts), (0, 1));
+        assert_eq!(lines_of(&pool, r"\\10.0.0.5\p\b.pdf"), vec!["FV-2201"]);
+        drop(pool);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn changed_file_is_not_covered() {
         let dir = scratch("cov");
         let pool = Pool::new();
@@ -814,7 +1328,7 @@ mod tests {
 
     #[test]
     fn merge_waits_for_enough_small_parts() {
-        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Vec::new(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
+        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), open_at: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Vec::new(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
         let few: Vec<Arc<Part>> = (0..7).map(|_| mk(1 << 20)).collect();
         assert!(merge_candidates(&few).is_empty());
         let enough: Vec<Arc<Part>> = (0..8).map(|_| mk(1 << 20)).chain([mk(3 << 30)]).collect();

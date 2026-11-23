@@ -176,6 +176,11 @@ pub struct Settings {
     /// The shared cache is expected on every PC; the app keeps asking until
     /// it works. Only IT should switch this off (in settings.json).
     pub shared_cache_enabled: bool,
+    /// Folder on this PC's own disk holding a copy of the office index, which
+    /// searches read instead of the network folder. `None`: chosen by Sleuth
+    /// (the local disk that suits best, an SSD first) and remembered here.
+    /// `"off"`: no copy; searches read the network folder (slow).
+    pub local_index_dir: Option<String>,
     /// Keep the background reader running after the window is closed.
     pub keep_indexing_when_closed: bool,
     /// Other programs using more CPU than this (while someone is at the PC)
@@ -234,6 +239,7 @@ impl Default for Settings {
             shared_cache_dir: Some(OFFICE_CACHE_DIR.into()),
             shared_cache_unc: None,
             shared_cache_enabled: true,
+            local_index_dir: None,
             keep_indexing_when_closed: true,
             busy_cpu_percent: 60,
             name_rescan_minutes: 360,

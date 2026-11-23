@@ -14,7 +14,7 @@ use crate::derive::Deriver;
 use crate::pool::Pool;
 use crate::readjob::Job;
 use crate::remote;
-use crate::search::{attach_twins, search_index};
+use crate::search::{Limits, attach_twins, search_index, search_index_with};
 use crate::store::{Store, state};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -39,6 +39,30 @@ const DEEP_READ_LIMIT: usize = 400;
 const RESULT_CAP: usize = 5000;
 /// Searches remembered with their results (dropped when anything changes).
 const RESULT_MEMORY: usize = 12;
+/// Sleuth's share of a desktop's whole processor (all cores), in any mode:
+///
+/// - The reader processes are held to [`READER_CPU_CAP`] by Windows itself
+///   (a hard ceiling on their job object), and to 1 % while a search runs.
+/// - The worker's own background work runs on one thread at a time that is
+///   busy at most half the time (merging, the full pass of a search) or a
+///   tenth of it (counting), so it stays under one core's worth: 100 / cores
+///   percent, 12.5 % on 8 cores, and normally a small fraction of that.
+/// - Only the quick first pass of a search may use every core, for the
+///   fraction of a second someone waits for the answer.
+///
+/// A ceiling on the worker process as a whole was tried and taken out: once
+/// the readers had used the share, Windows held back the threads that answer
+/// the window too, and a request waited over a minute (23 Nov 2026).
+/// The office server is not limited.
+pub const READER_CPU_CAP: u32 = 8;
+/// The readers' share while a search runs, so the search has the rest.
+pub(crate) const READER_CPU_CAP_SEARCHING: u32 = 1;
+/// All readers together never hold more memory than this (MB) on a desktop.
+pub(crate) const READER_MEMORY_CAP_MB: u64 = 2048;
+/// Readers on a desktop, in any mode: more would only wait for the processor.
+pub(crate) const DESKTOP_OCR_READERS: u32 = 1;
+pub(crate) const DESKTOP_TEXT_READERS: u32 = 2;
+
 /// Said while the office index is opened after a start; the window searches
 /// again by itself once it is ready.
 pub const STILL_OPENING: &str = "The office index is still opening after the start; text inside documents will be added to these results by itself in a moment.";
@@ -58,6 +82,27 @@ pub(crate) struct Rendered {
 const OFFICE_INTERVAL: Duration = Duration::from_secs(60);
 /// Lines of a text preview sent at once.
 const TEXT_PREVIEW_LINES: usize = 2000;
+
+/// Says in the log which step of a request took long: a request from the
+/// window must never wait for the network or for a lock held across it.
+pub(crate) struct Lap {
+    what: &'static str,
+    t: Instant,
+}
+
+impl Lap {
+    pub(crate) fn new(what: &'static str) -> Lap {
+        Lap { what, t: Instant::now() }
+    }
+
+    pub(crate) fn at(&mut self, step: &str) {
+        let ms = self.t.elapsed().as_millis();
+        if ms > 300 {
+            warn!("{}: {step} took {ms} ms", self.what);
+        }
+        self.t = Instant::now();
+    }
+}
 
 pub fn now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
@@ -212,6 +257,27 @@ pub struct Engine {
     pub(crate) reader_signal: Signal,
     pub(crate) indexer_signal: Signal,
     pub(crate) follow_signal: Signal,
+    /// Wakes the loop that keeps the parts pool current.
+    pub(crate) pool_signal: Signal,
+    /// The reader loop has ended and its reader processes with it.
+    pub(crate) readers_gone: AtomicBool,
+    /// The job object holding the reader processes, once they can start.
+    pub(crate) reader_group: Mutex<Option<Arc<sleuth_lanes::ProcessGroup>>>,
+    /// Searches running now: while there are any, the readers stand back.
+    pub(crate) searching: std::sync::atomic::AtomicU32,
+    /// Wakes the threads that copy parts to this PC.
+    pub(crate) mirror_signal: Signal,
+    /// The file lists kept on this PC were loaded (searches wait for that
+    /// for a few seconds instead of answering "nothing found").
+    pub(crate) names_ready: AtomicBool,
+    /// The office index folder was checked at least once since the start.
+    pub(crate) cache_checked: AtomicBool,
+    /// The office index folder as it last worked (kept across restarts), so
+    /// the copy on this PC is searched at once after a start and while the
+    /// folder is away.
+    pub(crate) last_store: Mutex<Option<PathBuf>>,
+    /// The folder chosen for the copy of the office index, once worked out.
+    pub(crate) mirror_at: Mutex<Option<(Option<String>, Option<PathBuf>)>>,
     pub(crate) heartbeat_signal: Signal,
     /// The office index's parts were opened at least once since start.
     pub(crate) pool_ready: AtomicBool,
@@ -259,6 +325,11 @@ pub struct Engine {
     pub(crate) work_dirty: AtomicBool,
     pub(crate) pcs: Mutex<Vec<PcStatus>>,
     pub(crate) monitor_memo: Mutex<Option<(u64, Instant, Box<Monitor>)>>,
+    /// The monitor's sums per published part, with the hidden-readings
+    /// signature they were worked out for.
+    pub(crate) part_sums: Mutex<HashMap<String, (u64, Arc<crate::views::PartSums>)>>,
+    /// The monitor's sums are being worked out.
+    pub(crate) sums_busy: AtomicBool,
 }
 
 impl Engine {
@@ -291,6 +362,15 @@ impl Engine {
             reader_signal: Signal::default(),
             indexer_signal: Signal::default(),
             follow_signal: Signal::default(),
+            pool_signal: Signal::default(),
+            readers_gone: AtomicBool::new(false),
+            reader_group: Mutex::new(None),
+            searching: std::sync::atomic::AtomicU32::new(0),
+            mirror_signal: Signal::default(),
+            names_ready: AtomicBool::new(false),
+            cache_checked: AtomicBool::new(false),
+            last_store: Mutex::new(None),
+            mirror_at: Mutex::new(None),
             heartbeat_signal: Signal::default(),
             pool_ready: AtomicBool::new(false),
             cache_signal: Signal::default(),
@@ -324,6 +404,8 @@ impl Engine {
             work_dirty: AtomicBool::new(false),
             pcs: Mutex::new(Vec::new()),
             monitor_memo: Mutex::new(None),
+            part_sums: Mutex::new(HashMap::new()),
+            sums_busy: AtomicBool::new(false),
         })
     }
 
@@ -357,6 +439,63 @@ impl Engine {
     pub(crate) fn store_dir(&self) -> Option<PathBuf> {
         let c = self.cache.lock().unwrap();
         (c.state == CacheState::Ok).then(|| PathBuf::from(&c.path))
+    }
+
+    /// Where the office index is looked for: its folder when it works, and
+    /// otherwise (just started, or the folder is away) where it last worked,
+    /// so the copy on this PC can still be searched.
+    pub(crate) fn index_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = self.store_dir() {
+            return Some(dir);
+        }
+        let s = self.settings.read().unwrap();
+        if !s.shared_cache_enabled || s.shared_cache_dir.as_deref().is_none_or(|d| d.trim().is_empty()) {
+            return None;
+        }
+        self.last_store.lock().unwrap().clone()
+    }
+
+    /// The folder on this PC that holds the copy of the office index
+    /// (`None`: switched off). Chosen once and remembered in the settings.
+    pub(crate) fn mirror_dir(&self) -> Option<PathBuf> {
+        let chosen = self.settings.read().unwrap().local_index_dir.clone();
+        if let Some((for_setting, dir)) = self.mirror_at.lock().unwrap().as_ref()
+            && *for_setting == chosen
+        {
+            return dir.clone();
+        }
+        let dir = match chosen.as_deref().map(str::trim) {
+            Some(d) if d.eq_ignore_ascii_case("off") => None,
+            // A folder whose disk is not on this PC (settings roam) is not used.
+            Some(d) if !d.is_empty() && Path::new(d).ancestors().last().is_some_and(|root| root.exists()) => Some(PathBuf::from(d)),
+            _ => {
+                // Tests and portable setups keep everything in their own folder.
+                let dir = if std::env::var_os("SLEUTH_DATA_DIR").is_some() {
+                    self.data.join("index")
+                } else {
+                    let fixed: Vec<String> = DriveMap::current().drives.iter().filter(|d| d.kind == DriveKind::Fixed).map(|d| d.letter.clone()).collect();
+                    crate::sys::pick_index_dir(&self.data, &fixed)
+                };
+                info!("the copy of the office index on this PC goes to {}", dir.display());
+                // Remembered: a choice made again at every start could change
+                // with the free space, and the whole index be copied again.
+                if std::env::var_os("SLEUTH_DATA_DIR").is_none() {
+                    let mut next = self.settings.read().unwrap().clone();
+                    next.local_index_dir = Some(dir.display().to_string());
+                    match next.save() {
+                        Ok(()) => {
+                            *self.mirror_at.lock().unwrap() = Some((next.local_index_dir.clone(), Some(dir.clone())));
+                            *self.settings.write().unwrap() = next;
+                            return Some(dir);
+                        }
+                        Err(e) => warn!("cannot remember the folder for the copy of the office index: {e:#}"),
+                    }
+                }
+                Some(dir)
+            }
+        };
+        *self.mirror_at.lock().unwrap() = Some((chosen, dir.clone()));
+        dir
     }
 
     /// A server name as its address, remembered so a name server that is
@@ -398,6 +537,7 @@ impl Engine {
         for (k, v) in local.meta_with_prefix("host:").unwrap_or_default() {
             self.hosts.lock().unwrap().insert(k, v);
         }
+        *self.last_store.lock().unwrap() = local.get_meta("store_dir").ok().flatten().filter(|d| !d.is_empty()).map(PathBuf::from);
         local.set_projects(&self.settings.read().unwrap().projects)?;
         for e in &self.deriver().errors {
             local.event(now(), "warn", &format!("rule not used: {e}"));
@@ -418,6 +558,9 @@ impl Engine {
         };
         spawn("sleuth-store", Engine::cache_loop)?;
         spawn("sleuth-follow", Engine::follow_loop)?;
+        spawn("sleuth-pool", Engine::pool_loop)?;
+        spawn("sleuth-mirror-1", Engine::mirror_loop)?;
+        spawn("sleuth-mirror-2", Engine::mirror_loop)?;
         spawn("sleuth-heartbeat", Engine::heartbeat_loop)?;
         spawn("sleuth-indexer", Engine::indexer_loop)?;
         spawn("sleuth-reader", Engine::reader_loop)?;
@@ -431,7 +574,7 @@ impl Engine {
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
         self.walk_cancel.store(true, Ordering::SeqCst);
-        for s in [&self.reader_signal, &self.indexer_signal, &self.follow_signal, &self.heartbeat_signal, &self.cache_signal, &self.office_signal, &self.stats_signal] {
+        for s in [&self.pool_signal, &self.mirror_signal, &self.reader_signal, &self.indexer_signal, &self.follow_signal, &self.heartbeat_signal, &self.cache_signal, &self.office_signal, &self.stats_signal] {
             s.raise();
         }
         for flag in self.searches.lock().unwrap().values() {
@@ -439,8 +582,24 @@ impl Engine {
         }
     }
 
+    /// Set the readers' share of the processor (desktops only).
+    pub(crate) fn cap_readers(&self, percent: u32) {
+        if self.server_mode {
+            return;
+        }
+        if let Some(g) = self.reader_group.lock().unwrap().as_ref() {
+            let _ = g.set_cpu_cap(Some(percent));
+        }
+    }
+
     pub(crate) fn stopping(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// After [`Engine::stop`]: the reader loop has ended its reader
+    /// processes (or never started any).
+    pub fn readers_stopped(&self) -> bool {
+        self.readers_gone.load(Ordering::SeqCst)
     }
 
     /// List every drive again now (or only `root`).
@@ -461,11 +620,33 @@ impl Engine {
         } else if s.shared_cache_unc.is_none() {
             s.shared_cache_unc = old.shared_cache_unc.clone();
         }
+        // The folder Sleuth chose for the copy of the office index stays
+        // chosen: a window that loaded its settings before the choice was
+        // made must not undo it (the copy would be deleted and made again).
+        if s.local_index_dir.as_deref().is_none_or(|d| d.trim().is_empty()) {
+            s.local_index_dir = old.local_index_dir.clone();
+        }
         s.save()?;
         *self.settings.write().unwrap() = s.clone();
         self.cache_signal.raise();
+        self.pool_signal.raise();
         if old.projects != s.projects {
             self.with_local(|l| l.set_projects(&s.projects))?;
+        }
+        // The copy of the office index was moved: what the old folder holds
+        // goes, once the pool has let go of it.
+        let folder = |d: &Option<String>| d.as_deref().map(str::trim).filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("off")).map(|d| d.trim_end_matches('\\').to_lowercase());
+        if folder(&old.local_index_dir) != folder(&s.local_index_dir)
+            && let Some(was) = old.local_index_dir.as_deref().map(str::trim).filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("off")).map(PathBuf::from)
+        {
+            let _ = std::thread::Builder::new().name("sleuth-tidy".into()).spawn(move || {
+                std::thread::sleep(Duration::from_secs(45));
+                for sub in ["office", "own"] {
+                    let _ = std::fs::remove_dir_all(was.join(sub));
+                }
+                // Only when nothing else is in it.
+                let _ = std::fs::remove_dir(&was);
+            });
         }
         if old.tag_rules != s.tag_rules || old.field_rules != s.field_rules || old.discipline_prefixes != s.discipline_prefixes {
             let d = Arc::new(Deriver::new(&s));
@@ -565,9 +746,13 @@ impl Engine {
     }
 
     pub fn status(&self) -> Result<(Status, Vec<Failed>)> {
+        let mut lap = Lap::new("status");
         let snap = self.counts.lock().unwrap().clone();
+        lap.at("counts");
         let mut st = self.status.lock().unwrap().clone();
+        lap.at("status");
         st.files_indexed = self.catalog.file_count();
+        lap.at("catalog");
         st.pdfs_read = snap.read;
         st.pdfs_waiting = snap.waiting;
         st.pdfs_failed = snap.failed;
@@ -595,7 +780,9 @@ impl Engine {
         let office = mine_per_hour + others as f64;
         st.office_docs_per_hour = office.round() as u64;
         st.reading_eta_secs = if snap.waiting > 0 && office >= 1.0 { (snap.waiting as f64 * 3600.0 / office) as u64 } else { 0 };
+        lap.at("pace");
         let (roots, last_complete, first_walk) = self.root_progress();
+        lap.at("roots");
         st.index.first_walk = first_walk;
         st.index.last_complete = last_complete;
         st.index.roots = roots;
@@ -608,7 +795,11 @@ impl Engine {
         st.speed = self.speed();
         st.speed_until = self.speed_until.load(Ordering::SeqCst);
         let cache = self.cache.lock().unwrap().clone();
+        lap.at("cache");
         let ps = self.pool.stats();
+        lap.at("pool");
+        let ms = self.pool.mirror_stats();
+        lap.at("mirror");
         st.store = StoreStatus {
             state: match cache.state {
                 CacheState::Ok => "ok",
@@ -624,9 +815,18 @@ impl Engine {
             bytes: ps.bytes,
             documents: ps.documents,
             unpublished: st.store.unpublished,
+            local_dir: ms.dir,
+            local_parts: ms.parts,
+            local_bytes: ms.bytes,
+            remote_parts: ms.remote_parts,
+            copy_parts: ms.pending_parts,
+            copy_bytes: ms.pending_bytes,
+            local_note: ms.note,
+            away: ms.away,
         };
         st.cache = cache;
         st.server = self.office.lock().unwrap().status.clone();
+        lap.at("office");
         Ok((st, snap.fails))
     }
 
@@ -634,9 +834,13 @@ impl Engine {
     /// all of them, and whether any root holding a reading folder has never
     /// been listed to the end.
     fn root_progress(&self) -> (Vec<IndexRoot>, i64, bool) {
+        let mut lap = Lap::new("status roots");
         let drives = self.drives.read().unwrap().clone();
+        lap.at("drives");
         let first_walk = !self.reading_roots_listed();
+        lap.at("reading_roots_listed");
         let roots = self.roots.lock().unwrap();
+        lap.at("roots lock");
         let mut out: Vec<IndexRoot> = Vec::new();
         let mut newest = 0i64;
         for r in roots.values() {
@@ -687,9 +891,16 @@ impl Engine {
                 self.event("warn", &format!("The office index folder is not usable: {}", c.message));
             }
             let changed = was != c.state;
+            if c.state == CacheState::Ok && self.last_store.lock().unwrap().as_deref() != Some(Path::new(&c.path)) {
+                *self.last_store.lock().unwrap() = Some(PathBuf::from(&c.path));
+                let _ = self.with_local(|l| l.set_meta("store_dir", &c.path));
+            }
             *self.cache.lock().unwrap() = c;
-            if changed {
+            if !self.cache_checked.swap(true, Ordering::SeqCst) || changed {
                 self.follow_signal.raise();
+                self.pool_signal.raise();
+            }
+            if changed {
                 self.reader_signal.raise();
                 if c_ok(&self.cache.lock().unwrap().state) {
                     self.event("info", "The office index folder is back; carrying on by itself");
@@ -978,6 +1189,23 @@ impl Engine {
     /// Ranked hits for `query` inside `roots` (empty = everywhere),
     /// remembered until the catalog or the pool changes.
     pub fn search_hits(&self, query: &str, roots: &[String]) -> Result<Arc<Vec<Hit>>> {
+        self.search_hits_with(query, roots, None)
+    }
+
+    /// Keep a search's rows until the catalog or the pool changes.
+    fn remember(&self, query: &str, roots: &[String], generation: (u64, u64), hits: &Arc<Vec<Hit>>) {
+        let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
+        let mut mem = self.results.lock().unwrap();
+        mem.retain(|(k, g, _)| *g == generation && *k != key);
+        mem.push_back((key, generation, Arc::clone(hits)));
+        while mem.len() > RESULT_MEMORY {
+            mem.pop_front();
+        }
+    }
+
+    /// [`Engine::search_hits`] that `cancel` can abandon; what an abandoned
+    /// search found is not everything and is not remembered.
+    fn search_hits_with(&self, query: &str, roots: &[String], cancel: Option<&AtomicBool>) -> Result<Arc<Vec<Hit>>> {
         let generation = self.generation();
         let key = format!("{query}\u{1}{}", roots.join("\u{2}"));
         if let Some((_, _, hits)) = self.results.lock().unwrap().iter().find(|(k, g, _)| *k == key && *g == generation) {
@@ -986,7 +1214,13 @@ impl Engine {
         let q = parse_search(query);
         let drives = self.drives.read().unwrap().clone();
         let roots: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();
-        let hits = Arc::new(search_index(&self.pool, &self.catalog, &q, &roots, RESULT_CAP, &drives)?);
+        // On a desktop the full pass takes its time on one thread: the quick
+        // pass has already answered.
+        let lim = if self.server_mode { Limits::full(cancel) } else { Limits::background(cancel) };
+        let hits = Arc::new(search_index_with(&self.pool, &self.catalog, &q, &roots, RESULT_CAP, &drives, &lim)?);
+        if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+            return Ok(hits);
+        }
         let mut mem = self.results.lock().unwrap();
         mem.retain(|(k, g, _)| *g == generation && *k != key);
         mem.push_back((key, generation, Arc::clone(&hits)));
@@ -1008,7 +1242,11 @@ impl Engine {
     /// One page of a search's rows, each with the other files of its
     /// document, and every row of the search.
     pub fn search_page(&self, query: &str, roots: &[String], offset: usize, limit: usize) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
-        let all = self.search_hits(query, roots)?;
+        self.search_page_with(query, roots, offset, limit, None)
+    }
+
+    fn search_page_with(&self, query: &str, roots: &[String], offset: usize, limit: usize, cancel: Option<&AtomicBool>) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
+        let all = self.search_hits_with(query, roots, cancel)?;
         let mut page: Vec<Hit> = all.iter().skip(offset).take(limit).cloned().collect();
         let drives = self.drives.read().unwrap().clone();
         attach_twins(&mut page, &self.pool, &self.catalog, &drives);
@@ -1022,24 +1260,22 @@ impl Engine {
         self.results.lock().unwrap().iter().any(|(k, g, _)| *k == key && *g == generation)
     }
 
-    /// The rows file names alone give, from the catalog in memory: shown
-    /// while the read documents in the office folder are searched.
-    fn names_first(&self, q: &SearchQuery, roots: &[String], limit: usize) -> Vec<Hit> {
-        let drives = self.drives.read().unwrap().clone();
-        let roots: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();
-        let mut hits = search_index(&Pool::new(), &self.catalog, q, &roots, limit, &drives).unwrap_or_default();
-        for h in &mut hits {
-            // Known to be read: say so, so the row does not look unread.
-            if let Some(c) = self.pool.covered(&h.path).filter(|c| c.state == state::READ) {
-                h.doc_id = Some(crate::pool::compose(c.slot, c.id));
-            }
-        }
-        hits
-    }
-
     /// Runs on a blocking thread; streams events to `tx`.
     #[allow(clippy::too_many_arguments)]
     pub fn search(&self, id: u64, query: &str, roots: &[String], project: Option<&str>, deep: bool, limit: usize, offset: usize, tx: &EventTx) -> Result<()> {
+        // The readers stand back while someone waits for an answer.
+        struct Searching<'a>(&'a Engine);
+        impl Drop for Searching<'_> {
+            fn drop(&mut self) {
+                if self.0.searching.fetch_sub(1, Ordering::SeqCst) == 1 {
+                    self.0.cap_readers(READER_CPU_CAP);
+                }
+            }
+        }
+        if self.searching.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.cap_readers(READER_CPU_CAP_SEARCHING);
+        }
+        let _searching = Searching(self);
         let started = Instant::now();
         let q = parse_search(query);
         if q.is_empty() {
@@ -1058,18 +1294,52 @@ impl Engine {
             let (query, project) = (query.to_string(), project.map(str::to_string));
             std::thread::spawn(move || c.search(&query, project.as_deref(), limit, offset))
         });
-        // File names answer from memory at once; the text inside the read
-        // documents follows and replaces these rows.
+        // Just started: the file lists on this PC load in a second or two.
+        // Waiting that long beats answering "nothing found".
+        let waited = Instant::now();
+        while !self.names_ready.load(Ordering::SeqCst) && waited.elapsed() < Duration::from_secs(8) && !self.stopping() && !cancel.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        // The quick pass: names and text, a limited number of rows from
+        // each part, with the whole processor for the fraction of a second it
+        // takes. For a tag or a number no part holds more than that, and this
+        // is the whole answer. For a common word it is the first screen, and
+        // the full search below replaces it (under the processor ceiling).
         if offset == 0 && !self.remembered(query, &roots) {
-            let names = self.names_first(&q, &roots, limit);
-            if !names.is_empty() && !cancel.load(Ordering::SeqCst) {
-                let _ = tx.send(Envelope { id, body: Event::Provisional { hits: names, millis: started.elapsed().as_millis() as u64 } });
+            let generation = self.generation();
+            let drives = self.drives.read().unwrap().clone();
+            let stored: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();
+            let lim = Limits::quick(Some(&cancel));
+            let quick = search_index_with(&self.pool, &self.catalog, &q, &stored, RESULT_CAP, &drives, &lim);
+            if let Ok(quick) = quick
+                && !cancel.load(Ordering::SeqCst)
+            {
+                if !lim.was_cut() {
+                    self.remember(query, &roots, generation, &Arc::new(quick));
+                } else if !quick.is_empty() {
+                    let hits: Vec<Hit> = quick.into_iter().take(limit).collect();
+                    let _ = tx.send(Envelope { id, body: Event::Provisional { hits, millis: started.elapsed().as_millis() as u64 } });
+                }
             }
         }
-        if offset == 0 && !self.pool_ready.load(Ordering::SeqCst) && self.store_dir().is_some() {
+        if offset == 0 && !self.pool_ready.load(Ordering::SeqCst) && self.index_dir().is_some() {
             let _ = tx.send(Envelope { id, body: Event::Notice { message: STILL_OPENING.into() } });
+        } else if offset == 0 {
+            let ms = self.pool.mirror_stats();
+            if ms.pending_parts > 0 {
+                let gb = ms.pending_bytes as f64 / (1u64 << 30) as f64;
+                let _ = tx.send(Envelope { id, body: Event::Notice { message: format!("The office index is being copied to this PC (once): {} part(s), {gb:.1} GB to go. Text inside documents is found in what has arrived; search again later for the rest.", ms.pending_parts) } });
+            } else if ms.away && ms.parts > 0 {
+                let _ = tx.send(Envelope { id, body: Event::Notice { message: "The office index folder is not reachable; text is searched in the copy on this PC.".into() } });
+            }
         }
-        let (page, all) = self.search_page(query, &roots, offset, limit)?;
+        let (page, all) = self.search_page_with(query, &roots, offset, limit, Some(&cancel))?;
+        if cancel.load(Ordering::SeqCst) {
+            // The user typed on: what was found so far is not the answer.
+            self.searches.lock().unwrap().remove(&id);
+            let _ = tx.send(Envelope { id, body: Event::Done { total: 0, millis: started.elapsed().as_millis() as u64, more: false } });
+            return Ok(());
+        }
         self.record_latency(started.elapsed().as_millis() as u64);
         let mut more = all.len() > offset + limit;
         let mut total = page.len();

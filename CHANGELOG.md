@@ -1,5 +1,57 @@
 # Changelog
 
+## 1.4.0
+
+Not released yet.
+
+- **Text inside documents answers in seconds again:** every PC keeps a copy
+  of the office index on its own disk and searches that, instead of reading
+  hundreds of files over the network for every word. On the office index of
+  23 November 2026 (409 parts, 66 GB) 1.3 had no text result seven minutes
+  after a start, and the window gave up asking after 72 seconds and showed
+  file names only. Sleuth picks the disk by itself (an SSD first, a second
+  disk before the Windows disk) and shows it in Settings > Office index
+  folder, where it can be moved. The first copy runs once in the background;
+  until it is done, text is found in what has arrived and the window says
+  how much is to come. A part that does not fit on the disk is searched over
+  the network as before, so nothing is ever left out.
+- **Still searching when the office folder is away:** the copy on the PC
+  answers while U: (or the office index folder) cannot be reached, and after
+  a start it is searched at once, before the folder has even been checked.
+- **An answer first, the rest behind it:** a search first takes a limited
+  number of rows from every part and every file list, on all cores, for a
+  fraction of a second. For a tag or a number that is the whole answer. For a
+  common word it is the first screen, and the full search follows on one
+  thread that works half the time. A search abandoned by typing on stops.
+- **File names a second after a start:** names used to wait until the whole
+  office index had been opened; they are kept by a thread of their own now.
+  A search typed in the first second waits for them instead of answering
+  "nothing found".
+- **The Monitor shows the office again:** the Monitor page counted pages and
+  tags in the whole office index, over the network, each time it refreshed,
+  and stayed empty while that ran. It answers at once with the last figures,
+  works new ones out behind it, and keeps each part's figures. A new card
+  shows the copy searched on this PC.
+- **A fixed, small share of the PC:** on a desktop the reader processes
+  together never use more than 8 % of the whole processor or 2 GB of memory
+  (a ceiling Windows itself keeps), and 1 % while a search runs; at most one
+  OCR reader and two text readers run, in every mode. Sleuth's own background
+  work runs on one thread at a time. The office server is not limited and
+  carries the bulk of the reading. Pause stops readers at once; a document a
+  reader was stopped on is read again later.
+- **Exit means exit:** "Exit Sleuth" in the tray ends the window, the reader
+  in the background and every reader process within a few seconds, whatever
+  they are doing; anything that does not answer is ended by force. A reader
+  process also ends by itself when the worker that started it is gone.
+- **Small parts are merged again:** one line whose position on the page had
+  been saved as "not a number" made every merge that touched it fail (141
+  times on one PC), so the office index grew to hundreds of small parts, and
+  made searches of that part fail. Such a line now reads as position 0.
+
+For IT: `local_index_dir` in `settings.json` is the folder of the copy
+(`"off"` searches the network folder as 1.3 did). The copy needs about as
+much room as the office index; 8 GB always stay free on its disk.
+
 ## Unreleased
 
 - **Dexterity Connect** (the office messenger): right-click a result → *Share to Dexterity Connect…*

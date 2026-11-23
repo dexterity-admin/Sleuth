@@ -429,38 +429,48 @@ fn tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Exit from the tray: the reader in the background stops too (it is
-/// started again with Sleuth, or at sign-in when "keep reading" is on).
+/// Exit from the tray: everything of Sleuth on this PC stops, within a few
+/// seconds, whatever it is doing. (It is started again with Sleuth, or at
+/// sign-in when "keep reading" is on.)
 fn exit_all(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let worker = app.state::<Worker>();
         worker.exiting.store(true, Ordering::SeqCst);
         // Not started again by the connection loop while it stops.
         worker.updating.store(true, Ordering::SeqCst);
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.hide();
+        }
         let id = worker.next_id();
         if worker.send(id, json!({"req": "shutdown"})).is_ok() {
-            // Let it finish its current write and release its files.
-            for _ in 0..30 {
+            // It ends its readers and itself; the pipe closing says it has.
+            for _ in 0..25 {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 if worker.tx.lock().unwrap().is_none() {
                     break;
                 }
             }
-        } else {
-            // Not connected: a reader may still run on its own; stop it by name.
-            stop_worker_process();
         }
+        // Whatever is left (a reader that did not answer, one that was still
+        // starting, a reader process outside its job) is ended by force.
+        let _ = tauri::async_runtime::spawn_blocking(stop_worker_processes).await;
+        // Should the window's own shutdown hang, this process still goes.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(4));
+            std::process::exit(0);
+        });
         app.exit(0);
     });
 }
 
-/// The reader started from this install, if it runs without a connection.
-fn stop_worker_process() {
+/// End every `sleuth-worker.exe` of this user (the worker and its reader
+/// processes) and what they started, by force.
+fn stop_worker_processes() {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = worker_exe();
     let name = exe.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "sleuth-worker.exe".into());
-    let _ = std::process::Command::new("taskkill").args(["/IM", &name, "/FI", &format!("USERNAME eq {}", std::env::var("USERNAME").unwrap_or_default())]).creation_flags(CREATE_NO_WINDOW).status();
+    let _ = std::process::Command::new("taskkill").args(["/F", "/T", "/IM", &name, "/FI", &format!("USERNAME eq {}", std::env::var("USERNAME").unwrap_or_default())]).creation_flags(CREATE_NO_WINDOW).status();
 }
 
 /// "Read folders that need administrator rights": restart the reader with

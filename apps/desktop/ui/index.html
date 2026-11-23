@@ -346,6 +346,10 @@
       <p class="hint">The one folder, shared by every PC, that holds the office index: the list of files on every network drive and the text read from documents, so each document is read once for the whole office and nothing large is kept on this PC. Use the office folder <b>U:\Sleuth-cache</b>, or another folder on a network drive that all teammates can write to.</p>
       <div class="row-inline"><input id="s-cache" type="text" placeholder="U:\Sleuth-cache"><button type="button" id="s-cacheTest" class="small">Test</button><button type="button" id="s-cachePick" class="small">Browse</button><button type="button" id="s-cacheChange" class="small" hidden>Change…</button></div>
       <p id="s-cacheState" class="hint"></p>
+      <h3>Copy of the office index on this PC</h3>
+      <p class="hint">Searches read a copy of the office index kept on this PC's own disk, which is what makes text inside documents answer in a second instead of minutes, and keeps it working while the office folder is away. Sleuth picks the disk by itself (an SSD first) and keeps the copy up to date; it needs about as much room as the office index. To move it, choose another folder on a local disk; the copy is made again there and the old one deleted.</p>
+      <div class="row-inline"><input id="s-local" type="text" placeholder="chosen by Sleuth"><button type="button" id="s-localPick" class="small">Browse</button></div>
+      <p id="s-localState" class="hint"></p>
       <p class="hint">A drive letter such as U: is fine. On a PC where that letter is not mapped or does not answer, Sleuth uses the same folder by its network path (\\server\share\…) by itself.</p>
     </section>
     <section id="serverSection">

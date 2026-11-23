@@ -1140,6 +1140,21 @@ impl Matcher for PathText {
     }
 }
 
+thread_local! {
+    /// Threads the scans started from this thread may use (0: every core).
+    static SCAN_THREADS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Run `f` with every name scan it starts held to `threads` threads
+/// (0: every core): a search's first pass may use the whole processor for a
+/// moment, the work behind it may not.
+pub fn with_scan_threads<R>(threads: usize, f: impl FnOnce() -> R) -> R {
+    let before = SCAN_THREADS.replace(threads);
+    let r = f();
+    SCAN_THREADS.set(before);
+    r
+}
+
 /// One match of a scan: enough to sort it and to read the file back.
 struct Hit {
     grp: u8,
@@ -1431,7 +1446,11 @@ impl Catalog {
             }
             out
         };
-        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 16).min(jobs.len());
+        let most = match SCAN_THREADS.get() {
+            0 => 16,
+            n => n,
+        };
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, most).min(jobs.len());
         let mut found: Vec<Hit> = if threads <= 1 {
             work()
         } else {

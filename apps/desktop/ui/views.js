@@ -616,6 +616,7 @@ function renderOffice(m) {
       statCard("Waiting to be published", fmtNum(st.unpublished), `new reading${Number(st.unpublished) === 1 ? "" : "s"} on this PC waiting to be published`),
     );
     if (m.local_bytes !== undefined) g.append(statCard("Kept on this PC's disk", fmtSize(m.local_bytes), "settings and readings not yet published"));
+    if (st.local_dir !== undefined) g.append(statCard("Copy searched on this PC", st.local_dir ? fmtSize(st.local_bytes) : "off", localCopyText(st)));
     monOffice.append(g);
   }
   if (m.office_waiting !== undefined) monOffice.append(officeProgress(m));

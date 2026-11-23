@@ -47,6 +47,57 @@ impl ProcessGroup {
         Ok(ProcessGroup {})
     }
 
+    /// A job for this process itself and everything it starts, with no
+    /// kill-on-close: used only to put a ceiling on the whole of Sleuth's
+    /// processor use ([`ProcessGroup::set_cpu_cap`]). The handle is kept for
+    /// the life of the process.
+    pub fn around_this_process() -> Result<ProcessGroup> {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::Threading::GetCurrentProcess;
+            let group = ProcessGroup { job: CreateJobObjectW(None, windows::core::PCWSTR::null())? };
+            AssignProcessToJobObject(group.job, GetCurrentProcess())?;
+            Ok(group)
+        }
+        #[cfg(not(windows))]
+        Ok(ProcessGroup {})
+    }
+
+    /// Never let the group's processes together use more than `percent` of
+    /// the PC's whole processor (all cores): a hard ceiling kept by Windows
+    /// itself, whatever the processes try to do. `None` lifts it.
+    pub fn set_cpu_cap(&self, percent: Option<u32>) -> Result<()> {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::JobObjects::{JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP, JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JobObjectCpuRateControlInformation};
+            let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+            if let Some(p) = percent {
+                info.ControlFlags = JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP;
+                // In hundredths of a percent of all processors.
+                info.Anonymous.CpuRate = p.clamp(1, 100) * 100;
+            }
+            SetInformationJobObject(self.job, JobObjectCpuRateControlInformation, &info as *const _ as *const core::ffi::c_void, std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32)?;
+        }
+        let _ = percent;
+        Ok(())
+    }
+
+    /// Never let the group's processes together commit more than `mb` of
+    /// memory (a reader that asks for more fails on its document, which is
+    /// then tried again later). Keeps the kill-on-close of [`ProcessGroup::new`].
+    pub fn set_memory_cap(&self, mb: u64) -> Result<()> {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::System::JobObjects::JOB_OBJECT_LIMIT_JOB_MEMORY;
+            let mut info = self.query::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(JobObjectExtendedLimitInformation).unwrap_or_default();
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_JOB_MEMORY;
+            info.JobMemoryLimit = (mb as usize) << 20;
+            SetInformationJobObject(self.job, JobObjectExtendedLimitInformation, &info as *const _ as *const core::ffi::c_void, std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32)?;
+        }
+        let _ = mb;
+        Ok(())
+    }
+
     /// Cumulative user + kernel time of all processes ever in the group, 100 ns units.
     pub fn cpu_100ns(&self) -> u64 {
         #[cfg(windows)]

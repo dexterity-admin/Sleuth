@@ -96,6 +96,57 @@ are stored as data and never change a model.
 - Results are remembered until the index changes, paged 500 at a time, and search
   times are recorded (p50/p95 on the Monitor page).
 
+## The copy of the office index on each PC (1.4)
+
+The office index is a folder of write-once SQLite files ("parts") on the
+shared drive. Searching them there meant hundreds of small random reads over
+the network for every word typed, and opening them all after a start took
+longer than people wait (409 parts, 66 GB on 23 Nov 2026: no text result
+seven minutes after a start). Since 1.4 every PC keeps a copy:
+
+- **Where**: `local_index_dir` in the settings. Empty, Sleuth picks a local
+  disk once and remembers it: an SSD before a hard disk, a disk with 100 GB
+  free before a fuller one, a second disk before the Windows disk
+  (`<disk>:\Sleuth-index`, or `%LOCALAPPDATA%\Sleuth\index` on the Windows
+  disk). `"off"` searches the network folder as before.
+- **How**: a part never changes, so a copy of the same size that opens as a
+  part is the part. Two threads copy what is missing, newest first, through a
+  temporary name; 8 GB always stay free on the disk. A part that cannot be
+  copied (no room, three failed tries) is searched over the network, so no
+  document is ever missing from a search because of the copy. A copy that
+  fails because the shared folder went away is not counted as a failure.
+- **Start**: the copies are opened straight away, before the shared folder is
+  even checked.
+- **Shared folder away**: the copy keeps answering; the status says so.
+- **Upkeep**: copies of parts the office merged away are deleted; a copy that
+  fails while being searched is thrown away and copied again.
+- File lists and the parts pool are kept by separate threads, so names are
+  searchable a second or two after a start whatever the index is doing.
+
+## Searching in two passes (1.4)
+
+The quick pass takes at most 150 rows per term from each part and each file
+list, on every core; it sets a flag when any query reached its limit. When
+none did (a tag, a number), its rows are the whole answer and are remembered
+as such. Otherwise they are sent as provisional rows and the full pass
+(2,000 rows per term and part) replaces them, on one thread that sleeps as
+long as it worked. The full pass checks a cancel flag between parts.
+
+## Sleuth's share of a desktop (1.4)
+
+- Reader processes sit in one Windows job object with a hard ceiling of 8 %
+  of the whole processor and 2 GB of committed memory; 1 % while a search
+  runs. At most one OCR reader and two text readers, in every speed mode.
+- A ceiling on the worker process as a whole was tried and removed: once the
+  readers had used the share, Windows held back the threads that answer the
+  window too, and a request waited over a minute.
+- The worker's own long jobs (merging, the full pass of a search) run on one
+  thread at half time. The office server is not limited.
+- Readers end with the worker (job object), and each also watches the
+  worker's process and ends itself when it is gone. **Exit Sleuth** asks the
+  worker to stop, which ends its readers and then itself without running
+  exit handlers; whatever is left after five seconds is ended by force.
+
 ## Index safety and upgrades
 
 - One SQLite database in WAL mode with transactional writes. Schema changes are

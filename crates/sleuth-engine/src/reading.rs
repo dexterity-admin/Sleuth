@@ -305,6 +305,13 @@ impl Engine {
         crate::sys::enter_background_mode();
         let built = (|| -> Result<Coordinator> {
             let group = Arc::new(ProcessGroup::new()?);
+            if !self.server_mode {
+                // Kept by Windows, whatever the readers do.
+                if let Err(e) = group.set_cpu_cap(Some(crate::service::READER_CPU_CAP)).and_then(|_| group.set_memory_cap(crate::service::READER_MEMORY_CAP_MB)) {
+                    warn!("the readers' processor and memory limits could not be set: {e:#}");
+                }
+                *self.reader_group.lock().unwrap() = Some(Arc::clone(&group));
+            }
             let mut workers: Workers<Job, Outcome> = Workers::new(Arc::clone(&group));
             for lane in [Lane::Fast, Lane::Ocr] {
                 workers.add_lane(lane.name(), self.lane_spawn(lane), self.lane_init(lane));
@@ -327,6 +334,7 @@ impl Engine {
                 warn!("the reader cannot start: {e:#}");
                 self.set_reader_state("stopped", None);
                 self.set_reader_note(&format!("Reading could not start: {e:#}"));
+                self.readers_gone.store(true, Ordering::SeqCst);
                 return;
             }
         };
@@ -337,9 +345,12 @@ impl Engine {
                 self.reader_signal.wait(Duration::from_secs(5));
             }
         }
-        // Stopping: give back what is in progress, publish what is done.
+        // Stopping: the readers end now. What they finished stays in
+        // `work.db` on this PC and is published after the next start:
+        // publishing here wrote to the file server while Sleuth was meant to
+        // be gone, and kept it alive when the server was slow.
         c.workers.shutdown();
-        self.publish(&mut c);
+        self.readers_gone.store(true, Ordering::SeqCst);
     }
 
     /// One turn of the loop: decide how many readers run, feed them, save
@@ -410,13 +421,40 @@ impl Engine {
             },
             Instant::now(),
         );
+        // A desktop never runs more readers than its share of the processor
+        // can keep busy, in any mode and whether or not someone is there.
+        if !self.server_mode {
+            let (ocr, fast) = (crate::service::DESKTOP_OCR_READERS, crate::service::DESKTOP_TEXT_READERS);
+            if t.ocr > ocr || t.fast > fast {
+                t.note = format!("Reading in the background on at most {} % of this PC's processor.", crate::service::READER_CPU_CAP);
+            }
+            t.ocr = t.ocr.min(ocr);
+            t.fast = t.fast.min(fast);
+        }
         // A file someone asked for is read even when reading is paused.
         if urgent {
             t.fast = t.fast.max(1);
             t.ocr = t.ocr.max(1);
         }
-        c.workers.set_target(Lane::Fast.name(), t.fast);
-        c.workers.set_target(Lane::Ocr.name(), t.ocr);
+        for (lane, n) in [(Lane::Fast, t.fast), (Lane::Ocr, t.ocr)] {
+            if !t.cut {
+                c.workers.set_target(lane.name(), n);
+                continue;
+            }
+            // Someone is at the PC (or reading was paused): readers beyond
+            // the minimum stop now. What they were on is read again later,
+            // ahead of the rest of the backlog.
+            for job in c.workers.cut_to(lane.name(), n) {
+                c.flights.remove(&path_key(&job.path));
+                if job.urgent {
+                    self.urgent.lock().unwrap().push_front(job);
+                } else {
+                    let mut q = self.queue.lock().unwrap();
+                    let list = if lane == Lane::Ocr { &mut q.ocr } else { &mut q.fast };
+                    list.push_front(Item { path: job.path, size: job.size, mtime: job.mtime });
+                }
+            }
+        }
         self.feed(c, backlog_allowed);
         let events = c.workers.poll(Duration::from_millis(400));
         let idle = events.is_empty() && c.flights.is_empty();
@@ -653,11 +691,16 @@ impl Engine {
                 continue;
             }
             match pool::publish(&work.store, dir, &self.pc) {
-                Ok(Some(_)) => {
+                Ok(Some(part)) => {
                     // The part is opened before the copy here is emptied, so
                     // no search ever misses these documents.
                     self.pool.set_dirs(vec![office_dir.clone(), own_dir.clone()]);
-                    self.pool.refresh();
+                    if let Err(e) = self.pool.adopt(&part) {
+                        // It is in the office index all the same; the pool
+                        // opens it at its next look.
+                        warn!("{}: {e:#}", part.display());
+                    }
+                    self.pool_signal.raise();
                     if let Err(e) = work.store.clear_readings() {
                         warn!("could not empty {}: {e:#}", work.path.display());
                     }
@@ -772,7 +815,15 @@ impl Engine {
         let spawned = std::thread::Builder::new().name("sleuth-merge".into()).spawn(move || {
             crate::sys::enter_background_mode();
             let lease = std::sync::Mutex::new((lease, Instant::now()));
+            let pace = std::sync::Mutex::new(Instant::now());
             let keep_going = || {
+                // On a desktop a merge works half the time: it is one thread
+                // of plain processor work that can run for minutes.
+                if !e.server_mode {
+                    let mut last = pace.lock().unwrap();
+                    std::thread::sleep(last.elapsed().min(Duration::from_secs(2)));
+                    *last = Instant::now();
+                }
                 let mut g = lease.lock().unwrap();
                 if g.1.elapsed() > Duration::from_secs(60) {
                     g.1 = Instant::now();
@@ -791,7 +842,10 @@ impl Engine {
                 }
             }
             match pool::merge(&sources, &|slot, id| !e.pool.is_superseded(slot, id), &dir, &build, &e.pc, &deriver, &keep_going) {
-                Ok(Some(_)) => {
+                Ok(Some(part)) => {
+                    if let Err(err) = e.pool.adopt(&part) {
+                        warn!("{}: {err:#}", part.display());
+                    }
                     e.pool.refresh();
                     e.pool.recover(&|p| e.presence(p));
                     e.event("info", &format!("{} small parts of the office index were merged into one", sources.len()));

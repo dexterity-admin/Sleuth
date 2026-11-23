@@ -14,6 +14,7 @@ use sleuth_core::analyzer::norm_form;
 use sleuth_core::protocol::*;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -334,19 +335,30 @@ impl Engine {
         Ok(Event::Ok)
     }
 
-    pub fn monitor(&self) -> Result<Monitor> {
+    pub fn monitor(self: &Arc<Self>) -> Result<Monitor> {
         let (status, _) = self.status()?;
-        // The sums over every part are worked out at most twice a minute.
+        // The sums over every part take a while (they count pages and tags
+        // in the whole office index): the page gets the last ones at once,
+        // and new ones are worked out behind it. Working them out inside the
+        // request kept the Monitor page empty for as long as that took.
         let generation = self.pool.generation();
-        let memo = self.monitor_memo.lock().unwrap().as_ref().filter(|(g, at, _)| *g == generation && at.elapsed() < Duration::from_secs(30)).map(|(_, _, m)| m.clone());
-        let mut m = match memo {
-            Some(m) => m,
-            None => {
-                let m = Box::new(self.monitor_sums());
-                *self.monitor_memo.lock().unwrap() = Some((generation, Instant::now(), m.clone()));
-                m
+        let memo = self.monitor_memo.lock().unwrap().as_ref().map(|(g, at, m)| (*g, *at, m.clone()));
+        let stale = memo.as_ref().is_none_or(|(g, at, _)| *g != generation && at.elapsed() > Duration::from_secs(30));
+        if stale && !self.sums_busy.swap(true, Ordering::SeqCst) {
+            let e = Arc::clone(self);
+            let spawned = std::thread::Builder::new().name("sleuth-sums".into()).spawn(move || {
+                crate::sys::enter_background_mode();
+                let generation = e.pool.generation();
+                let m = Box::new(e.monitor_sums());
+                *e.monitor_memo.lock().unwrap() = Some((generation, Instant::now(), m));
+                e.sums_busy.store(false, Ordering::SeqCst);
+            });
+            if spawned.is_err() {
+                self.sums_busy.store(false, Ordering::SeqCst);
             }
-        };
+        }
+        let mut m = memo.map(|(_, _, m)| m).unwrap_or_default();
+        let mut lap = crate::service::Lap::new("monitor");
         let (p50, p95) = {
             let mut l: Vec<u64> = self.latencies.lock().unwrap().iter().copied().collect();
             l.sort_unstable();
@@ -367,8 +379,10 @@ impl Engine {
         office_rate = office_rate.max(arrived);
         let waiting = status.pdfs_waiting;
         let eta = |rate: u64| if rate > 0 && waiting > 0 { waiting * 3600 / rate } else { 0 };
+        lap.at("pace");
         m.db_bytes = status.store.bytes;
         m.local_bytes = dir_bytes(&self.data);
+        lap.at("dir_bytes");
         m.office_waiting = waiting;
         m.office_docs_per_hour = office_rate;
         m.office_pages_per_hour = office_pages;
@@ -386,6 +400,7 @@ impl Engine {
         m.searches = self.searches_total.load(Ordering::Relaxed);
         m.roots = status.index.roots.iter().map(|r| (r.root.clone(), r.state.clone(), r.last_ok, r.note.clone())).collect();
         m.events = self.with_local(|s| s.events(60)).unwrap_or_default();
+        lap.at("events");
         m.rule_errors = errors;
         m.backend_note = self.backend_note.lock().unwrap().clone();
         m.change_journal = self.journal_note.lock().unwrap().clone();
@@ -394,49 +409,63 @@ impl Engine {
         Ok(*m)
     }
 
-    /// What the monitor adds up over every part.
+    /// What the monitor adds up over every part. A published part never
+    /// changes, so its sums are worked out once and kept for as long as the
+    /// same readings of it are current.
     fn monitor_sums(&self) -> Monitor {
-        #[derive(Default)]
-        struct Sums {
-            by_class: Vec<(String, u64)>,
-            ocr_pages: u64,
-            ocr_ms: u64,
-            tag_norms: Vec<String>,
-            occurrences: u64,
-            with_metadata: u64,
-            corrections: u64,
-        }
-        let per_part = self.pool.each(|_, s| {
+        use std::hash::{Hash, Hasher};
+        let known = self.part_sums.lock().unwrap().clone();
+        let per_part = self.pool.each(|part, s| {
+            let sig = part.hidden_sig();
+            if !part.work
+                && let Some((at, sums)) = known.get(&part.name)
+                && *at == sig
+            {
+                return Ok((sig, Arc::clone(sums)));
+            }
             let one = |sql: &str| -> u64 { s.conn.query_row(sql, [], |r| r.get::<_, Option<i64>>(0)).ok().flatten().unwrap_or(0) as u64 };
             let by_class: Vec<(String, u64)> = {
                 let mut st = s.conn.prepare("SELECT p.class, COUNT(*) FROM pages p JOIN files f ON f.id=p.file_id WHERE f.read_state=2 GROUP BY p.class")?;
                 st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<rusqlite::Result<_>>()?
             };
-            let tag_norms: Vec<String> = {
+            // Tags are counted once over all parts: by a hash of each, which
+            // takes a fraction of the memory the tags themselves would.
+            let tag_norms: Vec<u64> = {
                 let mut st = s.conn.prepare("SELECT DISTINCT t.norm FROM tag_occurrences o JOIN engineering_tags t ON t.id=o.tag_id JOIN files f ON f.id=o.file_id")?;
-                st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+                st.query_map([], |r| {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    r.get_ref(0)?.as_str().unwrap_or("").hash(&mut h);
+                    Ok(h.finish())
+                })?
+                .collect::<rusqlite::Result<_>>()?
             };
-            Ok(Sums {
-                by_class,
-                ocr_pages: one("SELECT COUNT(*) FROM pages p JOIN files f ON f.id=p.file_id WHERE p.ocr_tiles>p.ocr_skipped"),
-                ocr_ms: one("SELECT SUM(p.ocr_ms) FROM pages p JOIN files f ON f.id=p.file_id WHERE p.ocr_tiles>p.ocr_skipped"),
-                tag_norms,
-                occurrences: one("SELECT COUNT(*) FROM tag_occurrences o JOIN files f ON f.id=o.file_id"),
-                with_metadata: one("SELECT COUNT(*) FROM drawing_metadata m JOIN files f ON f.id=m.file_id WHERE m.drawing_no IS NOT NULL"),
-                corrections: one("SELECT COUNT(*) FROM corrections c JOIN files f ON f.id=c.file_id WHERE c.stale=0"),
-            })
+            Ok((
+                sig,
+                Arc::new(PartSums {
+                    by_class,
+                    ocr_pages: one("SELECT COUNT(*) FROM pages p JOIN files f ON f.id=p.file_id WHERE p.ocr_tiles>p.ocr_skipped"),
+                    ocr_ms: one("SELECT SUM(p.ocr_ms) FROM pages p JOIN files f ON f.id=p.file_id WHERE p.ocr_tiles>p.ocr_skipped"),
+                    tag_norms,
+                    occurrences: one("SELECT COUNT(*) FROM tag_occurrences o JOIN files f ON f.id=o.file_id"),
+                    with_metadata: one("SELECT COUNT(*) FROM drawing_metadata m JOIN files f ON f.id=m.file_id WHERE m.drawing_no IS NOT NULL"),
+                    corrections: one("SELECT COUNT(*) FROM corrections c JOIN files f ON f.id=c.file_id WHERE c.stale=0"),
+                }),
+            ))
         });
+        // Kept for the parts that are still there; this PC's unpublished
+        // readings change all the time and are counted afresh.
+        *self.part_sums.lock().unwrap() = per_part.iter().filter(|(p, _)| !p.work).map(|(p, (sig, sums))| (p.name.clone(), (*sig, Arc::clone(sums)))).collect();
         let mut m = Monitor::default();
         let mut classes: HashMap<String, u64> = HashMap::new();
-        let mut norms: HashSet<String> = HashSet::new();
+        let mut norms: HashSet<u64> = HashSet::new();
         let (mut ocr_pages, mut ocr_ms) = (0u64, 0u64);
-        for (_, s) in per_part {
-            for (c, n) in s.by_class {
-                *classes.entry(c).or_default() += n;
+        for (_, (_, s)) in per_part {
+            for (c, n) in &s.by_class {
+                *classes.entry(c.clone()).or_default() += n;
             }
             ocr_pages += s.ocr_pages;
             ocr_ms += s.ocr_ms;
-            norms.extend(s.tag_norms);
+            norms.extend(s.tag_norms.iter().copied());
             m.tag_occurrences += s.occurrences;
             m.drawings_with_metadata += s.with_metadata;
             m.corrections += s.corrections;
@@ -509,4 +538,16 @@ fn dir_bytes(dir: &std::path::Path) -> u64 {
             Err(_) => 0,
         })
         .sum()
+}
+
+/// What the monitor adds up, for one part.
+pub(crate) struct PartSums {
+    by_class: Vec<(String, u64)>,
+    ocr_pages: u64,
+    ocr_ms: u64,
+    /// A hash of every tag found in the part.
+    tag_norms: Vec<u64>,
+    occurrences: u64,
+    with_metadata: u64,
+    corrections: u64,
 }

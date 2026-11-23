@@ -32,6 +32,64 @@ use std::collections::{HashMap, HashSet};
 /// Rows fetched per term (and per part) before grouping; bounded so a very
 /// common word cannot make a search slow.
 const PER_TERM: usize = 2000;
+/// Rows per term (and per part) of the quick first pass. A tag or a number
+/// has fewer matches than this in any part, so the quick pass is then the
+/// whole answer; only a common word is cut short and searched again in full.
+const QUICK_PER_TERM: usize = 150;
+
+/// How far one search goes, and whether it had to stop short of everything.
+pub struct Limits<'a> {
+    per_term: usize,
+    /// Threads used over the parts.
+    threads: usize,
+    /// Set by the caller to abandon the search (the user typed on).
+    cancel: Option<&'a std::sync::atomic::AtomicBool>,
+    cut: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> Limits<'a> {
+    /// Everything, up to [`PER_TERM`] rows per term and part.
+    pub fn full(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
+        Limits { per_term: PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Everything, on one thread that works half the time: for the full
+    /// pass on a desktop, after the quick pass has answered.
+    pub fn background(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
+        Limits { threads: 1, ..Limits::full(cancel) }
+    }
+
+    /// The quick first pass.
+    pub fn quick(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
+        Limits { per_term: QUICK_PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Some query reached its limit: a fuller search may find more or better.
+    pub fn was_cut(&self) -> bool {
+        self.cut.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn note_cut(&self, cut: bool) {
+        if cut {
+            self.cut.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Run a scan of the file names within these limits: on every core for
+    /// the quick pass, on one thread that works half the time behind it.
+    fn names<R>(&self, f: impl FnOnce() -> R) -> R {
+        if self.threads != 1 {
+            return f();
+        }
+        let _pace = crate::sys::HalfTime::start();
+        sleuth_office::with_scan_threads(1, f)
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
 /// Other files of the same document listed on one row.
 const MAX_TWINS: usize = 8;
 
@@ -70,6 +128,12 @@ fn name_scope(scope: &Scope) -> NameScope {
 /// those folders (network paths or drive letters). Returns the ranked rows
 /// (at most `cap`).
 pub fn search_index(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots: &[String], cap: usize, drives: &DriveMap) -> Result<Vec<Hit>> {
+    search_index_with(pool, catalog, q, roots, cap, drives, &Limits::full(None))
+}
+
+/// [`search_index`] within `lim`: the quick first pass, or a search that
+/// can be abandoned.
+pub fn search_index_with(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots: &[String], cap: usize, drives: &DriveMap, lim: &Limits) -> Result<Vec<Hit>> {
     let mut scope = Scope { roots: roots.iter().map(|r| drives.to_unc(r)).collect(), ..Default::default() };
     scope.ext = q.filters.ext.clone();
     scope.rev = q.filters.rev.clone();
@@ -83,16 +147,18 @@ pub fn search_index(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots: &[St
         if q.filters.is_empty() {
             return Ok(Vec::new());
         }
+        // Filters select among everything: never the quick answer alone.
+        lim.note_cut(true);
         best = filters_only(pool, catalog, q, &scope, cap);
     }
     for g in &groups {
-        let mut found = search_group(pool, catalog, g, &scope, q.filters.tag_type.as_deref());
+        let mut found = search_group(pool, catalog, g, &scope, q.filters.tag_type.as_deref(), lim);
         // "FV 2201" is one tag typed with a space. When the words find
         // nothing together, search the whole group as one term.
         if found.is_empty() && g.len() > 1 {
             let joined: String = g.iter().map(|t| t.raw.as_str()).collect::<Vec<_>>().join(" ");
             if let Some(whole) = Term::new(&joined) {
-                found = search_group(pool, catalog, std::slice::from_ref(&whole), &scope, q.filters.tag_type.as_deref());
+                found = search_group(pool, catalog, std::slice::from_ref(&whole), &scope, q.filters.tag_type.as_deref(), lim);
             }
         }
         for (key, (c, n, doc)) in found {
@@ -276,7 +342,7 @@ fn resolve(s: &Store, cands: Vec<Candidate>) -> Result<Vec<(Candidate, FileRow)>
 
 /// Everything matching one term: lines (or tags of `category`) in read
 /// documents, and file names.
-fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, category: Option<&str>) -> Vec<(Candidate, Doc)> {
+fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, category: Option<&str>, lim: &Limits) -> Vec<(Candidate, Doc)> {
     let mut out: Vec<(Candidate, Doc)> = Vec::new();
     let in_text = match category {
         // `_` alone is never part of a tag.
@@ -286,10 +352,24 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
         None => !(t.is_path() || t.is_punctuation()),
     };
     if in_text {
-        let found = pool.each(|_, s| {
+        let found = pool.each_on(lim.threads, |_, s| {
+            if lim.cancelled() {
+                return Ok(Vec::new());
+            }
+            // One thread, busy half the time: under a sixteenth of an
+            // 8-core processor, however common the word.
+            let _pace = (lim.threads == 1).then(crate::sys::HalfTime::start);
             let cands = match category {
-                Some(cat) => s.search_tags(t, cat, scope, PER_TERM)?,
-                None => s.search_lines(t, scope, PER_TERM)?,
+                Some(cat) => {
+                    let c = s.search_tags(t, cat, scope, lim.per_term)?;
+                    lim.note_cut(c.len() >= lim.per_term);
+                    c
+                }
+                None => {
+                    let (c, cut) = s.search_lines_cut(t, scope, lim.per_term)?;
+                    lim.note_cut(cut);
+                    c
+                }
             };
             resolve(s, cands)
         });
@@ -298,46 +378,60 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
         }
     }
     if category.is_none() {
-        out.extend(name_matches(pool, catalog, t, scope));
+        out.extend(name_matches(pool, catalog, t, scope, lim));
     }
     out
 }
 
 /// Files whose name (or path, for a term with `\`) matches one term.
-fn name_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope) -> Vec<(Candidate, Doc)> {
+fn name_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, lim: &Limits) -> Vec<(Candidate, Doc)> {
+    let per_term = lim.per_term;
     if meta_scope(scope) {
         // Title-block filters only know read documents.
-        let found = pool.each(|_, s| resolve(s, s.search_names(t, scope, PER_TERM)?));
+        lim.note_cut(true);
+        let found = pool.each(|_, s| resolve(s, s.search_names(t, scope, per_term)?));
         return found.into_iter().flat_map(|(part, rows)| rows.into_iter().map(move |(c, f)| (c, Doc::read(f, part.slot)))).collect();
     }
     let ns = name_scope(scope);
-    let rows = if t.is_path() {
-        // Up to the first wildcard; the term itself decides after that.
-        catalog.candidates_path(t.raw.split(['*', '?']).next().unwrap_or(""), &ns, PER_TERM * 4)
-    } else {
-        catalog.candidates(t, &ns, PER_TERM * 4)
-    };
+    if lim.cancelled() {
+        return Vec::new();
+    }
+    let rows = lim.names(|| {
+        if t.is_path() {
+            // Up to the first wildcard; the term itself decides after that.
+            catalog.candidates_path(t.raw.split(['*', '?']).next().unwrap_or(""), &ns, per_term * 4)
+        } else {
+            catalog.candidates(t, &ns, per_term * 4)
+        }
+    });
+    lim.note_cut(rows.len() >= per_term * 4);
     let mut found: Vec<(bool, Candidate, Doc)> = rows.into_iter().filter_map(|f| name_candidate(t, 0, &f.name, &f.path).map(|(whole, c)| (whole, c, Doc::named(f)))).collect();
     found.sort_by_key(|(whole, c, _)| (c.class, !*whole));
-    found.truncate(PER_TERM);
+    found.truncate(per_term);
     found.into_iter().map(|(_, c, d)| (c, d)).collect()
 }
 
 /// Files where every term is in the name or the folder path.
-fn names_all(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope) -> Vec<(Candidate, Doc)> {
+fn names_all(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, lim: &Limits) -> Vec<(Candidate, Doc)> {
+    let per_term = lim.per_term;
     if meta_scope(scope) {
-        let found = pool.each(|_, s| resolve(s, s.search_names_all(terms, scope, PER_TERM)?));
+        lim.note_cut(true);
+        let found = pool.each(|_, s| resolve(s, s.search_names_all(terms, scope, per_term)?));
         return found.into_iter().flat_map(|(part, rows)| rows.into_iter().map(move |(c, f)| (c, Doc::read(f, part.slot)))).collect();
     }
     let ns = name_scope(scope);
-    let rows = match terms.iter().find(|t| t.is_path()) {
+    if lim.cancelled() {
+        return Vec::new();
+    }
+    let rows = lim.names(|| match terms.iter().find(|t| t.is_path()) {
         // A piece of a path among the words: start from the files it names.
-        Some(p) => catalog.candidates_path(p.raw.split(['*', '?']).next().unwrap_or(""), &ns, PER_TERM * 4),
-        None => catalog.candidates_all(terms, &ns, PER_TERM * 4),
-    };
+        Some(p) => catalog.candidates_path(p.raw.split(['*', '?']).next().unwrap_or(""), &ns, per_term * 4),
+        None => catalog.candidates_all(terms, &ns, per_term * 4),
+    });
+    lim.note_cut(rows.len() >= per_term * 4);
     let mut found: Vec<(Candidate, Doc)> = rows.into_iter().filter_map(|f| all_terms_candidate(terms, 0, &f.name, &f.path).map(|c| (c, Doc::named(f)))).collect();
     found.sort_by_key(|(c, _)| c.class);
-    found.truncate(PER_TERM);
+    found.truncate(per_term);
     found
 }
 
@@ -345,11 +439,11 @@ fn names_all(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope) -> V
 /// line count per file. A file matches a term when the term is in its name or
 /// in any of its lines. With `category` (`type:` filter) only tags of that
 /// category count.
-fn search_group(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, category: Option<&str>) -> Found {
+fn search_group(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, category: Option<&str>, lim: &Limits) -> Found {
     let mut sets: Vec<Found> = Vec::new();
     for t in terms {
         let mut m: Found = HashMap::new();
-        for (c, doc) in term_matches(pool, catalog, t, scope, category) {
+        for (c, doc) in term_matches(pool, catalog, t, scope, category, lim) {
             match m.get_mut(&doc.path.to_lowercase()) {
                 Some((b, n, d)) => {
                     *n += 1;
@@ -388,7 +482,7 @@ fn search_group(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, c
     // Several words: also every word in the file name or folder path, found
     // from all the words at once so no per-word limit drops the file.
     if category.is_none() && terms.len() > 1 {
-        for (c, doc) in names_all(pool, catalog, terms, scope) {
+        for (c, doc) in names_all(pool, catalog, terms, scope, lim) {
             match out.get_mut(&doc.path.to_lowercase()) {
                 Some((b, _, _)) => {
                     if better(&c, b) {

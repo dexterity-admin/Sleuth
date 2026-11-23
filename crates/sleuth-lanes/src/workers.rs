@@ -328,6 +328,38 @@ impl<J: Serialize + Clone + Send + 'static, R: DeserializeOwned + Send + 'static
         self.settle(Instant::now());
     }
 
+    /// Bring the lane down to `n` workers at once: as `set_target`, but busy
+    /// extras are stopped in the middle of their job (those started last
+    /// first, so the least work is lost). Their jobs are handed back to be
+    /// given out again later. For when someone sits down at the PC: a reader
+    /// left to finish a scanned set kept the PC slow for up to an hour.
+    pub fn cut_to(&mut self, lane: &str, n: u32) -> Vec<J> {
+        let now = Instant::now();
+        let mut jobs = Vec::new();
+        if let Some(l) = self.lanes.iter_mut().find(|l| l.name == lane) {
+            l.target = n;
+            while l.workers.len() as u32 > n {
+                let idle = l.workers.iter().position(|w| w.busy.is_none());
+                let newest = || l.workers.iter().enumerate().max_by_key(|(_, w)| w.busy.as_ref().map(|b| b.started)).map(|(i, _)| i);
+                let Some(i) = idle.or_else(newest) else { break };
+                let mut worker = l.workers.remove(i);
+                match worker.busy.take() {
+                    Some(busy) => {
+                        jobs.push(busy.job);
+                        // An in-process job cannot be stopped; its thread ends after it.
+                        if let Kind::Process { mut child, stdin } = worker.kind {
+                            drop(stdin);
+                            kill(&mut child);
+                        }
+                    }
+                    None => Self::retire(&mut self.stopping, worker, now),
+                }
+            }
+        }
+        self.settle(now);
+        jobs
+    }
+
     /// Give a job to an idle worker of the lane. `Err(job)` hands it back when none is idle
     /// (or none is ready yet: a new reader takes jobs once it has started and read its settings).
     pub fn submit(&mut self, lane: &str, job: J, timeout: Duration) -> Result<(), J> {
@@ -594,7 +626,7 @@ impl<J: Serialize + Clone + Send + 'static, R: DeserializeOwned + Send + 'static
         let (exe, args, env) = program;
         let first = wire::to_line(init).context("the settings could not be written for the reader")?;
         let mut cmd = Command::new(exe);
-        cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr_target());
+        cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).env(crate::child::PARENT_PID, std::process::id().to_string()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(stderr_target());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

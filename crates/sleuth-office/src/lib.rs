@@ -11,3 +11,4 @@ mod wire;
 pub use catalog::{Catalog, Change, FileInfo, Listing, NameScope};
 pub use files::{Mark, RootFiles, RootState, SegmentWriter};
 pub use lease::{Acquire, Holder, Identity, Lease, Leases};
+pub use catalog::with_scan_threads;

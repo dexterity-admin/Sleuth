@@ -489,6 +489,8 @@ async function openSettings(focusCache, focusSection) {
     return lab;
   }));
   $("s-cache").value = s.shared_cache_dir || ""; $("s-per").value = s.listings_per_server;
+  $("s-local").value = s.local_index_dir || "";
+  { const st = state.lastStatus?.status?.store; $("s-localState").textContent = st ? localCopyText(st) : ""; }
   $("s-timeout").value = s.listing_timeout_secs; $("s-rescan").value = s.name_rescan_minutes;
   $("s-excluded").value = (s.excluded || []).join("\n"); $("s-channel").value = s.update_channel;
   $("s-revorder").value = s.revision_order || "letters_then_numbers";
@@ -518,6 +520,7 @@ async function openSettings(focusCache, focusSection) {
   if (focusCache || storeNeedsUser(st)) { setCacheLocked(false); highlightCache(); }
   else if (focusSection) $(focusSection).scrollIntoView({ block: "start" });
 }
+$("s-localPick").onclick = async () => { const p = await invoke("pick_folder"); if (p) $("s-local").value = p; };
 $("s-cachePick").onclick = async () => { const p = await invoke("pick_folder"); if (p) { $("s-cache").value = p; testCache().catch(() => {}); } };
 
 // Projects editor (kept as a draft until Save).
@@ -685,6 +688,7 @@ $("s-save").onclick = async () => {
       busy_cpu_percent: num("s-busy", 10, 100),
       keep_indexing_when_closed: $("s-keep").checked,
       shared_cache_dir: $("s-cache").value.trim() || null,
+      local_index_dir: $("s-local").value.trim() || null,
       listings_per_server: num("s-per", 1, 16),
       listing_timeout_secs: num("s-timeout", 5, 120),
       name_rescan_minutes: num("s-rescan", 15, 10080),

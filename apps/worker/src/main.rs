@@ -132,9 +132,8 @@ async fn serve(engine: Arc<Engine>) -> Result<()> {
                 let keep = engine.settings.read().unwrap().keep_indexing_when_closed;
                 quiet = if clients.load(Ordering::SeqCst) == 0 { quiet + 1 } else { 0 };
                 if engine.shutdown.load(Ordering::SeqCst) || (!keep && quiet >= 2) {
-                    engine.stop();
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    std::process::exit(0);
+                    let engine = Arc::clone(&engine);
+                    let _ = tokio::task::spawn_blocking(move || quit(&engine)).await;
                 }
             }
         });
@@ -188,6 +187,28 @@ async fn handle(conn: NamedPipeServer, engine: Arc<Engine>) -> Result<()> {
     drop(tx);
     let _ = writer.await;
     Ok(())
+}
+
+/// Stop for good, within a few seconds whatever the worker is doing: the
+/// readers are ended, and then this process ends itself without running
+/// exit handlers. `std::process::exit` waited for threads stuck in a file
+/// server that does not answer (and for libraries' own shutdown), and the
+/// worker and its readers stayed behind after "Exit Sleuth".
+fn quit(engine: &Engine) -> ! {
+    info!("Sleuth worker stopping");
+    engine.stop();
+    // Let the reader loop end its readers and release its files.
+    let t = std::time::Instant::now();
+    while !engine.readers_stopped() && t.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Ending this process closes the job object that holds every reader, so
+    // none of them outlives it.
+    unsafe {
+        use windows::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
+        let _ = TerminateProcess(GetCurrentProcess(), 0);
+    }
+    std::process::exit(0)
 }
 
 fn reply(tx: &EventTx, id: u64, r: Result<Event>) {
@@ -309,11 +330,7 @@ fn dispatch(req: Envelope<Request>, engine: &Arc<Engine>, tx: &EventTx) {
         }
         Request::Shutdown => {
             reply(&tx, id, Ok(Event::Ok));
-            e.stop();
-            tokio::spawn(async {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                std::process::exit(0);
-            });
+            tokio::task::spawn_blocking(move || quit(&e));
         }
     }
 }

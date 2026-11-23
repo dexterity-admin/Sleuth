@@ -459,6 +459,28 @@ pub struct StoreStatus {
     pub documents: u64,
     /// This PC's readings not yet published to the share.
     pub unpublished: u64,
+    /// The copy of the office index on this PC's own disk, which searches
+    /// read: its folder ("" when switched off), parts and size.
+    #[serde(default)]
+    pub local_dir: String,
+    #[serde(default)]
+    pub local_parts: u32,
+    #[serde(default)]
+    pub local_bytes: u64,
+    /// Parts searched over the network (no room on the disk, or not copied).
+    #[serde(default)]
+    pub remote_parts: u32,
+    /// Parts still being copied to this PC, and their size.
+    #[serde(default)]
+    pub copy_parts: u32,
+    #[serde(default)]
+    pub copy_bytes: u64,
+    /// Why the copy is not complete, when there is a reason to give.
+    #[serde(default)]
+    pub local_note: String,
+    /// The office folder is away; only the copy on this PC is searched.
+    #[serde(default)]
+    pub away: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

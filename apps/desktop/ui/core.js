@@ -801,3 +801,15 @@ function syncSeg(id, onChange) {
     onChange("local");
   }
 }
+
+/** One sentence on the copy of the office index that this PC searches (status.store). */
+function localCopyText(st) {
+  if (!st || st.local_dir === undefined) return "";
+  if (!st.local_dir) return "No copy on this PC: text is searched over the network (slow).";
+  const parts = [`${fmtNum(st.local_parts)} part${Number(st.local_parts) === 1 ? "" : "s"} in ${st.local_dir}`];
+  if (Number(st.copy_parts) > 0) parts.push(`copying ${fmtNum(st.copy_parts)} more (${fmtSize(st.copy_bytes)} to go)`);
+  if (Number(st.remote_parts) > 0) parts.push(`${fmtNum(st.remote_parts)} searched over the network`);
+  if (st.away) parts.push("office folder away: searching the copy");
+  if (st.local_note) parts.push(st.local_note);
+  return parts.join(" · ");
+}
