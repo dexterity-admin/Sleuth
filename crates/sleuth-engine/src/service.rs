@@ -57,8 +57,6 @@ const RESULT_MEMORY: usize = 12;
 pub const READER_CPU_CAP: u32 = 8;
 /// The readers' share while a search runs, so the search has the rest.
 pub(crate) const READER_CPU_CAP_SEARCHING: u32 = 1;
-/// All readers together never hold more memory than this (MB) on a desktop.
-pub(crate) const READER_MEMORY_CAP_MB: u64 = 2048;
 /// Readers on a desktop, in any mode: more would only wait for the processor.
 pub(crate) const DESKTOP_OCR_READERS: u32 = 1;
 pub(crate) const DESKTOP_TEXT_READERS: u32 = 2;

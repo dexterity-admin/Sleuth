@@ -369,7 +369,14 @@ fn read_image(reader: &OcrReader, path: &Path, cancel: &dyn Fn() -> bool) -> Res
 /// Errors that may go away by themselves: the file could not be opened or
 /// read (network share unreachable, file locked by another program).
 pub fn is_transient(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some()) || format!("{e:#}").contains("cannot open file")
+    let text = format!("{e:#}");
+    // The PC's state, not the document's: the OCR models did not load, or
+    // OCR ran out of memory (seen on a PC with no page file, 23 Nov 2026,
+    // where every such document was recorded as unreadable).
+    // In 40 MB of earlier logs OCR itself never failed on a document; when
+    // it does, it is tried again before the document is given up.
+    let no_memory = text.contains("could not load OCR models") || text.contains("OCR failed");
+    e.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some()) || text.contains("cannot open file") || no_memory
 }
 
 pub fn friendly(e: &anyhow::Error) -> String {

@@ -344,6 +344,7 @@ fn resolve(s: &Store, cands: Vec<Candidate>) -> Result<Vec<(Candidate, FileRow)>
 /// documents, and file names.
 fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, category: Option<&str>, lim: &Limits) -> Vec<(Candidate, Doc)> {
     let mut out: Vec<(Candidate, Doc)> = Vec::new();
+    let started = std::time::Instant::now();
     let in_text = match category {
         // `_` alone is never part of a tag.
         Some(_) => !t.is_punctuation(),
@@ -377,10 +378,21 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
             out.extend(rows.into_iter().map(|(c, f)| (c, Doc::read(f, part.slot))));
         }
     }
+    slow("text", &t.raw, started, lim);
     if category.is_none() {
+        let started = std::time::Instant::now();
         out.extend(name_matches(pool, catalog, t, scope, lim));
+        slow("names", &t.raw, started, lim);
     }
     out
+}
+
+/// Says in the log which step of a search took long, and in which pass.
+fn slow(step: &str, what: &str, started: std::time::Instant, lim: &Limits) {
+    let ms = started.elapsed().as_millis();
+    if ms > 250 {
+        tracing::info!("search: {step} of {what:?} took {ms} ms ({} pass)", if lim.per_term == QUICK_PER_TERM { "quick" } else { "full" });
+    }
 }
 
 /// Files whose name (or path, for a term with `\`) matches one term.
@@ -482,7 +494,10 @@ fn search_group(pool: &Pool, catalog: &Catalog, terms: &[Term], scope: &Scope, c
     // Several words: also every word in the file name or folder path, found
     // from all the words at once so no per-word limit drops the file.
     if category.is_none() && terms.len() > 1 {
-        for (c, doc) in names_all(pool, catalog, terms, scope, lim) {
+        let started = std::time::Instant::now();
+        let all = names_all(pool, catalog, terms, scope, lim);
+        slow("names with every word", &terms.iter().map(|t| t.raw.as_str()).collect::<Vec<_>>().join(" "), started, lim);
+        for (c, doc) in all {
             match out.get_mut(&doc.path.to_lowercase()) {
                 Some((b, _, _)) => {
                     if better(&c, b) {

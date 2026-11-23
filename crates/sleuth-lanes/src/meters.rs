@@ -101,15 +101,18 @@ pub fn on_battery() -> bool {
     false
 }
 
-/// Available physical memory, MB. 0 when it cannot be read, which the
-/// governor treats as "no room": one OCR worker.
+/// Memory a program can still get, MB: the smaller of the free physical
+/// memory and what Windows can still commit. On a PC without a page file
+/// the second runs out first (23 Nov 2026: 8 GB of memory free, under 1 GB
+/// left to commit; the OCR models did not load and the worker stopped).
+/// 0 when it cannot be read, which the governor treats as "no room".
 pub fn free_ram_mb() -> u64 {
     #[cfg(windows)]
     unsafe {
         use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
         let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
         if GlobalMemoryStatusEx(&mut m).is_ok() {
-            return m.ullAvailPhys >> 20;
+            return m.ullAvailPhys.min(m.ullAvailPageFile) >> 20;
         }
     }
     0

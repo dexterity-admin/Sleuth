@@ -48,6 +48,8 @@ const FAST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const OCR_TIMEOUT: Duration = Duration::from_secs(90 * 60);
 /// Waiting files kept ready per lane between scans.
 const QUEUE_KEEP: usize = 3000;
+/// With less than this left for programs to take (MB), a desktop stops OCR.
+const LOW_MEMORY_MB: u64 = 1500;
 /// Memory one OCR reader needs, for the governor's memory guard.
 const OCR_WORKER_MB: u64 = 700;
 /// Readings waiting to be published may take this much of the PC's disk
@@ -307,8 +309,11 @@ impl Engine {
             let group = Arc::new(ProcessGroup::new()?);
             if !self.server_mode {
                 // Kept by Windows, whatever the readers do.
-                if let Err(e) = group.set_cpu_cap(Some(crate::service::READER_CPU_CAP)).and_then(|_| group.set_memory_cap(crate::service::READER_MEMORY_CAP_MB)) {
-                    warn!("the readers' processor and memory limits could not be set: {e:#}");
+                // No ceiling on their memory: with one, the OCR models did
+                // not load and documents were recorded as unreadable. Their
+                // number (one OCR reader, two text readers) is the limit.
+                if let Err(e) = group.set_cpu_cap(Some(crate::service::READER_CPU_CAP)) {
+                    warn!("the readers' processor limit could not be set: {e:#}");
                 }
                 *self.reader_group.lock().unwrap() = Some(Arc::clone(&group));
             }
@@ -430,6 +435,16 @@ impl Engine {
             }
             t.ocr = t.ocr.min(ocr);
             t.fast = t.fast.min(fast);
+            // The PC is nearly out of memory: OCR waits (its reader is
+            // ended, which gives its memory back) and one text reader goes
+            // on. Reading into the last of the memory took the PC's other
+            // programs down with it, and recorded documents as unreadable.
+            if (t.ocr > 0 || t.fast > 1) && sleuth_lanes::free_ram_mb() < LOW_MEMORY_MB {
+                t.ocr = 0;
+                t.fast = t.fast.min(1);
+                t.cut = true;
+                t.note = "This PC is short of memory: OCR waits until other programs free some.".into();
+            }
         }
         // A file someone asked for is read even when reading is paused.
         if urgent {

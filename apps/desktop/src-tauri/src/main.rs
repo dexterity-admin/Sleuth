@@ -317,6 +317,20 @@ fn set_autostart(enabled: bool) -> Result<(), String> {
     }
 }
 
+/// Sleuth was installed again in another folder (a disk was replaced): the
+/// start-at-sign-in entry, when there is one, must name the reader that is
+/// here now, not the one that is gone.
+fn repair_autostart() {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    let Ok(key) = hkcu.open_subkey_with_flags(RUN_KEY, winreg::enums::KEY_READ | winreg::enums::KEY_WRITE) else { return };
+    let want = format!("\"{}\"", worker_exe().display());
+    if let Ok(now) = key.get_value::<String, _>(RUN_VALUE)
+        && !now.eq_ignore_ascii_case(&want)
+    {
+        let _ = key.set_value(RUN_VALUE, &want);
+    }
+}
+
 #[tauri::command]
 fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
@@ -523,6 +537,7 @@ fn main() {
         .manage(PendingSearch(Mutex::new(connect::search_from_args(&std::env::args().collect::<Vec<_>>()))))
         .setup(|app| {
             let handle = app.handle().clone();
+            repair_autostart();
             tauri::async_runtime::spawn(connection_loop(handle));
             tray(app)?;
             Ok(())
