@@ -172,16 +172,28 @@ pub fn pick_index_dir(data: &std::path::Path, fixed: &[String]) -> std::path::Pa
 
 /// Makes the thread that holds it work half the time: when dropped, it
 /// sleeps for as long as it was held (two seconds at most).
-pub struct HalfTime(std::time::Instant);
+///
+/// Only one thread holds it at a time: the worker's background jobs (the
+/// full pass of a search, the monitor's counts, counting what waits, working
+/// out which readings are current) take turns, so together they stay under
+/// half a core however many are due at once. Run side by side they added up
+/// to a fifth of an 8-core PC (24 Nov 2026).
+pub struct HalfTime(std::time::Instant, Option<std::sync::MutexGuard<'static, ()>>);
+
+static BACKGROUND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl HalfTime {
     pub fn start() -> HalfTime {
-        HalfTime(std::time::Instant::now())
+        let turn = BACKGROUND.lock().unwrap_or_else(|p| p.into_inner());
+        HalfTime(std::time::Instant::now(), Some(turn))
     }
 }
 
 impl Drop for HalfTime {
     fn drop(&mut self) {
-        std::thread::sleep(self.0.elapsed().min(std::time::Duration::from_secs(2)));
+        let worked = self.0.elapsed();
+        // The next job may start while this one rests.
+        self.1.take();
+        std::thread::sleep(worked.min(std::time::Duration::from_secs(2)));
     }
 }

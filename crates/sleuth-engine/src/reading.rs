@@ -102,7 +102,11 @@ impl Engine {
         let mut fails_at = u64::MAX;
         while !self.stopping() {
             let started = Instant::now();
-            let (mut snap, queue) = self.scan();
+            let (mut snap, queue) = {
+                // In turn with the other background jobs, on a desktop.
+                let _turn = (!self.server_mode).then(crate::sys::HalfTime::start);
+                self.scan()
+            };
             // Failures are listed from the parts; only when those changed.
             if fails_at != self.pool.generation() {
                 fails_at = self.pool.generation();

@@ -176,7 +176,11 @@ impl Engine {
             if parts_now != last_parts || catalog_now != last_catalog {
                 last_catalog = catalog_now;
                 last_parts = parts_now;
-                self.pool.recover(&|p| self.presence(p));
+                {
+                    // In turn with the other background jobs, on a desktop.
+                    let _turn = (!self.server_mode).then(crate::sys::HalfTime::start);
+                    self.pool.recover(&|p| self.presence(p));
+                }
                 self.stats_signal.raise();
                 self.reader_signal.raise();
                 // Where the worker's memory goes, as far as it can tell.
