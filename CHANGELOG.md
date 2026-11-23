@@ -49,6 +49,22 @@ Not released yet.
   times on one PC), so the office index grew to hundreds of small parts, and
   made searches of that part fail. Such a line now reads as position 0.
 
+- **A fixed row budget per search:** a search takes a set number of rows per
+  word from the whole office index (shared out among its parts by size), so
+  its work no longer grows with the number of parts; with about 300 parts a
+  common word had taken minutes. Measured on the whole index (592,000
+  documents, 213 parts, 8 cores): first rows in 12 to 63 ms for one word and
+  about 0.3 s for two; names and text in 0.15 to 0.6 s for one word, about
+  1 s for two; the complete answer follows in 1 to 16 s in the background;
+  a repeated search answers in 20 to 180 ms.
+- **The window starts the reader again** every few seconds for as long as it
+  does not answer (it tried once), and the start-at-sign-in entry follows
+  Sleuth when it is installed in another folder.
+- Known limits: the reader holds about 0.9 GB of memory on an office of 7.6
+  million files and 590,000 read documents, and an OCR reader as much again
+  while it runs. A reader blocked on a file server that has stopped
+  answering goes only when Windows gives the server up (about a minute).
+
 For IT: `local_index_dir` in `settings.json` is the folder of the copy
 (`"off"` searches the network folder as 1.3 did). The copy needs about as
 much room as the office index; 8 GB always stay free on its disk.

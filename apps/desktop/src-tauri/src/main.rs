@@ -63,20 +63,24 @@ fn start_worker() {
 
 /// Keep a connection to the worker open for the life of the window.
 async fn connection_loop(app: AppHandle) {
-    let mut started_worker = false;
+    // When the worker was last started. It is started again every few
+    // seconds for as long as it does not answer: a worker that is still
+    // ending (held up by a file server that does not answer) keeps a new one
+    // from starting, and one try alone left the window without a worker.
+    let mut started_worker: Option<std::time::Instant> = None;
     loop {
         let client = match ClientOptions::new().open(pipe_name()) {
             Ok(c) => c,
             Err(_) => {
-                if !started_worker && !app.state::<Worker>().updating.load(Ordering::SeqCst) {
+                if started_worker.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) && !app.state::<Worker>().updating.load(Ordering::SeqCst) {
                     start_worker();
-                    started_worker = true;
+                    started_worker = Some(std::time::Instant::now());
                 }
                 tokio::time::sleep(Duration::from_millis(400)).await;
                 continue;
             }
         };
-        started_worker = false;
+        started_worker = None;
         let (rd, mut wr) = tokio::io::split(client);
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let worker = app.state::<Worker>();
