@@ -36,10 +36,21 @@ const PER_TERM: usize = 2000;
 /// has fewer matches than this in any part, so the quick pass is then the
 /// whole answer; only a common word is cut short and searched again in full.
 const QUICK_PER_TERM: usize = 150;
+/// Rows per term a desktop search takes from all parts together: shared out
+/// among the parts by their size, never fewer than [`PART_FLOOR`] from one.
+/// A limit per part alone made the work grow with the number of parts: with
+/// 300 parts a common word had millions of rows read and took minutes
+/// (23 Nov 2026). A tag or a number has fewer rows than its share in every
+/// part, and is found whole.
+const QUICK_BUDGET: usize = 4_000;
+const FULL_BUDGET: usize = 40_000;
+const PART_FLOOR: usize = 16;
 
 /// How far one search goes, and whether it had to stop short of everything.
 pub struct Limits<'a> {
     per_term: usize,
+    /// Rows per term from all parts together (see [`QUICK_BUDGET`]).
+    budget: usize,
     /// Threads used over the parts.
     threads: usize,
     /// Set by the caller to abandon the search (the user typed on).
@@ -59,7 +70,18 @@ pub struct NamesMemo(std::sync::Mutex<HashMap<String, (usize, std::sync::Arc<Vec
 impl<'a> Limits<'a> {
     /// Everything, up to [`PER_TERM`] rows per term and part.
     pub fn full(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+        Limits { per_term: PER_TERM, budget: usize::MAX, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+    }
+
+    /// Rows to take from a part of `bytes` out of `total`: its share of the
+    /// budget, within the limit per part. This PC's unpublished readings
+    /// (`work`) are few and are searched whole.
+    fn part_limit(&self, bytes: u64, total: u64, work: bool) -> usize {
+        if work || self.budget == usize::MAX {
+            return self.per_term;
+        }
+        let share = (self.budget as u128 * bytes as u128 / total.max(1) as u128) as usize;
+        share.clamp(PART_FLOOR.min(self.per_term), self.per_term)
     }
 
     /// Share the file names found with the other passes of this search.
@@ -71,12 +93,12 @@ impl<'a> Limits<'a> {
     /// Everything, on one thread that works half the time: for the full
     /// pass on a desktop, after the quick pass has answered.
     pub fn background(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { threads: 1, ..Limits::full(cancel) }
+        Limits { threads: 1, budget: FULL_BUDGET, ..Limits::full(cancel) }
     }
 
     /// The quick first pass.
     pub fn quick(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: QUICK_PER_TERM, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+        Limits { per_term: QUICK_PER_TERM, budget: QUICK_BUDGET, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
     }
 
     /// Some query reached its limit: a fuller search may find more or better.
@@ -383,21 +405,23 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
         None => !(t.is_path() || t.is_punctuation()),
     };
     if in_text {
-        let found = pool.each_on(lim.threads, |_, s| {
+        let total: u64 = pool.parts().iter().map(|p| p.bytes).sum();
+        let found = pool.each_on(lim.threads, |part, s| {
             if lim.cancelled() {
                 return Ok(Vec::new());
             }
+            let limit = lim.part_limit(part.bytes, total, part.work);
             // One thread, busy half the time: under a sixteenth of an
             // 8-core processor, however common the word.
             let _pace = (lim.threads == 1).then(crate::sys::HalfTime::start);
             let cands = match category {
                 Some(cat) => {
-                    let c = s.search_tags(t, cat, scope, lim.per_term)?;
-                    lim.note_cut(c.len() >= lim.per_term);
+                    let c = s.search_tags(t, cat, scope, limit)?;
+                    lim.note_cut(c.len() >= limit);
                     c
                 }
                 None => {
-                    let (c, cut) = s.search_lines_cut(t, scope, lim.per_term, lim.per_term != QUICK_PER_TERM)?;
+                    let (c, cut) = s.search_lines_cut(t, scope, limit, lim.per_term != QUICK_PER_TERM)?;
                     lim.note_cut(cut);
                     c
                 }
