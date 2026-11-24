@@ -695,7 +695,7 @@ impl Engine {
         write(&mut work.store, id)?;
         work.unpublished += 1;
         work.since.get_or_insert_with(Instant::now);
-        self.pool.note_saved(&work.part, &job.path, Covered { slot: work.part.slot, id, size: job.size, mtime: job.mtime, state: st, read_at: now(), again: false });
+        self.pool.note_saved(&work.part, &job.path, Covered { slot: work.part.slot, id, size: job.size, mtime: job.mtime, state: st, read_at: now(), again: false, wants_ocr: false });
         Ok(())
     }
 
@@ -780,7 +780,7 @@ impl Engine {
                 let work = if is_local(&stored) { &mut c.own } else { &mut c.office };
                 let new_id = work.store.import_reading_as(&old, id, Some(&stored), &deriver)?;
                 let (size, mtime): (i64, i64) = work.store.conn.query_row("SELECT size, mtime FROM files WHERE id=?1", [new_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                self.pool.note_saved(&work.part, &stored, Covered { slot: work.part.slot, id: new_id, size: size as u64, mtime, state: state::READ, read_at, again: false });
+                self.pool.note_saved(&work.part, &stored, Covered { slot: work.part.slot, id: new_id, size: size as u64, mtime, state: state::READ, read_at, again: false, wants_ocr: false });
                 work.unpublished += 1;
                 work.since.get_or_insert_with(Instant::now);
                 moved += 1;

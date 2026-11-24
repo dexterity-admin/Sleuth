@@ -53,6 +53,8 @@ pub struct Limits<'a> {
     budget: usize,
     /// Threads used over the parts.
     threads: usize,
+    /// Each thread works half the time (the full pass on a desktop).
+    paced: bool,
     /// Set by the caller to abandon the search (the user typed on).
     cancel: Option<&'a std::sync::atomic::AtomicBool>,
     cut: std::sync::atomic::AtomicBool,
@@ -70,7 +72,7 @@ pub struct NamesMemo(std::sync::Mutex<HashMap<String, (usize, std::sync::Arc<Vec
 impl<'a> Limits<'a> {
     /// Everything, up to [`PER_TERM`] rows per term and part.
     pub fn full(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: PER_TERM, budget: usize::MAX, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+        Limits { per_term: PER_TERM, budget: usize::MAX, threads: crate::pool::QUERY_THREADS, paced: false, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
     }
 
     /// Rows to take from a part of `bytes` out of `total`: its share of the
@@ -90,15 +92,19 @@ impl<'a> Limits<'a> {
         self
     }
 
-    /// Everything, on one thread that works half the time: for the full
-    /// pass on a desktop, after the quick pass has answered.
+    /// Everything, on two threads that each work half the time (one core at
+    /// most between them): for the full pass on a desktop, after the quick
+    /// pass has answered. Two, because with the parts not in the file cache
+    /// the pass waits for the disk far more than it computes (5 s of
+    /// processor in a pass of 25 to 40 s, 24 Nov 2026), and two threads
+    /// wait side by side.
     pub fn background(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { threads: 1, budget: FULL_BUDGET, ..Limits::full(cancel) }
+        Limits { threads: 2, paced: true, budget: FULL_BUDGET, ..Limits::full(cancel) }
     }
 
     /// The quick first pass.
     pub fn quick(cancel: Option<&'a std::sync::atomic::AtomicBool>) -> Limits<'a> {
-        Limits { per_term: QUICK_PER_TERM, budget: QUICK_BUDGET, threads: crate::pool::QUERY_THREADS, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
+        Limits { per_term: QUICK_PER_TERM, budget: QUICK_BUDGET, threads: crate::pool::QUERY_THREADS, paced: false, cancel, cut: std::sync::atomic::AtomicBool::new(false), memo: None }
     }
 
     /// Some query reached its limit: a fuller search may find more or better.
@@ -125,7 +131,7 @@ impl<'a> Limits<'a> {
         {
             return rows.as_ref().clone();
         }
-        let rows = if self.threads != 1 {
+        let rows = if !self.paced {
             f()
         } else {
             let _pace = crate::sys::HalfTime::alone();
@@ -433,7 +439,7 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
             let limit = lim.part_limit(part.bytes, total, part.work);
             // One thread, busy half the time: under a sixteenth of an
             // 8-core processor, however common the word.
-            let _pace = (lim.threads == 1).then(crate::sys::HalfTime::alone);
+            let _pace = lim.paced.then(crate::sys::HalfTime::alone);
             let part_started = std::time::Instant::now();
             let cands = match category {
                 Some(cat) => {

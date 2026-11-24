@@ -222,6 +222,25 @@ pub struct Covered {
     /// ([`ReadingRow::again`]): it stays searchable as it is, and counts as
     /// not read yet, so that it is read once more.
     pub again: bool,
+    /// A newer look at the same file found that it needs OCR: the reading
+    /// here stays searchable until the OCR is done, and the file stands in
+    /// the OCR queue.
+    pub wants_ocr: bool,
+}
+
+impl Covered {
+    /// What covers a path when `new` was recorded after `old`. A later
+    /// failure, or a later "needs OCR", does not take away what an earlier
+    /// reading of the same file found (a document read once more because of
+    /// a reader fault): the reading stays, a failure is not tried again, and
+    /// a file that needs OCR goes on to it.
+    fn after(new: Covered, old: Covered) -> Covered {
+        if new.state != state::READ && old.state == state::READ && (new.size, new.mtime) == (old.size, old.mtime) {
+            Covered { again: false, wants_ocr: new.state == state::NEEDS_OCR, ..old }
+        } else {
+            new
+        }
+    }
 }
 
 /// A document id that names its part too, for the ids that travel to the
@@ -960,21 +979,13 @@ impl Pool {
             // A published part's rows never change; `work` is asked each time.
             let work_rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { Vec::new() };
             let mut note = |r: &ReadingRow| {
-                let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at, again: r.again };
+                let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at, again: r.again, wants_ocr: false };
                 match cover.entry(path_key(&r.path)) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         // Newest reading wins; this PC's unpublished one on a tie.
                         let old = *e.get();
                         let (new, old) = if c.read_at > old.read_at || (c.read_at == old.read_at && p.work) { (c, old) } else { (old, c) };
-                        // But a later failure does not take away what an
-                        // earlier reading of the same file found (a document
-                        // read once more because of a reader fault, and not
-                        // readable this time); it is not tried a third time.
-                        if new.state != state::READ && old.state == state::READ && (new.size, new.mtime) == (old.size, old.mtime) {
-                            e.insert(Covered { again: false, ..old });
-                        } else {
-                            e.insert(new);
-                        }
+                        e.insert(Covered::after(new, old));
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
                         e.insert(c);
@@ -1040,7 +1051,14 @@ impl Pool {
     /// Record a reading just saved to `work` without recomputing everything.
     pub fn note_saved(&self, work: &Part, path: &str, c: Covered) {
         debug_assert!(work.work);
-        self.cover.write().unwrap().insert(path_key(path), c);
+        let mut cover = self.cover.write().unwrap();
+        let key = path_key(path);
+        let c = match cover.get(&key) {
+            Some(old) => Covered::after(c, *old),
+            None => c,
+        };
+        cover.insert(key, c);
+        drop(cover);
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -1063,12 +1081,12 @@ impl Pool {
 
     /// [`Pool::state_of`] by a key already worked out ([`PathKeyer`]).
     pub fn state_of_key(&self, key: u64, size: u64, mtime: i64) -> Option<i64> {
-        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| c.state)
+        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| if c.wants_ocr { state::NEEDS_OCR } else { c.state })
     }
 
     /// As [`Pool::state_of_key`], with when that state was recorded.
     pub fn state_at_key(&self, key: u64, size: u64, mtime: i64) -> Option<(i64, i64)> {
-        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| (c.state, c.read_at))
+        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| (if c.wants_ocr { state::NEEDS_OCR } else { c.state }, c.read_at))
     }
 
     /// Whether a newer reading of the same path replaced this one.
