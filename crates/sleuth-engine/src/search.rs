@@ -131,12 +131,12 @@ impl<'a> Limits<'a> {
         {
             return rows.as_ref().clone();
         }
-        let rows = if !self.paced {
-            f()
-        } else {
-            let _pace = crate::sys::HalfTime::alone();
-            sleuth_office::with_scan_threads(1, f)
-        };
+        // A scan of the file lists is plain processor work on its threads
+        // for as long as it runs: that is what it takes from the allowance.
+        let threads = if self.paced { 1 } else { crate::sys::scan_threads(0) };
+        let began = std::time::Instant::now();
+        let rows = sleuth_office::with_scan_threads(threads, f);
+        crate::sys::charge(began.elapsed().as_secs_f64() * threads as f64);
         if let Some(memo) = self.memo {
             memo.0.lock().unwrap().insert(key, (cap, std::sync::Arc::new(rows.clone())));
         }
@@ -327,6 +327,7 @@ pub fn search_index_with(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots:
 /// another type count: two PDFs are two documents. Nothing is guessed: the
 /// names or the title-block details must be equal.
 pub fn attach_twins(hits: &mut [Hit], pool: &Pool, catalog: &Catalog, drives: &DriveMap) {
+    let _cpu = crate::sys::SearchCpu::start();
     // Title blocks: every read document with one of these drawing numbers.
     // For the rows at the top only: asking every part about the drawing
     // number of every row of a page (up to 500) took up to five seconds
@@ -439,7 +440,6 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
             let limit = lim.part_limit(part.bytes, total, part.work);
             // One thread, busy half the time: under a sixteenth of an
             // 8-core processor, however common the word.
-            let _pace = lim.paced.then(crate::sys::HalfTime::alone);
             let part_started = std::time::Instant::now();
             let cands = match category {
                 Some(cat) => {

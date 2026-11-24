@@ -4,7 +4,7 @@
 #[cfg(windows)]
 use windows::Win32::Foundation::FILETIME;
 #[cfg(windows)]
-use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetSystemTimes, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_BELOW_NORMAL};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetSystemTimes, GetThreadTimes, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_PRIORITY_BELOW_NORMAL};
 
 /// Lower this thread's CPU, I/O and memory priority (as Everything does for
 /// its monitor threads).
@@ -181,6 +181,95 @@ pub fn pick_index_dir(data: &std::path::Path, fixed: &[String]) -> std::path::Pa
 pub struct HalfTime(std::time::Instant, Option<std::sync::MutexGuard<'static, ()>>);
 
 static BACKGROUND: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// ---- the processor a search may take ------------------------------------------
+//
+// A desktop's rule is that Sleuth stays under a fifth of the processor in
+// any second. Readers have their own ceiling (a job object) and the worker's
+// upkeep waits while a search runs, so what is left to hold is the search
+// itself: its threads draw processor time from one allowance. A search that
+// needs little (a tag, a number: under a core-second) is not slowed at all;
+// one that needs more gets the allowance at once and the rest at a steady
+// rate, on however many threads.
+
+static GOVERNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ALLOWANCE: std::sync::Mutex<Option<(f64, std::time::Instant)>> = std::sync::Mutex::new(None);
+
+/// Switch the allowance on (a desktop) or off (the office server, tests).
+pub fn govern(on: bool) {
+    GOVERNED.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn governed() -> bool {
+    GOVERNED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// (core-seconds a search may take at once, core-seconds it gets back per
+/// second). Together 0.165 of the cores in any one second (1.32 of 8), which
+/// leaves room under a fifth for the readers' 1 % during a search and for a
+/// piece of upkeep that was under way when the search began.
+fn allowance() -> (f64, f64) {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as f64;
+    (cores * 0.115, cores * 0.05)
+}
+
+/// Take `core_seconds` of processor time from the searches' allowance, after
+/// the work was done; sleeps for as long as it takes the allowance to make
+/// up what is overdrawn.
+pub fn charge(core_seconds: f64) {
+    if !governed() || core_seconds <= 0.0 {
+        return;
+    }
+    let (most, rate) = allowance();
+    let wait = {
+        let mut g = ALLOWANCE.lock().unwrap_or_else(|p| p.into_inner());
+        let now = std::time::Instant::now();
+        let (had, at) = g.unwrap_or((most, now));
+        let have = (had + now.duration_since(at).as_secs_f64() * rate).min(most) - core_seconds;
+        *g = Some((have, now));
+        if have < 0.0 { -have / rate } else { 0.0 }
+    };
+    if wait > 0.0 {
+        std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(5.0)));
+    }
+}
+
+/// Processor time this thread has used.
+fn thread_cpu() -> f64 {
+    #[cfg(windows)]
+    unsafe {
+        let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        if GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u).is_ok() {
+            let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+            return t(k) + t(u);
+        }
+    }
+    0.0
+}
+
+/// Charges the processor time its thread used while it was held.
+pub struct SearchCpu(f64);
+
+impl SearchCpu {
+    pub fn start() -> SearchCpu {
+        SearchCpu(if governed() { thread_cpu() } else { 0.0 })
+    }
+}
+
+impl Drop for SearchCpu {
+    fn drop(&mut self) {
+        if governed() {
+            charge(thread_cpu() - self.0);
+        }
+    }
+}
+
+/// Threads for a scan of the file lists by a search: two on a desktop (a
+/// scan on every core is over the rule in a quarter of a second), the
+/// caller's choice elsewhere.
+pub fn scan_threads(otherwise: usize) -> usize {
+    if governed() { 2 } else { otherwise }
+}
 
 /// Full passes of searches under way: the one background job somebody is
 /// waiting for.

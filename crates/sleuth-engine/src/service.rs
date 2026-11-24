@@ -340,6 +340,8 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(settings: Settings) -> Arc<Engine> {
+        // A desktop: searches keep to their share of the processor.
+        crate::sys::govern(true);
         Self::build(settings, false)
     }
 
@@ -1318,6 +1320,10 @@ impl Engine {
             self.cap_readers(READER_CPU_CAP_SEARCHING);
         }
         let _searching = Searching(self);
+        // The worker's upkeep stands back for the whole search, first rows
+        // to full pass: together with it a search went over a fifth of the
+        // processor for a second or two.
+        let _turn = (!self.server_mode).then(crate::sys::SearchTurn::start);
         let started = Instant::now();
         let q = parse_search(query);
         if q.is_empty() {

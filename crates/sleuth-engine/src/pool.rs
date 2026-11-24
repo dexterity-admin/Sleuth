@@ -1135,11 +1135,17 @@ impl Pool {
     /// [`Pool::each`] on at most `threads` threads.
     pub fn each_on<T: Send>(&self, threads: usize, f: impl Fn(&Part, &Store) -> Result<T> + Sync) -> Vec<(Arc<Part>, T)> {
         let parts = self.parts();
-        let run = |p: &Arc<Part>| match p.with(|s| f(p, s)) {
-            Ok(v) => Some((Arc::clone(p), v)),
-            Err(e) => {
-                warn!("search part {}: {e:#}", p.name);
-                None
+        let run = |p: &Arc<Part>| {
+            // What this thread computes for the part comes out of the
+            // searches' allowance on a desktop; it waits, if it must, after
+            // the part is let go of.
+            let _cpu = crate::sys::SearchCpu::start();
+            match p.with(|s| f(p, s)) {
+                Ok(v) => Some((Arc::clone(p), v)),
+                Err(e) => {
+                    warn!("search part {}: {e:#}", p.name);
+                    None
+                }
             }
         };
         if parts.len() <= 1 || threads <= 1 {
