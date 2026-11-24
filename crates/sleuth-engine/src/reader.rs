@@ -234,8 +234,8 @@ mod tests {
         // One text-layer "line" whose box spans the sheet, and a table row
         // read with OCR inside it: neither its place nor a chance match of a
         // short text makes the row a repeat.
-        let wide = vec![Line { text: "N 4 4 2020 ALL RIGHTS RESERVED 12-71-HS-037P-57".into(), conf: 1.0, source: TextSource::TextLayer, bbox: NormBox { x: 0.02, y: 0.13, w: 0.95, h: 0.8 }, alt: false }];
-        let row = Line { text: "12-71-HS-037P-57".into(), conf: 0.95, source: TextSource::Ocr, bbox: NormBox { x: 0.1, y: 0.2, w: 0.03, h: 0.006 }, alt: false };
+        let wide = vec![Line { text: "N 4 4 2020 ALL RIGHTS RESERVED 10-XS-0001A-57".into(), conf: 1.0, source: TextSource::TextLayer, bbox: NormBox { x: 0.02, y: 0.13, w: 0.95, h: 0.8 }, alt: false }];
+        let row = Line { text: "10-XS-0001A-57".into(), conf: 0.95, source: TextSource::Ocr, bbox: NormBox { x: 0.1, y: 0.2, w: 0.03, h: 0.006 }, alt: false };
         assert!(!repeats_native(&row, &wide));
         let short = Line { text: "44".into(), ..row.clone() };
         assert!(!repeats_native(&short, &wide));
