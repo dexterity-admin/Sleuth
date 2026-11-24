@@ -419,8 +419,7 @@ impl Engine {
         // page nobody waits for. (On 16 threads they took four cores for a
         // while, and a search made meanwhile waited nine seconds.)
         let threads = if self.server_mode { crate::pool::QUERY_THREADS } else { 1 };
-        let per_part = self.pool.each_on(threads, |part, s| {
-            let _pace = (threads == 1).then(crate::sys::HalfTime::start);
+        let per_part = self.pool.each_in_turn(threads == 1, threads, |part, s| {
             let sig = part.hidden_sig();
             if !part.work
                 && let Some((at, sums)) = known.get(&part.name)

@@ -1068,6 +1068,26 @@ impl Pool {
         self.each_on(QUERY_THREADS, f)
     }
 
+    /// [`Pool::each_on`], or with `turns` one part after another, each in a
+    /// background turn of its own ([`crate::sys::HalfTime`]). The turn is
+    /// taken before the part is: a job that waited for its turn while it held
+    /// a part kept every search out of that part for as long (the full pass
+    /// of a search took 25 to 75 s instead of 4, 24 Nov 2026).
+    pub fn each_in_turn<T: Send>(&self, turns: bool, threads: usize, f: impl Fn(&Part, &Store) -> Result<T> + Sync) -> Vec<(Arc<Part>, T)> {
+        if !turns {
+            return self.each_on(threads, f);
+        }
+        let mut out = Vec::new();
+        for p in self.parts() {
+            let _turn = crate::sys::HalfTime::start();
+            match p.with(|s| f(&p, s)) {
+                Ok(v) => out.push((Arc::clone(&p), v)),
+                Err(e) => warn!("search part {}: {e:#}", p.name),
+            }
+        }
+        out
+    }
+
     /// [`Pool::each`] on at most `threads` threads.
     pub fn each_on<T: Send>(&self, threads: usize, f: impl Fn(&Part, &Store) -> Result<T> + Sync) -> Vec<(Arc<Part>, T)> {
         let parts = self.parts();
