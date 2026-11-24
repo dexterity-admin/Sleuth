@@ -976,6 +976,7 @@ impl Pool {
         let mut cover: HashMap<u64, Covered> = HashMap::new();
         for p in &parts {
             crate::sys::rest_while_searching();
+            let piece = std::time::Instant::now();
             // A published part's rows never change; `work` is asked each time.
             let work_rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { Vec::new() };
             let mut note = |r: &ReadingRow| {
@@ -997,6 +998,7 @@ impl Pool {
             } else {
                 p.rows.each(&mut note);
             }
+            crate::sys::rest_after(piece.elapsed());
         }
         let mut superseded: HashMap<u32, HashSet<i64>> = HashMap::new();
         let mut gone: Vec<u64> = Vec::new();
@@ -1005,6 +1007,7 @@ impl Pool {
                 continue;
             }
             crate::sys::rest_while_searching();
+            let piece = std::time::Instant::now();
             let mut hidden: Vec<i64> = Vec::new();
             p.rows.each(&mut |r: &ReadingRow| {
                 let key = path_key(&r.path);
@@ -1032,6 +1035,7 @@ impl Pool {
                 warn!("part {}: {e:#}", p.name);
                 p.hidden_sig.store(u64::MAX, Ordering::SeqCst);
             }
+            crate::sys::rest_after(piece.elapsed());
         }
         *self.superseded.write().unwrap() = superseded;
         // A reading of a file that is gone covers nothing.

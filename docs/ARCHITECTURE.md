@@ -134,7 +134,7 @@ long as it worked. The full pass checks a cancel flag between parts.
 
 ## Sleuth's share of a desktop (1.4)
 
-- Reader processes sit in one Windows job object with a hard ceiling of 8 %
+- Reader processes sit in one Windows job object with a hard ceiling of 6 %
   of the whole processor; 1 % while a search runs. At most one OCR reader
   and two text readers, in every speed mode. No ceiling on their memory (with
   one, the OCR models did not load); OCR waits while the PC has under 1.5 GB

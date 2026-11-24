@@ -230,13 +230,13 @@ pub fn governed() -> bool {
 }
 
 /// (core-seconds that may be taken at once, core-seconds given back per
-/// second). For the first screen together 0.16 of the cores in any one
-/// second (1.3 of 8), which with the readers' 1 % during a search stays under the
+/// second). For the first screen together 0.19 of the cores in any one
+/// second (1.5 of 8), which with the readers' 1 % during a search is the
 /// fifth a desktop allows; the full pass, alone, takes 0.075 of the cores
 /// (0.6 of 8) steadily.
 fn allowance(first_screen: bool) -> (f64, f64) {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as f64;
-    if first_screen { (cores * 0.10, cores * 0.06) } else { (cores * 0.05, cores * 0.075) }
+    if first_screen { (cores * 0.12, cores * 0.07) } else { (cores * 0.05, cores * 0.075) }
 }
 
 /// Take `core_seconds` of processor time from the searches' allowance, after
@@ -335,6 +335,14 @@ impl SearchTurn {
 impl Drop for SearchTurn {
     fn drop(&mut self) {
         SEARCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// On a desktop, rest for as long as `worked`: for the pieces of a long
+/// upkeep job, which would otherwise keep a whole core for half a minute.
+pub fn rest_after(worked: std::time::Duration) {
+    if governed() {
+        std::thread::sleep(worked.min(std::time::Duration::from_secs(2)));
     }
 }
 

@@ -13,6 +13,12 @@ Not released yet.
   Documents read before this (reader version 2) that have a page with
   pictures and such a box (1,726 of 20,860 in the office index on 24 November
   2026) stay searchable as they are and are read once more.
+- **Searches keep to a share of the processor:** on a desktop the threads of
+  a search draw processor time from an allowance: about one core-second at
+  once for the first screen (a tag or a number needs less and is not slowed),
+  the rest at a steady rate, and the full pass at a lower rate after it.
+  File names are scanned on one thread. The worker's upkeep waits while a
+  search runs and works half the time otherwise.
 - **Fewer, larger parts:** a search pays for every part of the office index,
   and no merge took in more than 512 MB, so the number of parts grew with the
   index (163 parts for 73 GB on 24 November 2026). Middle-sized parts are now
@@ -56,7 +62,7 @@ Not released yet.
   works new ones out behind it, and keeps each part's figures. A new card
   shows the copy searched on this PC.
 - **A fixed, small share of the PC:** on a desktop the reader processes
-  together never use more than 8 % of the whole processor (a ceiling
+  together never use more than 6 % of the whole processor (a ceiling
   Windows itself keeps), and 1 % while a search runs; at most one OCR reader
   and two text readers run, in every mode, and OCR waits while the PC has
   under 1.5 GB of memory left to give. Sleuth's own background

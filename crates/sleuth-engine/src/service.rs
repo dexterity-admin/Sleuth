@@ -54,7 +54,10 @@ const RESULT_MEMORY: usize = 12;
 /// the readers had used the share, Windows held back the threads that answer
 /// the window too, and a request waited over a minute (23 Nov 2026).
 /// The office server is not limited.
-pub const READER_CPU_CAP: u32 = 8;
+/// 6, not 8: one upkeep job of the worker at work is an eighth of an 8-core
+/// processor, and with 8 % for the readers the two were over a fifth for as
+/// long as the job ran (24 Nov 2026).
+pub const READER_CPU_CAP: u32 = 6;
 /// The readers' share while a search runs, so the search has the rest.
 pub(crate) const READER_CPU_CAP_SEARCHING: u32 = 1;
 /// Readers on a desktop, in any mode: more would only wait for the processor.
