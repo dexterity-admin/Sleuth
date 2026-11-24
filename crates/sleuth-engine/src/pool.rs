@@ -249,6 +249,10 @@ pub struct Part {
     broken: AtomicBool,
     /// What was last written to the part's list of hidden readings.
     hidden_sig: AtomicU64,
+    /// Every reading in it is hidden (replaced by newer ones elsewhere):
+    /// a text search has nothing to find here and would read the whole
+    /// index of the part to learn that.
+    all_hidden: AtomicBool,
 }
 
 /// What a published part covers, packed: a path shares its start with the
@@ -339,6 +343,10 @@ impl Part {
     }
 
     /// Changes when other readings of this part are hidden.
+    pub fn all_hidden(&self) -> bool {
+        self.all_hidden.load(Ordering::SeqCst)
+    }
+
     pub fn hidden_sig(&self) -> u64 {
         self.hidden_sig.load(Ordering::SeqCst)
     }
@@ -450,6 +458,7 @@ impl Pool {
             rows: Rows::default(),
             broken: AtomicBool::new(false),
             hidden_sig: AtomicU64::new(0),
+            all_hidden: AtomicBool::new(false),
         });
         self.parts.write().unwrap().push(Arc::clone(&part));
         Ok(part)
@@ -469,6 +478,7 @@ impl Pool {
             rows: Rows::default(),
             broken: AtomicBool::new(false),
             hidden_sig: AtomicU64::new(0),
+            all_hidden: AtomicBool::new(false),
         });
         self.parts.write().unwrap().push(Arc::clone(&part));
         part
@@ -490,6 +500,7 @@ impl Pool {
             rows,
             broken: AtomicBool::new(false),
             hidden_sig: AtomicU64::new(0),
+            all_hidden: AtomicBool::new(false),
         })
     }
 
@@ -728,13 +739,29 @@ impl Pool {
         // a merged part of a few GB takes minutes to reach this PC, and its
         // documents would be missing from every search until then.
         let live: HashSet<String> = parts.iter().filter(|p| !p.work).map(|p| p.name.clone()).collect();
+        // Whether a part's readings are now in one of `set`, following merges
+        // of merges (a part merged into one that was itself merged later).
+        // Looking one step only opened 150 replaced parts again, and a search
+        // read each of them to the end for rows that are all hidden
+        // (full pass of a tag: 2 minutes instead of 4 s, 24 Nov 2026).
+        let replaced_in = |path: &Path, set: &HashSet<String>| -> bool {
+            let mut at = path.to_path_buf();
+            for _ in 0..32 {
+                let Some(into) = retired.get(&at) else { return false };
+                if set.contains(into) {
+                    return true;
+                }
+                at = at.with_file_name(format!("{into}.db"));
+            }
+            false
+        };
         // Close: merged away (and its replacement is searched), broken, or deleted.
         let mut closed: HashSet<u32> = HashSet::new();
         // Copies that failed while being searched: copied again.
         let mut discard: HashSet<PathBuf> = HashSet::new();
         for p in parts.iter().filter(|p| !p.work) {
             let dir_listed = p.path.parent().is_some_and(|d| listed_ok.contains(d));
-            let merged_away = retired.get(&p.path).is_some_and(|into| live.contains(into));
+            let merged_away = replaced_in(&p.path, &live);
             let missing = dir_listed && !here.contains(&p.path);
             let broken = p.broken.load(Ordering::SeqCst);
             // The copy was moved to another folder (or switched off): the
@@ -774,8 +801,8 @@ impl Pool {
             }
             // Merged into another part: not needed once that one can be
             // searched, and never worth copying.
-            let merged = retired.get(path).is_some_and(|into| names.contains(into));
-            if merged && retired.get(path).is_some_and(|into| ready.contains(into)) {
+            let merged = replaced_in(path, &names);
+            if merged && replaced_in(path, &ready) {
                 continue;
             }
             let local = local_of(path);
@@ -844,7 +871,7 @@ impl Pool {
             // A part whose replacement was opened just now goes with it.
             let now_live: HashSet<String> = live.iter().filter(|p| !p.work).map(|p| p.name.clone()).collect();
             let before = live.len();
-            live.retain(|p| p.work || !retired.get(&p.path).is_some_and(|into| now_live.contains(into)));
+            live.retain(|p| p.work || !replaced_in(&p.path, &now_live));
             changed |= live.len() != before;
         }
         {
@@ -869,7 +896,7 @@ impl Pool {
         // needed again (395 such copies held 17 GB on 24 Nov 2026).
         let merged_away = |p: &Path| {
             let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            !live_now.contains(&stem) && retired.get(p).is_some_and(|into| live_now.contains(into))
+            !live_now.contains(&stem) && replaced_in(p, &live_now)
         };
         for dir in &listed_ok {
             let Some(rd) = local_dir(dir).and_then(|l| std::fs::read_dir(l).ok()) else { continue };
@@ -947,6 +974,7 @@ impl Pool {
                     hidden.push(r.id);
                 }
             });
+            p.all_hidden.store(p.rows.n > 0 && hidden.len() as u32 == p.rows.n, Ordering::SeqCst);
             // Written to the part only when it differs from last time.
             let sig = hidden.iter().fold(hidden.len() as u64, |a, id| a.wrapping_mul(1_000_003).wrapping_add(*id as u64));
             if p.hidden_sig.swap(sig, Ordering::SeqCst) != sig
@@ -1476,7 +1504,7 @@ mod tests {
 
     #[test]
     fn merge_waits_for_enough_small_parts() {
-        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), open_at: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Rows::default(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
+        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), open_at: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Rows::default(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0), all_hidden: AtomicBool::new(false) });
         let few: Vec<Arc<Part>> = (0..7).map(|_| mk(1 << 20)).collect();
         assert!(merge_candidates(&few, false).is_empty());
         let enough: Vec<Arc<Part>> = (0..8).map(|_| mk(1 << 20)).chain([mk(3 << 30)]).collect();

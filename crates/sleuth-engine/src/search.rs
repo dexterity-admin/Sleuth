@@ -423,7 +423,7 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
         // core is what took the processor over a fifth for a moment.
         let got = std::sync::atomic::AtomicUsize::new(0);
         let found = pool.each_on(lim.threads, |part, s| {
-            if lim.cancelled() {
+            if lim.cancelled() || part.all_hidden() {
                 return Ok(Vec::new());
             }
             if quick && got.load(std::sync::atomic::Ordering::Relaxed) >= 2 * QUICK_PER_TERM {
