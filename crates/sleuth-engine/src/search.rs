@@ -327,7 +327,7 @@ pub fn search_index_with(pool: &Pool, catalog: &Catalog, q: &SearchQuery, roots:
 /// another type count: two PDFs are two documents. Nothing is guessed: the
 /// names or the title-block details must be equal.
 pub fn attach_twins(hits: &mut [Hit], pool: &Pool, catalog: &Catalog, drives: &DriveMap) {
-    let _cpu = crate::sys::SearchCpu::start();
+    let _cpu = crate::sys::SearchCpu::unpaced();
     // Title blocks: every read document with one of these drawing numbers.
     // For the rows at the top only: asking every part about the drawing
     // number of every row of a page (up to 500) took up to five seconds

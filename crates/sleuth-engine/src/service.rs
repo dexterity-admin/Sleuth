@@ -1355,6 +1355,8 @@ impl Engine {
         // is the whole answer. For a common word it is the first screen, and
         // the full search below replaces it (under the processor ceiling).
         if offset == 0 && !self.remembered(query, &roots) {
+            // The first screen has its own share of the processor.
+            let _first = crate::sys::FirstScreen::start();
             let generation = self.generation();
             let drives = self.drives.read().unwrap().clone();
             let stored: Vec<String> = roots.iter().map(|r| self.stored_path(r)).collect();

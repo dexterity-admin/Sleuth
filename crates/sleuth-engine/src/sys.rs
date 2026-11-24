@@ -193,7 +193,32 @@ static BACKGROUND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // rate, on however many threads.
 
 static GOVERNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static ALLOWANCE: std::sync::Mutex<Option<(f64, std::time::Instant)>> = std::sync::Mutex::new(None);
+/// Two allowances: `[0]` for the full pass (nobody waits for it), `[1]` for
+/// the first screen of a search (file names, then the quick pass). With one
+/// allowance for both, a search began with what the full pass of the one
+/// before had overdrawn, and a two-word search showed its first rows after
+/// 12 s (24 Nov 2026).
+static ALLOWANCE: std::sync::Mutex<[Option<(f64, std::time::Instant)>; 2]> = std::sync::Mutex::new([None, None]);
+/// Searches busy with their first screen.
+static FIRST_SCREENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held while a search works on its first screen: every search thread then
+/// draws from the first screen's allowance (a full pass of another search
+/// too, so that the two together keep to it).
+pub struct FirstScreen(());
+
+impl FirstScreen {
+    pub fn start() -> FirstScreen {
+        FIRST_SCREENS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        FirstScreen(())
+    }
+}
+
+impl Drop for FirstScreen {
+    fn drop(&mut self) {
+        FIRST_SCREENS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// Switch the allowance on (a desktop) or off (the office server, tests).
 pub fn govern(on: bool) {
@@ -204,31 +229,41 @@ pub fn governed() -> bool {
     GOVERNED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// (core-seconds a search may take at once, core-seconds it gets back per
-/// second). Together 0.165 of the cores in any one second (1.32 of 8), which
-/// leaves room under a fifth for the readers' 1 % during a search and for a
-/// piece of upkeep that was under way when the search began.
-fn allowance() -> (f64, f64) {
+/// (core-seconds that may be taken at once, core-seconds given back per
+/// second). For the first screen together 0.19 of the cores in any one
+/// second (1.5 of 8), which with the readers' 1 % during a search is the
+/// fifth a desktop allows; the full pass, alone, takes 0.075 of the cores
+/// (0.6 of 8) steadily.
+fn allowance(first_screen: bool) -> (f64, f64) {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as f64;
-    (cores * 0.115, cores * 0.05)
+    if first_screen { (cores * 0.12, cores * 0.07) } else { (cores * 0.05, cores * 0.075) }
 }
 
 /// Take `core_seconds` of processor time from the searches' allowance, after
 /// the work was done; sleeps for as long as it takes the allowance to make
 /// up what is overdrawn.
 pub fn charge(core_seconds: f64) {
+    charge_and(core_seconds, true);
+}
+
+/// As [`charge`], and with `wait` false without sleeping: for the last step
+/// before rows are sent, which later work makes up for.
+pub fn charge_and(core_seconds: f64, wait: bool) {
     if !governed() || core_seconds <= 0.0 {
         return;
     }
-    let (most, rate) = allowance();
-    let wait = {
+    let first = FIRST_SCREENS.load(std::sync::atomic::Ordering::SeqCst) > 0;
+    let (most, rate) = allowance(first);
+    let owed = {
         let mut g = ALLOWANCE.lock().unwrap_or_else(|p| p.into_inner());
         let now = std::time::Instant::now();
-        let (had, at) = g.unwrap_or((most, now));
-        let have = (had + now.duration_since(at).as_secs_f64() * rate).min(most) - core_seconds;
-        *g = Some((have, now));
+        let (had, at) = g[first as usize].unwrap_or((most, now));
+        // Never more than five seconds behind, whatever was taken.
+        let have = ((had + now.duration_since(at).as_secs_f64() * rate).min(most) - core_seconds).max(-5.0 * rate);
+        g[first as usize] = Some((have, now));
         if have < 0.0 { -have / rate } else { 0.0 }
     };
+    let wait = if wait { owed } else { 0.0 };
     if wait > 0.0 {
         std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(5.0)));
     }
@@ -248,18 +283,23 @@ fn thread_cpu() -> f64 {
 }
 
 /// Charges the processor time its thread used while it was held.
-pub struct SearchCpu(f64);
+pub struct SearchCpu(f64, bool);
 
 impl SearchCpu {
     pub fn start() -> SearchCpu {
-        SearchCpu(if governed() { thread_cpu() } else { 0.0 })
+        SearchCpu(if governed() { thread_cpu() } else { 0.0 }, true)
+    }
+
+    /// Charges without making the thread wait.
+    pub fn unpaced() -> SearchCpu {
+        SearchCpu(if governed() { thread_cpu() } else { 0.0 }, false)
     }
 }
 
 impl Drop for SearchCpu {
     fn drop(&mut self) {
         if governed() {
-            charge(thread_cpu() - self.0);
+            charge_and(thread_cpu() - self.0, self.1);
         }
     }
 }
