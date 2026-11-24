@@ -35,7 +35,7 @@ pub struct PageText {
 
 /// Bump when reading changes enough that old results should be redone.
 /// 2: page classification and selective OCR of image regions (Sleuth 1.0).
-pub const READER_VERSION: u32 = 2;
+pub const READER_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FileText {

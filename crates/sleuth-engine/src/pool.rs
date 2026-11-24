@@ -218,6 +218,10 @@ pub struct Covered {
     /// [`state::READ`] or [`state::FAILED`].
     pub state: i64,
     pub read_at: i64,
+    /// Read by a reader with a known fault that this document meets
+    /// ([`ReadingRow::again`]): it stays searchable as it is, and counts as
+    /// not read yet, so that it is read once more.
+    pub again: bool,
 }
 
 /// A document id that names its part too, for the ids that travel to the
@@ -286,7 +290,7 @@ impl Rows {
             blob.extend_from_slice(&r.size.to_le_bytes());
             blob.extend_from_slice(&r.mtime.to_le_bytes());
             blob.extend_from_slice(&r.read_at.to_le_bytes());
-            blob.push(r.state as u8);
+            blob.push(r.state as u8 | if r.again { 0x80 } else { 0 });
             prev = &r.path;
         }
         blob.shrink_to_fit();
@@ -298,7 +302,7 @@ impl Rows {
         let b = &self.blob;
         let mut pos = 0usize;
         let mut path: Vec<u8> = Vec::new();
-        let mut row = ReadingRow { id: 0, path: String::new(), size: 0, mtime: 0, state: 0, read_at: 0, error: String::new() };
+        let mut row = ReadingRow { id: 0, path: String::new(), size: 0, mtime: 0, state: 0, read_at: 0, error: String::new(), again: false };
         let i64_at = |at: usize| i64::from_le_bytes(b[at..at + 8].try_into().unwrap());
         for _ in 0..self.n {
             let shared = u16::from_le_bytes([b[pos], b[pos + 1]]) as usize;
@@ -313,7 +317,8 @@ impl Rows {
             row.size = i64_at(pos + 8) as u64;
             row.mtime = i64_at(pos + 16);
             row.read_at = i64_at(pos + 24);
-            row.state = b[pos + 32] as i64;
+            row.state = (b[pos + 32] & 0x7f) as i64;
+            row.again = b[pos + 32] & 0x80 != 0;
             pos += 33;
             f(&row);
             path = std::mem::take(&mut row.path).into_bytes();
@@ -933,13 +938,20 @@ impl Pool {
             // A published part's rows never change; `work` is asked each time.
             let work_rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { Vec::new() };
             let mut note = |r: &ReadingRow| {
-                let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at };
+                let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at, again: r.again };
                 match cover.entry(path_key(&r.path)) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         // Newest reading wins; this PC's unpublished one on a tie.
-                        let old = e.get();
-                        if c.read_at > old.read_at || (c.read_at == old.read_at && p.work) {
-                            e.insert(c);
+                        let old = *e.get();
+                        let (new, old) = if c.read_at > old.read_at || (c.read_at == old.read_at && p.work) { (c, old) } else { (old, c) };
+                        // But a later failure does not take away what an
+                        // earlier reading of the same file found (a document
+                        // read once more because of a reader fault, and not
+                        // readable this time); it is not tried a third time.
+                        if new.state != state::READ && old.state == state::READ && (new.size, new.mtime) == (old.size, old.mtime) {
+                            e.insert(Covered { again: false, ..old });
+                        } else {
+                            e.insert(new);
                         }
                     }
                     std::collections::hash_map::Entry::Vacant(e) => {
@@ -1019,12 +1031,12 @@ impl Pool {
 
     /// [`Pool::state_of`] by a key already worked out ([`PathKeyer`]).
     pub fn state_of_key(&self, key: u64, size: u64, mtime: i64) -> Option<i64> {
-        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime).map(|c| c.state)
+        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| c.state)
     }
 
     /// As [`Pool::state_of_key`], with when that state was recorded.
     pub fn state_at_key(&self, key: u64, size: u64, mtime: i64) -> Option<(i64, i64)> {
-        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime).map(|c| (c.state, c.read_at))
+        self.cover.read().unwrap().get(&key).filter(|c| c.size == size && c.mtime == mtime && !c.again).map(|c| (c.state, c.read_at))
     }
 
     /// Whether a newer reading of the same path replaced this one.

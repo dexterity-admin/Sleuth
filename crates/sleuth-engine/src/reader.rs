@@ -171,16 +171,30 @@ pub fn read_pdf_lanes(path: &Path, ocr: Option<&OcrReader>, opts: &ReadOptions) 
 
 /// An OCR line sitting on text-layer text that says the same thing (or
 /// covers it almost entirely) adds nothing.
+///
+/// Only text-layer text of about the line's own size counts. A file can
+/// give one "line" whose box spans most of the page (a note written up the
+/// border, taken with stray characters far away from it); every OCR line
+/// lies inside such a box, and all of them were dropped: a sheet with a
+/// pasted table of 435 tags kept none of them (24 Nov 2026).
 fn repeats_native(l: &Line, native: &[Line]) -> bool {
     if l.source != TextSource::Ocr {
         return false;
     }
     let s = sep_form(&l.text);
+    let area = l.bbox.area();
     native.iter().any(|n| {
         let ov = l.bbox.overlap(&n.bbox);
-        ov >= 0.5 && (sep_form(&n.text).contains(&s) || ov >= 0.9)
+        let times = if area > 0.0 { n.bbox.area() / area } else { f32::MAX };
+        ov >= 0.5 && ((times <= SAME_TEXT_AREA && sep_form(&n.text).contains(&s)) || (times <= SAME_BOX_AREA && ov >= 0.9))
     })
 }
+
+/// How many times larger than an OCR line a text-layer box may be and still
+/// make the line a repeat: when it holds the same text, and when it only
+/// lies on the same place.
+const SAME_TEXT_AREA: f32 = 12.0;
+const SAME_BOX_AREA: f32 = 3.0;
 
 #[cfg(test)]
 mod tests {
@@ -213,6 +227,18 @@ mod tests {
         assert!(!repeats_native(&elsewhere, &native));
         let part = Line { text: "1203".into(), bbox: NormBox { x: 0.2, w: 0.1, ..b }, ..same.clone() };
         assert!(repeats_native(&part, &native));
+    }
+
+    #[test]
+    fn ocr_inside_a_page_wide_text_box_is_kept() {
+        // One text-layer "line" whose box spans the sheet, and a table row
+        // read with OCR inside it: neither its place nor a chance match of a
+        // short text makes the row a repeat.
+        let wide = vec![Line { text: "N 4 4 2020 ALL RIGHTS RESERVED 12-71-HS-037P-57".into(), conf: 1.0, source: TextSource::TextLayer, bbox: NormBox { x: 0.02, y: 0.13, w: 0.95, h: 0.8 }, alt: false }];
+        let row = Line { text: "12-71-HS-037P-57".into(), conf: 0.95, source: TextSource::Ocr, bbox: NormBox { x: 0.1, y: 0.2, w: 0.03, h: 0.006 }, alt: false };
+        assert!(!repeats_native(&row, &wide));
+        let short = Line { text: "44".into(), ..row.clone() };
+        assert!(!repeats_native(&short, &wide));
     }
 
     #[test]

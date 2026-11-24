@@ -4,6 +4,15 @@
 
 Not released yet.
 
+- **Text in pictures no longer thrown away under a page-wide text box:** an
+  OCR line lying on text the file itself holds is a repeat and is dropped.
+  The check took any text box, however large; some files give one "line"
+  whose box spans most of the sheet (a note written up the border), and
+  every OCR line under it was dropped. One sheet with a pasted table of 435
+  tags kept none of them. Only text of about the line's own size counts now.
+  Documents read before this (reader version 2) that have a page with
+  pictures and such a box (1,726 of 20,860 in the office index on 24 November
+  2026) stay searchable as they are and are read once more.
 - **Fewer, larger parts:** a search pays for every part of the office index,
   and no merge took in more than 512 MB, so the number of parts grew with the
   index (163 parts for 73 GB on 24 November 2026). Middle-sized parts are now

@@ -85,7 +85,16 @@ pub struct ReadingRow {
     pub state: i64,
     pub read_at: i64,
     pub error: String,
+    /// Read by a reader older than [`READ_AGAIN_BEFORE`] and of the kind its
+    /// fault spoiled: to be read once more.
+    pub again: bool,
 }
+
+/// Readers before this version dropped every OCR line lying inside a
+/// text-layer box, however large the box (see `reader::repeats_native`). A
+/// reading of theirs with a page that has pictures and a text-layer box over
+/// a fiftieth of the page may have lost what the pictures say.
+pub const READ_AGAIN_BEFORE: u32 = 3;
 
 /// `file:` URI of a path for SQLite, so `immutable=1` can be asked for.
 /// A network path keeps its two leading slashes (`file:////host/share/x.db`).
@@ -427,9 +436,16 @@ impl Store {
 
     /// Every reading held (hidden ones included): what this part covers.
     pub fn reading_rows(&self) -> Result<Vec<ReadingRow>> {
-        let mut st = self.conn.prepare("SELECT id, path, size, mtime, read_state, COALESCE(read_at, 0), '' FROM main.files WHERE read_state IN (?1, ?2, ?3)")?;
-        let rows = st.query_map(params![state::READ, state::FAILED, state::NEEDS_OCR], |r| {
-            Ok(ReadingRow { id: r.get(0)?, path: r.get(1)?, size: r.get::<_, i64>(2)? as u64, mtime: r.get(3)?, state: r.get(4)?, read_at: r.get(5)?, error: r.get(6)? })
+        let mut st = self.conn.prepare(
+            "SELECT id, path, size, mtime, read_state, COALESCE(read_at, 0), '',
+                    read_state=?1
+                    AND COALESCE(CASE WHEN json_valid(provenance) THEN json_extract(provenance, '$.reader_version') END, 0) < ?4
+                    AND id IN (SELECT p.file_id FROM main.pages p WHERE p.class='hybrid' AND EXISTS (
+                        SELECT 1 FROM main.lines l WHERE l.file_id=p.file_id AND l.page=p.page AND l.source=1 AND l.w>0.05 AND l.h>0.05 AND l.w*l.h>0.02))
+             FROM main.files WHERE read_state IN (?1, ?2, ?3)",
+        )?;
+        let rows = st.query_map(params![state::READ, state::FAILED, state::NEEDS_OCR, READ_AGAIN_BEFORE], |r| {
+            Ok(ReadingRow { id: r.get(0)?, path: r.get(1)?, size: r.get::<_, i64>(2)? as u64, mtime: r.get(3)?, state: r.get(4)?, read_at: r.get(5)?, error: r.get(6)?, again: r.get::<_, Option<bool>>(7)?.unwrap_or(false) })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
