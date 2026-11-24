@@ -143,7 +143,12 @@ long as it worked. The full pass checks a cancel flag between parts.
   together (4,000 in the quick pass, 40,000 in the full pass), shared out by
   part size, so its work does not grow with the number of parts. Each part
   still costs about 3 ms of page reads per term: fewer, larger parts (the
-  merge) are what make a search cheaper.
+  merge) are what make a search cheaper. Merges go by size: under 32 MB
+  (eight or more, up to 512 MB taken in), under 256 MB (six, 1 GB), under
+  1 GB (four, 4 GB); the server alone merges parts under 4 GB again (four,
+  16 GB). A merged-away part stays searched until its replacement is open on
+  this PC. The quick pass stops asking parts once it holds 300 lines of a
+  term; the full pass covers the rest.
 - A ceiling on the worker process as a whole was tried and removed: once the
   readers had used the share, Windows held back the threads that answer the
   window too, and a request waited over a minute.

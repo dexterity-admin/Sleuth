@@ -287,6 +287,10 @@ pub struct Engine {
     /// (when, pages) of every document read here in the last hour.
     pub(crate) pages_read: Mutex<VecDeque<(Instant, u32)>>,
     results: Mutex<VecDeque<(String, (u64, u64), Arc<Vec<Hit>>, Instant)>>,
+    /// Pages already sent, with the other files of each document attached
+    /// (query, roots, offset and limit as one key; kept as long as `results` are).
+    #[allow(clippy::type_complexity)]
+    pages: Mutex<VecDeque<(String, (u64, u64), Instant, Vec<Hit>)>>,
     /// The last pages rendered for the preview, by file, page, size and
     /// the file's size and date: going back to a result shows it at once.
     previews: Mutex<VecDeque<(String, Arc<Rendered>)>>,
@@ -378,6 +382,7 @@ impl Engine {
             searches: Mutex::new(HashMap::new()),
             pages_read: Mutex::new(VecDeque::new()),
             results: Mutex::new(VecDeque::new()),
+            pages: Mutex::new(VecDeque::new()),
             previews: Mutex::new(VecDeque::new()),
             latencies: Mutex::new(VecDeque::new()),
             searches_total: AtomicU64::new(0),
@@ -1253,10 +1258,29 @@ impl Engine {
     }
 
     fn search_page_with(&self, query: &str, roots: &[String], offset: usize, limit: usize, cancel: Option<&AtomicBool>, memo: Option<&NamesMemo>) -> Result<(Vec<Hit>, Arc<Vec<Hit>>)> {
+        let was_remembered = self.remembered(query, roots);
         let all = self.search_hits_with(query, roots, cancel, memo)?;
+        let generation = self.generation();
+        let key = format!("{offset} {limit} {query}\n{}", roots.join("\n"));
+        // The same page of the same rows again (back to a search made a
+        // moment ago): finding the other files of each document anew took
+        // 3.5 s for a project number with 465 hits (24 Nov 2026).
+        if was_remembered
+            && let Some(p) = self.pages.lock().unwrap().iter().find(|p| p.0 == key && Self::still_good(p.1, generation, p.2))
+        {
+            return Ok((p.3.clone(), all));
+        }
         let mut page: Vec<Hit> = all.iter().skip(offset).take(limit).cloned().collect();
         let drives = self.drives.read().unwrap().clone();
         attach_twins(&mut page, &self.pool, &self.catalog, &drives);
+        if !cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
+            let mut mem = self.pages.lock().unwrap();
+            mem.retain(|p| Self::still_good(p.1, generation, p.2) && p.0 != key);
+            mem.push_back((key, generation, Instant::now(), page.clone()));
+            while mem.len() > RESULT_MEMORY {
+                mem.pop_front();
+            }
+        }
         Ok((page, all))
     }
 

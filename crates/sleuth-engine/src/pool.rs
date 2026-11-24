@@ -841,6 +841,11 @@ impl Pool {
                     changed = true;
                 }
             }
+            // A part whose replacement was opened just now goes with it.
+            let now_live: HashSet<String> = live.iter().filter(|p| !p.work).map(|p| p.name.clone()).collect();
+            let before = live.len();
+            live.retain(|p| p.work || !retired.get(&p.path).is_some_and(|into| now_live.contains(into)));
+            changed |= live.len() != before;
         }
         {
             let mut m = self.mirror.lock().unwrap();
