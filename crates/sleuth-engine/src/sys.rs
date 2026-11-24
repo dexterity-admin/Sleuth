@@ -230,13 +230,13 @@ pub fn governed() -> bool {
 }
 
 /// (core-seconds that may be taken at once, core-seconds given back per
-/// second). For the first screen together 0.19 of the cores in any one
-/// second (1.5 of 8), which with the readers' 1 % during a search is the
+/// second). For the first screen together 0.16 of the cores in any one
+/// second (1.3 of 8), which with the readers' 1 % during a search stays under the
 /// fifth a desktop allows; the full pass, alone, takes 0.075 of the cores
 /// (0.6 of 8) steadily.
 fn allowance(first_screen: bool) -> (f64, f64) {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4) as f64;
-    if first_screen { (cores * 0.12, cores * 0.07) } else { (cores * 0.05, cores * 0.075) }
+    if first_screen { (cores * 0.10, cores * 0.06) } else { (cores * 0.05, cores * 0.075) }
 }
 
 /// Take `core_seconds` of processor time from the searches' allowance, after
@@ -304,11 +304,11 @@ impl Drop for SearchCpu {
     }
 }
 
-/// Threads for a scan of the file lists by a search: two on a desktop (a
+/// Threads for a scan of the file lists by a search: one on a desktop (a
 /// scan on every core is over the rule in a quarter of a second), the
 /// caller's choice elsewhere.
 pub fn scan_threads(otherwise: usize) -> usize {
-    if governed() { 2 } else { otherwise }
+    if governed() { 1 } else { otherwise }
 }
 
 /// Full passes of searches under way: the one background job somebody is
