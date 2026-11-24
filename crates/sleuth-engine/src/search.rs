@@ -434,6 +434,7 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
             // One thread, busy half the time: under a sixteenth of an
             // 8-core processor, however common the word.
             let _pace = (lim.threads == 1).then(crate::sys::HalfTime::alone);
+            let part_started = std::time::Instant::now();
             let cands = match category {
                 Some(cat) => {
                     let c = s.search_tags(t, cat, scope, limit)?;
@@ -447,7 +448,13 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
                 }
             };
             got.fetch_add(cands.len(), std::sync::atomic::Ordering::Relaxed);
-            resolve(s, cands)
+            let asked = part_started.elapsed();
+            let found = cands.len();
+            let rows = resolve(s, cands);
+            if part_started.elapsed().as_millis() > 1500 {
+                tracing::info!("search: part {} ({} MB) took {} ms to ask and {} ms to resolve {found} rows of {:?} (limit {limit})", part.name, part.bytes >> 20, asked.as_millis(), (part_started.elapsed() - asked).as_millis(), t.raw);
+            }
+            rows
         });
         for (part, rows) in found {
             out.extend(rows.into_iter().map(|(c, f)| (c, Doc::read(f, part.slot))));

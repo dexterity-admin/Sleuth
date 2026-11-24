@@ -155,6 +155,7 @@ impl Engine {
         let mut last_catalog = 0u64;
         let mut last_parts = 0u64;
         let mut last_sweep: Option<Instant> = None;
+        let mut last_recover: Option<Instant> = None;
         while !self.stopping() {
             // The office folder, and this PC's own for readings of files on
             // its local disks; both searched from the copy on this PC.
@@ -173,7 +174,13 @@ impl Engine {
             }
             self.mirror_signal.raise();
             let (catalog_now, parts_now) = (self.catalog.generation(), self.pool.parts_rev());
-            if parts_now != last_parts || catalog_now != last_catalog {
+            // New parts at once. For the file lists alone (a reading whose file
+            // is gone is hidden) every ten minutes is enough: the lists change
+            // with every folder listed, and going through 1.26 million
+            // readings took 40 s of one core each time (24 Nov 2026).
+            let lists_due = catalog_now != last_catalog && last_recover.is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+            if parts_now != last_parts || lists_due {
+                last_recover = Some(Instant::now());
                 last_catalog = catalog_now;
                 last_parts = parts_now;
                 {

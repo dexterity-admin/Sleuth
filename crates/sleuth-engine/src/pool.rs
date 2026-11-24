@@ -336,7 +336,11 @@ impl Part {
     /// Run a query on this part. An I/O failure (share gone) marks the part
     /// for reopening and is returned.
     pub fn with<T>(&self, f: impl FnOnce(&Store) -> Result<T>) -> Result<T> {
+        let asked = std::time::Instant::now();
         let g = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        if asked.elapsed().as_millis() > 1000 {
+            info!("part {}: {} waited {} ms for another job to let go of it", self.name, std::thread::current().name().unwrap_or("a request"), asked.elapsed().as_millis());
+        }
         let r = f(&g);
         g.conn.flush_prepared_statement_cache();
         if let Err(e) = &r
