@@ -348,7 +348,7 @@ impl Engine {
                 return;
             }
         };
-        self.pool.recover(&|p| self.presence(p));
+        self.pool.recover_parts();
         while !self.stopping() {
             if let Err(e) = self.reader_pass(&mut c) {
                 warn!("reader: {e:#}");
@@ -740,7 +740,7 @@ impl Engine {
             }
         }
         if published {
-            self.pool.recover(&|p| self.presence(p));
+            self.pool.recover_parts();
             self.stats_signal.raise();
         }
     }
@@ -869,7 +869,7 @@ impl Engine {
                         warn!("{}: {err:#}", part.display());
                     }
                     e.pool.refresh();
-                    e.pool.recover(&|p| e.presence(p));
+                    e.pool.recover_parts();
                     e.event("info", &format!("{} small parts of the office index were merged into one", sources.len()));
                 }
                 Ok(None) => {}

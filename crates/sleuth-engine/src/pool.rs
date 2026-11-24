@@ -392,6 +392,8 @@ pub struct Pool {
     cover: RwLock<HashMap<u64, Covered>>,
     /// Readings a newer reading of the same path replaced, per part.
     superseded: RwLock<HashMap<u32, HashSet<i64>>>,
+    /// Paths whose file was gone when the file lists were last asked.
+    gone: RwLock<HashSet<u64>>,
     next_slot: AtomicU32,
     /// Bumped whenever what a search can see changed.
     generation: AtomicU64,
@@ -936,6 +938,20 @@ impl Pool {
 
     /// Work out the current reading of every path and hide the others.
     pub fn recover(&self, presence: &dyn Fn(&str) -> Presence) {
+        self.recover_with(Some(presence));
+    }
+
+    /// As [`Pool::recover`] after the parts changed, without asking the file
+    /// lists again: a file counts as gone when it was at the last
+    /// [`Pool::recover`]. Asking the lists about every reading is most of
+    /// the work (35 s of one core for 600,000 documents, 24 Nov 2026), and
+    /// the lists do not change because a part arrived.
+    pub fn recover_parts(&self) {
+        self.recover_with(None);
+    }
+
+    fn recover_with(&self, presence: Option<&dyn Fn(&str) -> Presence>) {
+        let was_gone = if presence.is_none() { self.gone.read().unwrap().clone() } else { HashSet::new() };
         let parts = self.parts();
         let started = std::time::Instant::now();
         let mut cover: HashMap<u64, Covered> = HashMap::new();
@@ -985,7 +1001,10 @@ impl Pool {
                 if !current {
                     superseded.entry(p.slot).or_default().insert(r.id);
                     hidden.push(r.id);
-                } else if presence(&r.path) == Presence::Gone {
+                } else if match presence {
+                    Some(ask) => ask(&r.path) == Presence::Gone,
+                    None => was_gone.contains(&key),
+                } {
                     gone.push(key);
                     hidden.push(r.id);
                 } else if r.state == state::NEEDS_OCR {
@@ -1005,13 +1024,16 @@ impl Pool {
         }
         *self.superseded.write().unwrap() = superseded;
         // A reading of a file that is gone covers nothing.
-        for key in gone {
-            cover.remove(&key);
+        for key in &gone {
+            cover.remove(key);
+        }
+        if presence.is_some() {
+            *self.gone.write().unwrap() = gone.into_iter().collect();
         }
         *self.cover.write().unwrap() = cover;
         self.generation.fetch_add(1, Ordering::SeqCst);
         if started.elapsed().as_secs() >= 3 {
-            info!("which readings are current took {} ms for {} parts", started.elapsed().as_millis(), parts.len());
+            info!("which readings are current took {} ms for {} parts{}", started.elapsed().as_millis(), parts.len(), if presence.is_some() { ", file lists asked" } else { "" });
         }
     }
 

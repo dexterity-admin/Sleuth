@@ -156,6 +156,7 @@ impl Engine {
         let mut last_parts = 0u64;
         let mut last_sweep: Option<Instant> = None;
         let mut last_recover: Option<Instant> = None;
+        let mut recovered_once = false;
         while !self.stopping() {
             // The office folder, and this PC's own for readings of files on
             // its local disks; both searched from the copy on this PC.
@@ -167,7 +168,7 @@ impl Engine {
             }
             let t = Instant::now();
             self.pool.refresh();
-            if store.is_some() && !self.pool_ready.swap(true, Ordering::SeqCst) {
+            if store.is_some() && !self.pool_opened.swap(true, Ordering::SeqCst) {
                 let ms = self.pool.mirror_stats();
                 info!("office index: {} part(s) opened from this PC and {} over the network in {} ms; {} to copy", ms.parts, ms.remote_parts, t.elapsed().as_millis(), ms.pending_parts);
                 self.stats_signal.raise();
@@ -178,16 +179,31 @@ impl Engine {
             // is gone is hidden) every ten minutes is enough: the lists change
             // with every folder listed, and going through 1.26 million
             // readings took 40 s of one core each time (24 Nov 2026).
-            let lists_due = catalog_now != last_catalog && last_recover.is_none_or(|t| t.elapsed() > Duration::from_secs(600));
-            if parts_now != last_parts || lists_due {
-                last_recover = Some(Instant::now());
-                last_catalog = catalog_now;
+            // The very first time without the file lists, so that text is
+            // found a few seconds after a start; the lists are asked in the
+            // round after.
+            let first = !recovered_once;
+            let lists_due = !first && catalog_now != last_catalog && last_recover.is_none_or(|t| t.elapsed() > Duration::from_secs(600));
+            let due = parts_now != last_parts || lists_due;
+            if due {
                 last_parts = parts_now;
                 {
                     // In turn with the other background jobs, on a desktop.
-                    let _turn = (!self.server_mode).then(crate::sys::HalfTime::start);
-                    self.pool.recover(&|p| self.presence(p));
+                    let _turn = (!self.server_mode && !first).then(crate::sys::HalfTime::start);
+                    if lists_due {
+                        last_recover = Some(Instant::now());
+                        last_catalog = catalog_now;
+                        self.pool.recover(&|p| self.presence(p));
+                    } else {
+                        self.pool.recover_parts();
+                    }
                 }
+                recovered_once = true;
+            }
+            if store.is_some() {
+                self.pool_ready.store(true, Ordering::SeqCst);
+            }
+            if due {
                 self.stats_signal.raise();
                 self.reader_signal.raise();
                 // Where the worker's memory goes, as far as it can tell.

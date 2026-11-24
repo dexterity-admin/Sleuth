@@ -278,7 +278,11 @@ pub struct Engine {
     pub(crate) mirror_at: Mutex<Option<(Option<String>, Option<PathBuf>)>>,
     pub(crate) heartbeat_signal: Signal,
     /// The office index's parts were opened at least once since start.
+    /// The parts are open and it is known which reading of each document
+    /// is current: text can be searched.
     pub(crate) pool_ready: AtomicBool,
+    /// The parts were opened once (said in the log).
+    pub(crate) pool_opened: AtomicBool,
     pub(crate) cache_signal: Signal,
     pub(crate) office_signal: Signal,
     pub(crate) stats_signal: Signal,
@@ -375,6 +379,7 @@ impl Engine {
             mirror_at: Mutex::new(None),
             heartbeat_signal: Signal::default(),
             pool_ready: AtomicBool::new(false),
+            pool_opened: AtomicBool::new(false),
             cache_signal: Signal::default(),
             office_signal: Signal::default(),
             stats_signal: Signal::default(),
@@ -1241,7 +1246,10 @@ impl Engine {
             return Ok(hits);
         }
         drop(key);
-        self.remember(query, raw_roots, generation, &hits);
+        // Not while the index is still being opened: not the whole answer.
+        if self.pool_ready.load(Ordering::SeqCst) || self.index_dir().is_none() {
+            self.remember(query, raw_roots, generation, &hits);
+        }
         Ok(hits)
     }
 
@@ -1358,7 +1366,9 @@ impl Engine {
             if let Ok(quick) = quick
                 && !cancel.load(Ordering::SeqCst)
             {
-                if !lim.was_cut() {
+                // Not while the index is still being opened: what is found
+                // then is not the whole answer.
+                if !lim.was_cut() && (self.pool_ready.load(Ordering::SeqCst) || self.index_dir().is_none()) {
                     self.remember(query, &roots, generation, &Arc::new(quick));
                 } else if !quick.is_empty() {
                     let hits: Vec<Hit> = quick.into_iter().take(limit).collect();

@@ -286,7 +286,7 @@ impl Engine {
         work.conn.execute("UPDATE files SET read_at=?2 WHERE id=?1", rusqlite::params![id, t])?;
         let (size, mtime): (i64, i64) = work.conn.query_row("SELECT size, mtime FROM files WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         self.pool.note_saved(work_part, stored, Covered { slot: work_part.slot, id, size: size as u64, mtime, state: state::READ, read_at: t, again: false });
-        self.pool.recover(&|p| self.presence(p));
+        self.pool.recover_parts();
         self.work_dirty.store(true, Ordering::SeqCst);
         self.reader_signal.raise();
         Ok(())
