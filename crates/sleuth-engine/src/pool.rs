@@ -34,15 +34,16 @@ use tracing::{info, warn};
 
 /// A retired part is deleted this long after it was merged away.
 const RETIRED_KEEP_SECS: u64 = 24 * 3600;
-/// Parts above this size are never merged again.
-const BIGGEST_MERGED: u64 = 2 * 1024 * 1024 * 1024;
+/// Parts above this size are never merged again by a desktop PC; the office
+/// server, which is always on, goes on to [`BIGGEST_MERGED_SERVER`].
+const BIGGEST_MERGED: u64 = 1 << 30;
+const BIGGEST_MERGED_SERVER: u64 = 4 << 30;
 /// One merge takes at most this many parts and this many bytes, so it
 /// ends in minutes. Taking every small part at once (182 of them on a busy
 /// office, 12 Nov 2026) made merges that ran for hours over the network and
 /// were cut off by PCs being restarted, so the parts were never merged and
 /// every search had to look through all of them.
 const MERGE_MAX_PARTS: usize = 16;
-const MERGE_MAX_BYTES: u64 = 512 << 20;
 /// Parts opened at the same time by [`Pool::refresh`].
 const OPEN_AT_ONCE: usize = 16;
 /// Threads one query uses over all parts ([`Pool::each`]).
@@ -243,11 +244,83 @@ pub struct Part {
     pub work: bool,
     store: Mutex<Store>,
     /// What a published part covers (it never changes).
-    rows: Vec<ReadingRow>,
+    rows: Rows,
     /// Set when a query failed on I/O: the part is reopened at the next refresh.
     broken: AtomicBool,
     /// What was last written to the part's list of hidden readings.
     hidden_sig: AtomicU64,
+}
+
+/// What a published part covers, packed: a path shares its start with the
+/// one before it, and that start is stored once. As a `Vec<ReadingRow>`
+/// the 1.26 million readings of the office index took 295 MB of the
+/// worker's memory (24 Nov 2026).
+///
+/// One entry: bytes shared with the previous path (u16), bytes that follow
+/// (u32), those bytes, then id, size, modified time, read time (8 bytes
+/// each, little-endian) and the state (one byte).
+#[derive(Default)]
+struct Rows {
+    blob: Vec<u8>,
+    n: u32,
+}
+
+impl Rows {
+    fn pack(rows: &[ReadingRow]) -> Rows {
+        let mut blob = Vec::new();
+        let mut prev = "";
+        for r in rows {
+            let mut shared = prev.bytes().zip(r.path.bytes()).take(u16::MAX as usize).take_while(|(a, b)| a == b).count();
+            while !r.path.is_char_boundary(shared) {
+                shared -= 1;
+            }
+            let rest = &r.path.as_bytes()[shared..];
+            blob.extend_from_slice(&(shared as u16).to_le_bytes());
+            blob.extend_from_slice(&(rest.len() as u32).to_le_bytes());
+            blob.extend_from_slice(rest);
+            blob.extend_from_slice(&r.id.to_le_bytes());
+            blob.extend_from_slice(&r.size.to_le_bytes());
+            blob.extend_from_slice(&r.mtime.to_le_bytes());
+            blob.extend_from_slice(&r.read_at.to_le_bytes());
+            blob.push(r.state as u8);
+            prev = &r.path;
+        }
+        blob.shrink_to_fit();
+        Rows { blob, n: rows.len() as u32 }
+    }
+
+    /// Every row in the order it was packed.
+    fn each(&self, f: &mut dyn FnMut(&ReadingRow)) {
+        let b = &self.blob;
+        let mut pos = 0usize;
+        let mut path: Vec<u8> = Vec::new();
+        let mut row = ReadingRow { id: 0, path: String::new(), size: 0, mtime: 0, state: 0, read_at: 0, error: String::new() };
+        let i64_at = |at: usize| i64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        for _ in 0..self.n {
+            let shared = u16::from_le_bytes([b[pos], b[pos + 1]]) as usize;
+            let rest = u32::from_le_bytes(b[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            pos += 6;
+            path.truncate(shared);
+            path.extend_from_slice(&b[pos..pos + rest]);
+            pos += rest;
+            // Whole paths went in and were cut at character boundaries.
+            row.path = String::from_utf8(std::mem::take(&mut path)).unwrap_or_default();
+            row.id = i64_at(pos);
+            row.size = i64_at(pos + 8) as u64;
+            row.mtime = i64_at(pos + 16);
+            row.read_at = i64_at(pos + 24);
+            row.state = b[pos + 32] as i64;
+            pos += 33;
+            f(&row);
+            path = std::mem::take(&mut row.path).into_bytes();
+        }
+    }
+
+    fn ids(&self) -> Vec<i64> {
+        let mut out = Vec::with_capacity(self.n as usize);
+        self.each(&mut |r| out.push(r.id));
+        out
+    }
 }
 
 impl Part {
@@ -374,7 +447,7 @@ impl Pool {
             bytes: 0,
             work: true,
             store: Mutex::new(store),
-            rows: Vec::new(),
+            rows: Rows::default(),
             broken: AtomicBool::new(false),
             hidden_sig: AtomicU64::new(0),
         });
@@ -393,7 +466,7 @@ impl Pool {
             bytes: 0,
             work: true,
             store: Mutex::new(store),
-            rows: Vec::new(),
+            rows: Rows::default(),
             broken: AtomicBool::new(false),
             hidden_sig: AtomicU64::new(0),
         });
@@ -405,7 +478,7 @@ impl Pool {
     /// this PC, or `path` itself).
     fn open_published(&self, path: &Path, open_at: &Path) -> Result<Part> {
         let store = Store::open_part(open_at)?;
-        let rows = store.reading_rows()?;
+        let rows = Rows::pack(&store.reading_rows()?);
         Ok(Part {
             slot: self.next_slot.fetch_add(1, Ordering::SeqCst),
             name: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -562,8 +635,8 @@ impl Pool {
     /// that says where the worker's memory goes.
     pub fn row_stats(&self) -> (u64, u64) {
         let parts = self.parts.read().unwrap();
-        let rows = parts.iter().map(|p| p.rows.len() as u64).sum();
-        let bytes = parts.iter().flat_map(|p| p.rows.iter()).map(|r| (r.path.capacity() + std::mem::size_of::<ReadingRow>()) as u64).sum();
+        let rows = parts.iter().map(|p| p.rows.n as u64).sum();
+        let bytes = parts.iter().map(|p| p.rows.blob.len() as u64).sum();
         (rows, bytes)
     }
 
@@ -650,13 +723,18 @@ impl Pool {
         let names: HashSet<String> = on_disk.iter().filter_map(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().into_owned())).collect();
         let here: HashSet<&PathBuf> = on_disk.iter().map(|(p, _)| p).collect();
         let parts = self.parts.read().unwrap().clone();
-        // Close: merged away (and its replacement is here), broken, or deleted.
+        // Parts being searched now. A part merged into another is let go of
+        // once that other one is among them, not as soon as it is published:
+        // a merged part of a few GB takes minutes to reach this PC, and its
+        // documents would be missing from every search until then.
+        let live: HashSet<String> = parts.iter().filter(|p| !p.work).map(|p| p.name.clone()).collect();
+        // Close: merged away (and its replacement is searched), broken, or deleted.
         let mut closed: HashSet<u32> = HashSet::new();
         // Copies that failed while being searched: copied again.
         let mut discard: HashSet<PathBuf> = HashSet::new();
         for p in parts.iter().filter(|p| !p.work) {
             let dir_listed = p.path.parent().is_some_and(|d| listed_ok.contains(d));
-            let merged_away = retired.get(&p.path).is_some_and(|into| names.contains(into));
+            let merged_away = retired.get(&p.path).is_some_and(|into| live.contains(into));
             let missing = dir_listed && !here.contains(&p.path);
             let broken = p.broken.load(Ordering::SeqCst);
             // The copy was moved to another folder (or switched off): the
@@ -681,20 +759,35 @@ impl Pool {
         // failed for good.
         let mut to_open: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut pending: Vec<Pending> = Vec::new();
+        let local_of = |path: &Path| path.parent().and_then(local_dir).zip(path.file_name()).map(|(d, n)| d.join(n));
+        let whole_here = |local: &Path, bytes: u64| bytes > 0 && !discard.contains(local) && std::fs::metadata(local).is_ok_and(|m| m.len() == bytes);
+        // Parts that can be searched after this round without copying.
+        let ready: HashSet<String> = on_disk
+            .iter()
+            .filter(|(path, bytes)| local_of(path).is_none_or(|l| whole_here(&l, *bytes)))
+            .filter_map(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .chain(live.iter().cloned())
+            .collect();
         for (path, bytes) in &on_disk {
-            if in_flight.contains(path) || retired.get(path).is_some_and(|into| names.contains(into)) || parts.iter().any(|p| !p.work && p.path == *path) {
+            if in_flight.contains(path) || parts.iter().any(|p| !p.work && p.path == *path) {
                 continue;
             }
-            let local = path.parent().and_then(local_dir).zip(path.file_name()).map(|(d, n)| d.join(n));
+            // Merged into another part: not needed once that one can be
+            // searched, and never worth copying.
+            let merged = retired.get(path).is_some_and(|into| names.contains(into));
+            if merged && retired.get(path).is_some_and(|into| ready.contains(into)) {
+                continue;
+            }
+            let local = local_of(path);
             match local {
                 None => to_open.push((path.clone(), path.clone())),
                 Some(local) => {
-                    let whole = *bytes > 0 && !discard.contains(&local) && std::fs::metadata(&local).is_ok_and(|m| m.len() == *bytes);
+                    let whole = whole_here(&local, *bytes);
                     if whole {
                         to_open.push((path.clone(), local));
                     } else if failed.get(path).is_some_and(|n| *n >= MIRROR_TRIES) {
                         to_open.push((path.clone(), path.clone()));
-                    } else if !away {
+                    } else if !away && !merged {
                         pending.push(Pending { path: path.clone(), bytes: *bytes });
                     }
                 }
@@ -766,13 +859,20 @@ impl Pool {
         for f in &discard {
             let _ = std::fs::remove_file(f);
         }
+        let live_now: HashSet<String> = self.parts.read().unwrap().iter().filter(|p| !p.work).map(|p| p.name.clone()).collect();
+        // A copy of a part that was merged into one searched now is not
+        // needed again (395 such copies held 17 GB on 24 Nov 2026).
+        let merged_away = |p: &Path| {
+            let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            !live_now.contains(&stem) && retired.get(p).is_some_and(|into| live_now.contains(into))
+        };
         for dir in &listed_ok {
             let Some(rd) = local_dir(dir).and_then(|l| std::fs::read_dir(l).ok()) else { continue };
             for e in rd.flatten() {
                 let p = e.path();
                 let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
                 let stale = if ext == "db" {
-                    p.file_name().is_some_and(|n| !here.contains(&dir.join(n)))
+                    p.file_name().is_some_and(|n| !here.contains(&dir.join(n)) || merged_away(&dir.join(n)))
                 } else {
                     ext.ends_with(COPYING_EXT) && e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a.as_secs() > 3600)
                 };
@@ -795,13 +895,12 @@ impl Pool {
 
     /// Work out the current reading of every path and hide the others.
     pub fn recover(&self, presence: &dyn Fn(&str) -> Presence) {
-        use std::borrow::Cow;
         let parts = self.parts();
-        // A published part's rows never change; `work` is asked each time.
-        let all: Vec<(&Arc<Part>, Cow<[ReadingRow]>)> = parts.iter().map(|p| (p, if p.work { Cow::Owned(p.with(|s| s.reading_rows()).unwrap_or_default()) } else { Cow::Borrowed(p.rows.as_slice()) })).collect();
         let mut cover: HashMap<u64, Covered> = HashMap::new();
-        for (p, rows) in &all {
-            for r in rows.iter() {
+        for p in &parts {
+            // A published part's rows never change; `work` is asked each time.
+            let work_rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { Vec::new() };
+            let mut note = |r: &ReadingRow| {
                 let c = Covered { slot: p.slot, id: r.id, size: r.size, mtime: r.mtime, state: r.state, read_at: r.read_at };
                 match cover.entry(path_key(&r.path)) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
@@ -815,16 +914,21 @@ impl Pool {
                         e.insert(c);
                     }
                 }
+            };
+            if p.work {
+                work_rows.iter().for_each(&mut note);
+            } else {
+                p.rows.each(&mut note);
             }
         }
         let mut superseded: HashMap<u32, HashSet<i64>> = HashMap::new();
         let mut gone: Vec<u64> = Vec::new();
-        for (p, rows) in &all {
+        for p in &parts {
             if p.work {
                 continue;
             }
             let mut hidden: Vec<i64> = Vec::new();
-            for r in rows.iter() {
+            p.rows.each(&mut |r: &ReadingRow| {
                 let key = path_key(&r.path);
                 let current = cover.get(&key).is_some_and(|c| c.slot == p.slot && c.id == r.id);
                 if !current {
@@ -837,7 +941,7 @@ impl Pool {
                     // Waiting for OCR is not a reading: nothing to show.
                     hidden.push(r.id);
                 }
-            }
+            });
             // Written to the part only when it differs from last time.
             let sig = hidden.iter().fold(hidden.len() as u64, |a, id| a.wrapping_mul(1_000_003).wrapping_add(*id as u64));
             if p.hidden_sig.swap(sig, Ordering::SeqCst) != sig
@@ -1006,10 +1110,17 @@ pub fn publish(work: &Store, dir: &Path, pc: &str) -> Result<Option<PathBuf>> {
 /// Which parts to merge now, if any: all the small ones once there are
 /// enough of them, so the pool stays at a couple of dozen parts however
 /// many PCs publish.
-pub fn merge_candidates(parts: &[Arc<Part>]) -> Vec<Arc<Part>> {
-    const TIERS: [(u64, usize); 3] = [(32 << 20, 8), (256 << 20, 6), (BIGGEST_MERGED, 4)];
+///
+/// Each tier is: parts below this size, how many of them make a merge worth
+/// it, and the most one merge takes in. Until 1.4 no merge took in more than
+/// 512 MB, so the parts stayed near that size and their number grew with the
+/// index: 163 parts for 73 GB on 24 Nov 2026, and every search pays for each
+/// part. The third tier now makes parts of up to 4 GB (about 20 for that
+/// index); `server` adds a fourth, for the PC that is always on.
+pub fn merge_candidates(parts: &[Arc<Part>], server: bool) -> Vec<Arc<Part>> {
+    const TIERS: [(u64, usize, u64); 4] = [(32 << 20, 8, 512 << 20), (256 << 20, 6, 1 << 30), (BIGGEST_MERGED, 4, 4 << 30), (BIGGEST_MERGED_SERVER, 4, 16 << 30)];
     let mut lower = 0u64;
-    for (upper, enough) in TIERS {
+    for (upper, enough, max_bytes) in TIERS.into_iter().take(if server { 4 } else { 3 }) {
         let mut tier: Vec<Arc<Part>> = parts.iter().filter(|p| !p.work && p.bytes >= lower && p.bytes < upper).cloned().collect();
         if tier.len() >= enough {
             // Smallest first (oldest among equals), up to one merge's worth.
@@ -1017,7 +1128,7 @@ pub fn merge_candidates(parts: &[Arc<Part>]) -> Vec<Arc<Part>> {
             let mut take = Vec::new();
             let mut bytes = 0u64;
             for p in tier {
-                if take.len() >= MERGE_MAX_PARTS || (take.len() >= 2 && bytes + p.bytes > MERGE_MAX_BYTES) {
+                if take.len() >= MERGE_MAX_PARTS || (take.len() >= 2 && bytes + p.bytes > max_bytes) {
                     break;
                 }
                 bytes += p.bytes;
@@ -1054,11 +1165,11 @@ pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Pa
         for src in sources {
             // Its own connection: every reading is read, hidden or not.
             let from = Store::open_part(&src.open_at)?;
-            for row in &src.rows {
-                if !current(src.slot, row.id) {
+            for id in src.rows.ids() {
+                if !current(src.slot, id) {
                     continue;
                 }
-                target.import_reading(&from, row.id, deriver)?;
+                target.import_reading(&from, id, deriver)?;
                 kept += 1;
                 if kept.is_multiple_of(20) && !keep_going() {
                     return Ok(false);
@@ -1082,7 +1193,30 @@ pub fn merge(sources: &[Arc<Part>], current: &dyn Fn(u32, i64) -> bool, dir: &Pa
     }
     let upload = dir.join(format!("{name}.tmp"));
     let dest = dir.join(format!("{name}.db"));
-    let copied = std::fs::copy(&tmp, &upload).with_context(|| format!("copy the merged part to {}", upload.display()));
+    // In pieces, asking `keep_going` between them: a part of a few GB takes
+    // minutes to send, and the caller's lease must not run out meanwhile.
+    let copied = (|| -> Result<()> {
+        use std::io::{Read as _, Write as _};
+        let mut from = std::fs::File::open(&tmp)?;
+        let mut to = std::fs::File::create(&upload)?;
+        let mut buf = vec![0u8; 1 << 20];
+        let mut sent = 0usize;
+        loop {
+            let n = from.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            to.write_all(&buf[..n])?;
+            sent += n;
+            if sent >= 64 << 20 {
+                sent = 0;
+                anyhow::ensure!(keep_going(), "stopped while the merged part was being sent");
+            }
+        }
+        to.sync_all()?;
+        Ok(())
+    })()
+    .with_context(|| format!("copy the merged part to {}", upload.display()));
     let _ = std::fs::remove_file(&tmp);
     if let Err(e) = copied.and_then(|_| {
         // Checked where it landed, as a published part is.
@@ -1337,10 +1471,17 @@ mod tests {
 
     #[test]
     fn merge_waits_for_enough_small_parts() {
-        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), open_at: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Vec::new(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
+        let mk = |bytes: u64| Arc::new(Part { slot: 1, name: "x".into(), path: PathBuf::new(), open_at: PathBuf::new(), bytes, work: false, store: Mutex::new(Store::open_in_memory().unwrap()), rows: Rows::default(), broken: AtomicBool::new(false), hidden_sig: AtomicU64::new(0) });
         let few: Vec<Arc<Part>> = (0..7).map(|_| mk(1 << 20)).collect();
-        assert!(merge_candidates(&few).is_empty());
+        assert!(merge_candidates(&few, false).is_empty());
         let enough: Vec<Arc<Part>> = (0..8).map(|_| mk(1 << 20)).chain([mk(3 << 30)]).collect();
-        assert_eq!(merge_candidates(&enough).len(), 8, "the big part is left alone");
+        assert_eq!(merge_candidates(&enough, false).len(), 8, "the big part is left alone");
+        // Middle-sized parts are merged into one of a few GB; only the
+        // server merges those again.
+        let middle: Vec<Arc<Part>> = (0..5).map(|_| mk(400 << 20)).chain([mk(3 << 30), mk(3 << 30), mk(3 << 30), mk(3 << 30)]).collect();
+        assert_eq!(merge_candidates(&middle, false).len(), 5);
+        let large: Vec<Arc<Part>> = (0..4).map(|_| mk(3 << 30)).collect();
+        assert!(merge_candidates(&large, false).is_empty());
+        assert_eq!(merge_candidates(&large, true).len(), 4);
     }
 }

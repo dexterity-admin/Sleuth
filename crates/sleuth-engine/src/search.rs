@@ -416,8 +416,18 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
     };
     if in_text {
         let total: u64 = pool.parts().iter().map(|p| p.bytes).sum();
+        let quick = lim.per_term == QUICK_PER_TERM;
+        // Lines found so far by the quick pass. Once it has twice what one
+        // term may show, the parts not yet asked are left to the full pass:
+        // a common word is in every part, and asking all of them on every
+        // core is what took the processor over a fifth for a moment.
+        let got = std::sync::atomic::AtomicUsize::new(0);
         let found = pool.each_on(lim.threads, |part, s| {
             if lim.cancelled() {
+                return Ok(Vec::new());
+            }
+            if quick && got.load(std::sync::atomic::Ordering::Relaxed) >= 2 * QUICK_PER_TERM {
+                lim.note_cut(true);
                 return Ok(Vec::new());
             }
             let limit = lim.part_limit(part.bytes, total, part.work);
@@ -431,11 +441,12 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
                     c
                 }
                 None => {
-                    let (c, cut) = s.search_lines_cut(t, scope, limit, lim.per_term != QUICK_PER_TERM)?;
+                    let (c, cut) = s.search_lines_cut(t, scope, limit, !quick)?;
                     lim.note_cut(cut);
                     c
                 }
             };
+            got.fetch_add(cands.len(), std::sync::atomic::Ordering::Relaxed);
             resolve(s, cands)
         });
         for (part, rows) in found {

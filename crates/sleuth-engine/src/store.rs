@@ -327,6 +327,14 @@ fn bbox_of(r: &rusqlite::Row, i: usize) -> rusqlite::Result<NormBox> {
     Ok(NormBox { x: at(0)?, y: at(1)?, w: at(2)?, h: at(3)? })
 }
 
+/// A line's confidence. SQLite keeps a not-a-number as NULL; such a line is
+/// read as confidence 0 (unknown), not refused: one of them made every merge
+/// holding it fail ("Invalid column type Null at index: 2, name: conf",
+/// 24 Nov 2026).
+fn conf_of(r: &rusqlite::Row, i: usize) -> rusqlite::Result<f32> {
+    Ok(r.get::<_, Option<f64>>(i)?.unwrap_or(0.0) as f32)
+}
+
 fn file_row(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
     Ok(FileRow { id: r.get(0)?, path: r.get(1)?, name: r.get(2)?, size: r.get::<_, i64>(3)? as u64, mtime: r.get(4)?, read_state: r.get(5)? })
 }
@@ -474,7 +482,7 @@ impl Store {
                         r.get::<_, Option<f64>>(4)?,
                         r.get::<_, Option<f64>>(5)?,
                         r.get::<_, String>(6)?,
-                        r.get::<_, f64>(7)?,
+                        r.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
                         r.get::<_, String>(8)?,
                         r.get::<_, String>(9)?,
                         r.get::<_, i64>(10)?,
@@ -1138,7 +1146,7 @@ impl Store {
         let mut st = self.conn.prepare("SELECT page, text, conf, source, alt, x, y, w, h FROM lines WHERE file_id=?1 AND source<>3 ORDER BY page, id")?;
         let mut ft = FileText::default();
         let rows = st.query_map([file_id], |r| {
-            Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: r.get::<_, f64>(2)? as f32, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
+            Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: conf_of(r, 2)?, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
         })?;
         for row in rows {
             let (page, line) = row?;
@@ -1158,7 +1166,7 @@ impl Store {
     pub fn page_info(&self, file_id: i64) -> Result<Vec<PageInfo>> {
         let mut st = self.conn.prepare_cached("SELECT page, class, chars, image_coverage, ocr_tiles, ocr_skipped, ocr_ms, note, w_pt, h_pt FROM pages WHERE file_id=?1 ORDER BY page")?;
         let rows = st.query_map([file_id], |r| {
-            Ok(PageInfo { page: r.get(0)?, class: r.get(1)?, chars: r.get(2)?, image_coverage: r.get::<_, f64>(3)? as f32, ocr_tiles: r.get(4)?, ocr_tiles_skipped: r.get(5)?, ocr_millis: r.get::<_, i64>(6)? as u64, note: r.get(7)?, width_pt: r.get::<_, f64>(8)? as f32, height_pt: r.get::<_, f64>(9)? as f32 })
+            Ok(PageInfo { page: r.get(0)?, class: r.get(1)?, chars: r.get(2)?, image_coverage: conf_of(r, 3)?, ocr_tiles: r.get(4)?, ocr_tiles_skipped: r.get(5)?, ocr_millis: r.get::<_, i64>(6)? as u64, note: r.get(7)?, width_pt: conf_of(r, 8)?, height_pt: conf_of(r, 9)? })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -1306,7 +1314,7 @@ impl Store {
             let mut args: Vec<rusqlite::types::Value> = vec![q.into(), (cap as i64).into()];
             args.extend(sp.iter().cloned().map(Into::into));
             let rows = st.query_map(params_from_iter(args), |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, u32>(2)?, r.get::<_, String>(3)?, r.get::<_, f64>(4)? as f32, r.get::<_, i64>(5)?, bbox_of(r, 6)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, u32>(2)?, r.get::<_, String>(3)?, conf_of(r, 4)?, r.get::<_, i64>(5)?, bbox_of(r, 6)?))
             })?;
             let mut fetched = 0usize;
             for row in rows {
@@ -1573,7 +1581,7 @@ impl Store {
         let mut st = self.conn.prepare_cached(&sql)?;
         let mut args: Vec<rusqlite::types::Value> = vec![category.to_lowercase().into(), format!("%{}%", like_escape(&term.sep.to_uppercase())).into()];
         args.extend(sp.into_iter().map(Into::into));
-        let rows = st.query_map(params_from_iter(args), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)? as f32, r.get::<_, i64>(4)?, bbox_of(r, 5)?)))?;
+        let rows = st.query_map(params_from_iter(args), |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?, r.get::<_, String>(2)?, conf_of(r, 3)?, r.get::<_, i64>(4)?, bbox_of(r, 5)?)))?;
         let mut out = Vec::new();
         for row in rows {
             let (file_id, page, text, conf, source, bbox) = row?;
@@ -1598,7 +1606,7 @@ impl Store {
     /// Lines on one page of a file that match any term (for preview boxes).
     pub fn page_boxes(&self, file_id: i64, page: u32, terms: &[Term]) -> Result<Vec<NormBox>> {
         let mut st = self.conn.prepare_cached("SELECT text, conf, x, y, w, h FROM lines WHERE file_id=?1 AND page=?2")?;
-        let rows = st.query_map(params![file_id, page], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)? as f32, bbox_of(r, 2)?)))?;
+        let rows = st.query_map(params![file_id, page], |r| Ok((r.get::<_, String>(0)?, conf_of(r, 1)?, bbox_of(r, 2)?)))?;
         let mut out = Vec::new();
         for row in rows {
             let (text, conf, b) = row?;
@@ -1825,7 +1833,7 @@ const NO_TITLE_BLOCK_SQL: &str = "lower(f.name) LIKE '%.msg' OR lower(f.name) LI
 fn stored_lines(conn: &Connection, file_id: i64, page: Option<u32>) -> Result<Vec<(u32, Line)>> {
     let mut st = conn.prepare_cached("SELECT page, text, conf, source, alt, x, y, w, h FROM lines WHERE file_id=?1 AND (?2 IS NULL OR page=?2) ORDER BY page, id")?;
     let rows = st.query_map(params![file_id, page], |r| {
-        Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: r.get::<_, f64>(2)? as f32, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
+        Ok((r.get::<_, u32>(0)?, Line { text: r.get(1)?, conf: conf_of(r, 2)?, source: source_of(r.get(3)?), alt: r.get::<_, i64>(4)? != 0, bbox: bbox_of(r, 5)? }))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }

@@ -425,6 +425,12 @@ impl Tree {
         (self.listed, self.files)
     }
 
+    /// Bytes held, near enough (for the log line on where memory goes).
+    fn mem_bytes(&self) -> u64 {
+        let blobs: usize = self.dirs.iter().filter_map(|d| d.files.as_ref()).map(|f| f.len() + 16).sum();
+        (blobs + self.dirs.capacity() * std::mem::size_of::<Dir>() + self.names.capacity() + self.index.capacity() * 13) as u64
+    }
+
     fn name(&self, d: u32) -> &str {
         let x = &self.dirs[d as usize];
         &self.names[x.name_off as usize..x.name_off as usize + x.name_len as usize]
@@ -1234,6 +1240,11 @@ impl Catalog {
         if !gone.is_empty() {
             self.bump();
         }
+    }
+
+    /// Bytes the file lists hold in memory, near enough.
+    pub fn mem_bytes(&self) -> u64 {
+        self.r().iter().map(Tree::mem_bytes).sum()
     }
 
     pub fn roots(&self) -> Vec<String> {

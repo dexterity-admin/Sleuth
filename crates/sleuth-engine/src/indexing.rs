@@ -186,7 +186,7 @@ impl Engine {
                 // Where the worker's memory goes, as far as it can tell.
                 let (rows, row_bytes) = self.pool.row_stats();
                 let sqlite = unsafe { rusqlite::ffi::sqlite3_memory_used() }.max(0) as u64;
-                info!("memory: SQLite {} MB; {} reading rows, {} MB; {} parts; {} files in the lists", sqlite >> 20, rows, row_bytes >> 20, self.pool.stats().parts, self.catalog.file_count());
+                info!("memory: SQLite {} MB; {} reading rows, {} MB; {} parts; {} files in the lists, {} MB", sqlite >> 20, rows, row_bytes >> 20, self.pool.stats().parts, self.catalog.file_count(), self.catalog.mem_bytes() >> 20);
             }
             let copying = self.pool.mirror_stats().pending_parts > 0;
             if last_sweep.is_none_or(|t| t.elapsed() > Duration::from_secs(3600))

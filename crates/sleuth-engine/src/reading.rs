@@ -823,7 +823,7 @@ impl Engine {
         if sleuth_lanes::on_battery() && !self.server_mode {
             return;
         }
-        let sources = pool::merge_candidates(&self.pool.parts_in(&dir));
+        let sources = pool::merge_candidates(&self.pool.parts_in(&dir), self.server_mode);
         if sources.len() < 2 || MERGING.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -835,14 +835,16 @@ impl Engine {
         let spawned = std::thread::Builder::new().name("sleuth-merge".into()).spawn(move || {
             crate::sys::enter_background_mode();
             let lease = std::sync::Mutex::new((lease, Instant::now()));
-            let pace = std::sync::Mutex::new(Instant::now());
+            let turn = std::cell::RefCell::new(None::<crate::sys::HalfTime>);
             let keep_going = || {
-                // On a desktop a merge works half the time: it is one thread
-                // of plain processor work that can run for minutes.
+                // On a desktop a merge works half the time, in turn with the
+                // other background jobs: it is one thread of plain processor
+                // work that can run for an hour. (Letting go of the turn
+                // rests for as long as it was held.)
                 if !e.server_mode {
-                    let mut last = pace.lock().unwrap();
-                    std::thread::sleep(last.elapsed().min(Duration::from_secs(2)));
-                    *last = Instant::now();
+                    let mut t = turn.borrow_mut();
+                    t.take();
+                    *t = Some(crate::sys::HalfTime::start());
                 }
                 let mut g = lease.lock().unwrap();
                 if g.1.elapsed() > Duration::from_secs(60) {

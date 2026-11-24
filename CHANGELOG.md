@@ -4,6 +4,20 @@
 
 Not released yet.
 
+- **Fewer, larger parts:** a search pays for every part of the office index,
+  and no merge took in more than 512 MB, so the number of parts grew with the
+  index (163 parts for 73 GB on 24 November 2026). Middle-sized parts are now
+  merged into parts of up to 4 GB, about twenty for that index; the office
+  server goes on to 16 GB. A part merged into another stays searched until
+  the new one has reached this PC, and its copy here is deleted after that
+  (395 such copies held 17 GB).
+- **Merges no longer fail on a line without a confidence:** a line whose
+  confidence was stored empty made every merge holding it fail ("Invalid
+  column type Null ... name: conf"); it is read as confidence 0.
+- **Less memory:** what each part covers is kept packed (the 1.26 million
+  readings of the office index took 295 MB of the worker's memory).
+- **Common words cost less:** the first pass stops asking further parts once
+  it has twice the lines one word may show; the full pass covers the rest.
 - **Text inside documents answers in seconds again:** every PC keeps a copy
   of the office index on its own disk and searches that, instead of reading
   hundreds of files over the network for every word. On the office index of
