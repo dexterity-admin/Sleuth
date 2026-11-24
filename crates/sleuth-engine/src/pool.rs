@@ -933,8 +933,10 @@ impl Pool {
     /// Work out the current reading of every path and hide the others.
     pub fn recover(&self, presence: &dyn Fn(&str) -> Presence) {
         let parts = self.parts();
+        let started = std::time::Instant::now();
         let mut cover: HashMap<u64, Covered> = HashMap::new();
         for p in &parts {
+            crate::sys::rest_while_searching();
             // A published part's rows never change; `work` is asked each time.
             let work_rows = if p.work { p.with(|s| s.reading_rows()).unwrap_or_default() } else { Vec::new() };
             let mut note = |r: &ReadingRow| {
@@ -971,6 +973,7 @@ impl Pool {
             if p.work {
                 continue;
             }
+            crate::sys::rest_while_searching();
             let mut hidden: Vec<i64> = Vec::new();
             p.rows.each(&mut |r: &ReadingRow| {
                 let key = path_key(&r.path);
@@ -1003,6 +1006,9 @@ impl Pool {
         }
         *self.cover.write().unwrap() = cover;
         self.generation.fetch_add(1, Ordering::SeqCst);
+        if started.elapsed().as_secs() >= 3 {
+            info!("which readings are current took {} ms for {} parts", started.elapsed().as_millis(), parts.len());
+        }
     }
 
     /// Record a reading just saved to `work` without recomputing everything.

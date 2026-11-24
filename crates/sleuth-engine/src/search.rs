@@ -128,7 +128,7 @@ impl<'a> Limits<'a> {
         let rows = if self.threads != 1 {
             f()
         } else {
-            let _pace = crate::sys::HalfTime::start();
+            let _pace = crate::sys::HalfTime::alone();
             sleuth_office::with_scan_threads(1, f)
         };
         if let Some(memo) = self.memo {
@@ -433,7 +433,7 @@ fn term_matches(pool: &Pool, catalog: &Catalog, t: &Term, scope: &Scope, categor
             let limit = lim.part_limit(part.bytes, total, part.work);
             // One thread, busy half the time: under a sixteenth of an
             // 8-core processor, however common the word.
-            let _pace = (lim.threads == 1).then(crate::sys::HalfTime::start);
+            let _pace = (lim.threads == 1).then(crate::sys::HalfTime::alone);
             let cands = match category {
                 Some(cat) => {
                     let c = s.search_tags(t, cat, scope, limit)?;

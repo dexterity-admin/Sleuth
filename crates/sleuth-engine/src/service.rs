@@ -1233,7 +1233,10 @@ impl Engine {
             Some(m) => lim.with_memo(m),
             None => lim,
         };
+        // The other background jobs stand back while somebody waits for this.
+        let turn = (!self.server_mode).then(crate::sys::SearchTurn::start);
         let hits = Arc::new(search_index_with(&self.pool, &self.catalog, &q, &roots, RESULT_CAP, &drives, &lim)?);
+        drop(turn);
         if cancel.is_some_and(|c| c.load(Ordering::SeqCst)) {
             return Ok(hits);
         }

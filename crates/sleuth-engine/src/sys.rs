@@ -182,10 +182,53 @@ pub struct HalfTime(std::time::Instant, Option<std::sync::MutexGuard<'static, ()
 
 static BACKGROUND: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Full passes of searches under way: the one background job somebody is
+/// waiting for.
+static SEARCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held by the full pass of a search. The other background jobs do not
+/// start a turn while one is held, and the long ones stop between two
+/// pieces of their work ([`rest_while_searching`]).
+///
+/// The full pass used to take a turn per part like every other job. A job
+/// that keeps one turn for long (working out which readings are current,
+/// counting what waits) then stood between every two parts of it, and a
+/// pass of 4 s took 25 to 75 s (24 Nov 2026).
+pub struct SearchTurn(());
+
+impl SearchTurn {
+    pub fn start() -> SearchTurn {
+        SEARCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SearchTurn(())
+    }
+}
+
+impl Drop for SearchTurn {
+    fn drop(&mut self) {
+        SEARCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Wait while the full pass of a search runs (half a minute at most: a
+/// search must not stop the upkeep for good). Not for the search's own thread.
+pub fn rest_while_searching() {
+    let since = std::time::Instant::now();
+    while SEARCHES.load(std::sync::atomic::Ordering::SeqCst) > 0 && since.elapsed() < std::time::Duration::from_secs(30) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 impl HalfTime {
     pub fn start() -> HalfTime {
+        rest_while_searching();
         let turn = BACKGROUND.lock().unwrap_or_else(|p| p.into_inner());
         HalfTime(std::time::Instant::now(), Some(turn))
+    }
+
+    /// Half the time without waiting for a turn: the full pass of a search,
+    /// which holds a [`SearchTurn`] instead.
+    pub fn alone() -> HalfTime {
+        HalfTime(std::time::Instant::now(), None)
     }
 }
 
@@ -193,7 +236,9 @@ impl Drop for HalfTime {
     fn drop(&mut self) {
         let worked = self.0.elapsed();
         // The next job may start while this one rests.
-        self.1.take();
+        if self.1.take().is_some() && worked > std::time::Duration::from_secs(5) {
+            tracing::info!("background: {} kept its turn for {} ms", std::thread::current().name().unwrap_or("a job"), worked.as_millis());
+        }
         std::thread::sleep(worked.min(std::time::Duration::from_secs(2)));
     }
 }
